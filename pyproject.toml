@@ -16,6 +16,11 @@ dependencies = [
     "pertpy>=1.0.6",
     "scanpy>=1.12.1",
     "torch>=2.11.0",
+    "jupyterlab>=4.5.7",
+    "scvi-tools>=1.4.3",
+    "jax[cuda12]>=0.10.0",
+    "cpa-tools>=0.0.0",
+    "rdkit>=2026.3.2",
 ]
 
 [dependency-groups]
