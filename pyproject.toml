@@ -22,6 +22,7 @@ dependencies = [
     "jax[cuda12]>=0.10.0; sys_platform == 'linux'",
     "cpa-tools>=0.0.0",
     "rdkit>=2026.3.2",
+    "tueplots>=0.2.4",
 ]
 
 [dependency-groups]

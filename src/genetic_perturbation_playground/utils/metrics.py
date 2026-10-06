@@ -1,9 +1,9 @@
 import numpy as np
 
 
-def mse(pred: np.ndarray, true: np.ndarray) -> float:
-    """Mean squared error over all perturbations and genes."""
-    return float(np.mean((pred - true) ** 2))
+def mse(pred: np.ndarray, true: np.ndarray) -> np.ndarray:
+    """Mean squared error across genes, one value per perturbation (row)."""
+    return np.mean((pred - true) ** 2, axis=1)
 
 
 def pearson_per_row(pred: np.ndarray, true: np.ndarray) -> np.ndarray:
