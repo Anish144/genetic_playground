@@ -18,7 +18,8 @@ dependencies = [
     "torch>=2.11.0",
     "jupyterlab>=4.5.7",
     "scvi-tools>=1.4.3",
-    "jax[cuda12]>=0.10.0",
+    "jax>=0.10.0",
+    "jax[cuda12]>=0.10.0; sys_platform == 'linux'",
     "cpa-tools>=0.0.0",
     "rdkit>=2026.3.2",
 ]
