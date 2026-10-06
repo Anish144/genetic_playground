@@ -48,7 +48,7 @@ def main(cfg: DictConfig):
     for name, series in results.items():
         for label, values in series.items():
             print(f"{name:>12} | {label:<20}: {np.nanmean(values):.4f}")
-        plot_metric(series, name, plot_dir / f"{name}.png")
+        plot_metric(series, name, plot_dir / f"{name}.png", log=name == "mse")
     print(f"Plots saved to {plot_dir}")
 
 
