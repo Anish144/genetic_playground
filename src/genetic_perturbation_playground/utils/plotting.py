@@ -48,8 +48,10 @@ def plot_metric(
             ticklabels.append(f"{label}\nmean {v.mean():.3g}")
 
         if log:
-            ax.yaxis.set_major_locator(MultipleLocator(1))  # one tick per decade
-            ax.yaxis.set_major_formatter(FuncFormatter(lambda t, _: f"$10^{{{t:g}}}$"))
+            lo, hi = ax.get_ylim()
+            if hi - lo >= 1:  # one tick per decade; narrower ranges keep the default ticks
+                ax.yaxis.set_major_locator(MultipleLocator(1))
+            ax.yaxis.set_major_formatter(FuncFormatter(lambda t, _: f"{10**t:.2g}"))
         ax.set(xticks=range(len(values)), xticklabels=ticklabels, ylabel=name)
         ax.set_xlim(-0.6, len(values) - 0.4)
         ax.set_title(f"{name} per {unit} (n = {n})")
