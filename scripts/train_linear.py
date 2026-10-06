@@ -22,8 +22,10 @@ from genetic_perturbation_playground.utils import metrics
 from genetic_perturbation_playground.utils.plotting import plot_metric
 
 
-def evaluate(adata: sc.AnnData, alpha: float, test_frac: float, seed: int, k: int) -> dict:
-    """Per-perturbation metrics: {metric: {series: array of shape (n_perts,)}}."""
+def evaluate(
+    adata: sc.AnnData, alpha: float, test_frac: float, seed: int, k: int
+) -> tuple[dict, np.ndarray]:
+    """Per-perturbation metrics {metric: {series: (n_perts,)}} and cells per perturbation."""
     is_test = np.random.default_rng(seed).random(adata.n_obs) < test_frac
     model = LinearPerturbationModel(alpha=alpha).fit(adata[~is_test])
     truth = LinearPerturbationModel(alpha=0.0).fit(adata[is_test])
@@ -31,24 +33,26 @@ def evaluate(adata: sc.AnnData, alpha: float, test_frac: float, seed: int, k: in
     perts = np.intersect1d(model.perturbations_, truth.perturbations_)
     pred, true = model.predict(perts), truth.predict(perts)
     zero = np.zeros_like(true)  # "no effect" baseline for reference
+    cells = adata.obs["perturbation"].astype(str).value_counts().reindex(perts).to_numpy()
 
-    return {
+    results = {
         "mse": {"linear": metrics.mse(pred, true), "no-effect baseline": metrics.mse(zero, true)},
         "pearson": {"linear": metrics.pearson_per_row(pred, true)},
         f"pearson_top{k}": {"linear": metrics.pearson_top_k(pred, true, k)},
     }
+    return results, cells
 
 
 @hydra.main(config_path="../configs", config_name="train_linear", version_base=None)
 def main(cfg: DictConfig):
     adata = load_dataset(cfg.dataset)
-    results = evaluate(adata, cfg.alpha, cfg.test_frac, cfg.seed, cfg.top_k)
+    results, cells = evaluate(adata, cfg.alpha, cfg.test_frac, cfg.seed, cfg.top_k)
 
     plot_dir = Path(HydraConfig.get().runtime.output_dir) / "plots"
     for name, series in results.items():
         for label, values in series.items():
             print(f"{name:>12} | {label:<20}: {np.nanmean(values):.4f}")
-        plot_metric(series, name, plot_dir / f"{name}.png", log=name == "mse")
+        plot_metric(series, name, plot_dir / f"{name}.png", cells, log=name == "mse")
     print(f"Plots saved to {plot_dir}")
 
 
