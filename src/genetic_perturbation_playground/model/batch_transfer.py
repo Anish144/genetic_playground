@@ -39,11 +39,14 @@ def summary_stats(adata: sc.AnnData) -> dict:
     Y = adata.X[~is_ctrl]
 
     n = np.asarray(P.sum(axis=1)).ravel()
+    pert_batch_n = _dense(P @ B.T)  # (perts, batches) cell counts
     return {
         "perturbations": perts,
         "n": n,
         "y_mean": _dense(P @ Y) / n[:, None],
-        "w_mean": _dense(P @ B.T) @ W / n[:, None],
+        "w_mean": pert_batch_n @ W / n[:, None],
+        "batches": batches,
+        "pert_batch_n": pert_batch_n,
         "W": W,
         "batch_n": np.asarray(B.sum(axis=1)).ravel(),
         "batch_y_sum": _dense(B @ Y),
