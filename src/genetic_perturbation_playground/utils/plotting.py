@@ -2,6 +2,7 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 from matplotlib.colors import LinearSegmentedColormap, LogNorm
 from matplotlib.ticker import FuncFormatter, MultipleLocator
 from tueplots import bundles
@@ -64,15 +65,16 @@ def plot_metric(
         plt.close(fig)
 
 
-def report(
-    results: dict[str, dict[str, np.ndarray]],
-    cells: np.ndarray,
-    out_dir: Path,
-    unit: str = "perturbation",
-) -> None:
-    """Print the mean of each metric (scored per `unit`) and save one plot per metric to out_dir."""
-    for name, series in results.items():
-        for label, values in series.items():
-            print(f"{unit:>12} | {name:>12} | {label:<20}: {np.nanmean(values):.4f}")
+def report(scores: pd.DataFrame, unit: str, out_dir: Path) -> None:
+    """Print each model's mean score and save one plot per metric to out_dir.
+
+    `scores` is a long table with columns [unit, metric, model, value, cells].
+    """
+    for name, m in scores.groupby("metric", sort=False):
+        wide = m.pivot(index=unit, columns="model", values="value")[m["model"].unique()]
+        cells = m.groupby(unit)["cells"].first().reindex(wide.index).to_numpy()
+        for label in wide:
+            print(f"{unit:>12} | {name:>13} | {label:<18}: {wide[label].mean():.4f}")
+        series = {label: wide[label].to_numpy() for label in wide}
         plot_metric(series, name, out_dir / f"{name}.png", cells, log=name == "mse", unit=unit)
     print(f"Plots saved to {out_dir}")

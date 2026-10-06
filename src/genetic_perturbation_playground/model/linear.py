@@ -5,15 +5,12 @@ from .batch_transfer import _dense, _onehot
 
 
 class LinearPerturbationModel:
-    """Cell-level ridge regression: y_cell = b + onehot(perturbation) @ beta.
+    """Cell-level linear regression: y_cell = b + onehot(perturbation) @ beta.
 
     The intercept b is the control mean, so each row of beta is the average effect of a
-    perturbation relative to control. With a one-hot design the ridge solution is closed-form:
-    beta_p = sum_{cells in p}(y - b) / (n_p + alpha), i.e. the mean shift shrunk towards 0.
+    perturbation relative to control. With a one-hot design the least-squares solution is
+    closed-form: beta_p = mean(y over cells of p) - b, the mean shift from control.
     """
-
-    def __init__(self, alpha: float = 0.0):
-        self.alpha = alpha
 
     def fit(self, adata: sc.AnnData) -> "LinearPerturbationModel":
         labels = adata.obs["perturbation"].astype(str).to_numpy()
@@ -24,7 +21,7 @@ class LinearPerturbationModel:
         onehot = _onehot(idx, len(self.perturbations_))  # perts x cells
         counts = np.asarray(onehot.sum(axis=1)).ravel()
         sums = _dense(onehot @ adata.X[~is_ctrl])
-        self.coef_ = (sums - np.outer(counts, self.intercept_)) / (counts + self.alpha)[:, None]
+        self.coef_ = sums / counts[:, None] - self.intercept_
         return self
 
     def predict(self, perturbations: list[str]) -> np.ndarray:

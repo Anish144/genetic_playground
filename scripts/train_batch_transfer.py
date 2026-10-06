@@ -43,87 +43,58 @@ def fit(train: sc.AnnData) -> dict:
     return models
 
 
-def score(models: dict, test: sc.AnnData, k: int) -> tuple[dict, np.ndarray, np.ndarray]:
-    """Per-perturbation metrics {metric: {model: (n_perts,)}} on `test`, cells per perturbation,
-    and the perturbation names.
+def score(models: dict, test: sc.AnnData, k: int) -> pd.DataFrame:
+    """Per-perturbation scores on `test` (long table, see metrics.score) plus cells per perturbation.
 
     Truth is each perturbation's mean minus its batch-matched control mean in `test`.
     """
     s = summary_stats(test)
     keep = np.isin(s["perturbations"], next(iter(models.values())).perturbations_)
     perts, w = s["perturbations"][keep], s["w_mean"][keep]
-    true = s["y_mean"][keep] - w
     preds = {name: m.predict(perts, w) - w for name, m in models.items()}
-    results = {
-        "mse": {
-            **{n: metrics.mse(p, true) for n, p in preds.items()},
-            "no effect": metrics.mse(np.zeros_like(true), true),
-        },
-        "pearson": {n: metrics.pearson_per_row(p, true) for n, p in preds.items()},
-        f"pearson_top{k}": {n: metrics.pearson_top_k(p, true, k) for n, p in preds.items()},
-    }
-    return results, s["n"][keep], perts
-
-
-def score_per_batch(models: dict, test: sc.AnnData, k: int) -> tuple[dict, np.ndarray]:
-    """One score per held-out batch (mean over its perturbations), and cells per batch."""
-    batch = test.obs["batch"].astype(str).to_numpy()
-    batches = np.unique(batch)
-    per_batch = [score(models, test[batch == b], k)[0] for b in batches]
-    results = {
-        metric: {
-            model: np.array([np.nanmean(r[metric][model]) for r in per_batch]) for model in series
-        }
-        for metric, series in per_batch[0].items()
-    }
-    return results, np.array([(batch == b).sum() for b in batches])
+    scores = metrics.score(preds, s["y_mean"][keep] - w, perts, k)
+    return scores.assign(
+        cells=scores["perturbation"].map(dict(zip(perts, s["n"][keep], strict=True)))
+    )
 
 
 def cross_validate(adata: sc.AnnData, n_folds: int, seed: int, k: int) -> tuple:
     """K-fold over batches: each batch is held out exactly once, models refit per fold.
 
-    Returns (per-perturbation results, cells per perturbation, per-batch results, cells per batch).
-    Per-perturbation scores are averaged over folds (cells summed); per-batch scores are stacked.
+    Returns (per-perturbation scores, per-batch scores) as long tables. Per-perturbation scores are
+    averaged over folds (cells summed); per-batch scores average over the batch's perturbations.
     """
     batch = adata.obs["batch"].astype(str).to_numpy()
     folds = np.array_split(np.random.default_rng(seed).permutation(np.unique(batch)), n_folds)
 
-    pert_frames, batch_scores = [], []
+    pert_scores, batch_scores = [], []
     for i, held_out in enumerate(folds):
         print(f"fold {i + 1}/{n_folds}: holding out {len(held_out)} batches")
         is_test = np.isin(batch, held_out)
         models, test = fit(adata[~is_test]), adata[is_test]
-        results, cells, perts = score(models, test, k)
-        pert_frames.append(
-            pd.DataFrame(
-                {(m, s): v for m, ser in results.items() for s, v in ser.items()}, index=perts
-            ).assign(cells=cells)
-        )
-        batch_scores.append(score_per_batch(models, test, k))
+        pert_scores.append(score(models, test, k))
+        batch_scores += [
+            score(models, test[batch[is_test] == b], k).assign(batch=b, cells=(batch == b).sum())
+            for b in held_out
+        ]
 
-    by_pert = pd.concat(pert_frames).groupby(level=0)
-    pert_df = by_pert.mean().drop(columns="cells")
-    pert_results = {
-        m: {s: pert_df[(m, s)].to_numpy() for s in series} for m, series in results.items()
-    }
-    batch_results = {
-        m: {s: np.concatenate([r[m][s] for r, _ in batch_scores]) for s in series}
-        for m, series in results.items()
-    }
-    batch_cells = np.concatenate([c for _, c in batch_scores])
-    return pert_results, by_pert["cells"].sum().to_numpy(), batch_results, batch_cells
+    keys = ["metric", "model"]
+    per_pert = pd.concat(pert_scores).groupby(["perturbation", *keys], sort=False)
+    per_batch = pd.concat(batch_scores).groupby(["batch", *keys], sort=False)
+    return (
+        per_pert.agg(value=("value", "mean"), cells=("cells", "sum")).reset_index(),
+        per_batch.agg(value=("value", "mean"), cells=("cells", "first")).reset_index(),
+    )
 
 
 @hydra.main(config_path="../configs", config_name="train_batch_transfer", version_base=None)
 def main(cfg: DictConfig):
     adata = load_dataset()
-    pert_results, pert_cells, batch_results, batch_cells = cross_validate(
-        adata, cfg.n_folds, cfg.seed, cfg.top_k
-    )
+    per_pert, per_batch = cross_validate(adata, cfg.n_folds, cfg.seed, cfg.top_k)
 
     plot_dir = Path(HydraConfig.get().runtime.output_dir) / "plots"
-    report(pert_results, pert_cells, plot_dir / "per_perturbation")
-    report(batch_results, batch_cells, plot_dir / "per_batch", unit="batch")
+    report(per_pert, "perturbation", plot_dir / "per_perturbation")
+    report(per_batch, "batch", plot_dir / "per_batch")
 
 
 if __name__ == "__main__":

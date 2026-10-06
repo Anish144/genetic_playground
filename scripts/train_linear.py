@@ -1,9 +1,9 @@
 """Train the linear perturbation model on Replogle K562 and report held-out metrics.
 
 Cells are split at random into train/test. The model is fit on train; the "true" effects are
-the plain (alpha=0) mean shifts on the test cells. Config: configs/train_linear.yaml. Usage:
+the same mean shifts computed on the test cells. Config: configs/train_linear.yaml. Usage:
 
-    uv run python scripts/train_linear.py alpha=10
+    uv run python scripts/train_linear.py test_frac=0.1
 
 Plots (one per metric) are written to the Hydra run dir: outputs/<date>/<time>/plots/.
 """
@@ -12,6 +12,7 @@ from pathlib import Path
 
 import hydra
 import numpy as np
+import pandas as pd
 import scanpy as sc
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig
@@ -22,33 +23,23 @@ from genetic_perturbation_playground.utils import metrics
 from genetic_perturbation_playground.utils.plotting import report
 
 
-def evaluate(
-    adata: sc.AnnData, alpha: float, test_frac: float, seed: int, k: int
-) -> tuple[dict, np.ndarray]:
-    """Per-perturbation metrics {metric: {series: (n_perts,)}} and cells per perturbation."""
+def evaluate(adata: sc.AnnData, test_frac: float, seed: int, k: int) -> pd.DataFrame:
+    """Per-perturbation scores (long table, see metrics.score) plus cells per perturbation."""
     is_test = np.random.default_rng(seed).random(adata.n_obs) < test_frac
-    model = LinearPerturbationModel(alpha=alpha).fit(adata[~is_test])
-    truth = LinearPerturbationModel(alpha=0.0).fit(adata[is_test])
+    model = LinearPerturbationModel().fit(adata[~is_test])
+    truth = LinearPerturbationModel().fit(adata[is_test])
 
     perts = np.intersect1d(model.perturbations_, truth.perturbations_)
-    pred, true = model.predict(perts), truth.predict(perts)
-    zero = np.zeros_like(true)  # "no effect" baseline for reference
-    cells = adata.obs["perturbation"].astype(str).value_counts().reindex(perts).to_numpy()
-
-    results = {
-        "mse": {"linear": metrics.mse(pred, true), "no-effect baseline": metrics.mse(zero, true)},
-        "pearson": {"linear": metrics.pearson_per_row(pred, true)},
-        f"pearson_top{k}": {"linear": metrics.pearson_top_k(pred, true, k)},
-    }
-    return results, cells
+    scores = metrics.score({"linear": model.predict(perts)}, truth.predict(perts), perts, k)
+    cells = adata.obs["perturbation"].astype(str).value_counts()
+    return scores.assign(cells=scores["perturbation"].map(cells))
 
 
 @hydra.main(config_path="../configs", config_name="train_linear", version_base=None)
 def main(cfg: DictConfig):
     adata = load_dataset()
-    results, cells = evaluate(adata, cfg.alpha, cfg.test_frac, cfg.seed, cfg.top_k)
-
-    report(results, cells, Path(HydraConfig.get().runtime.output_dir) / "plots")
+    scores = evaluate(adata, cfg.test_frac, cfg.seed, cfg.top_k)
+    report(scores, "perturbation", Path(HydraConfig.get().runtime.output_dir) / "plots")
 
 
 if __name__ == "__main__":
