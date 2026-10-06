@@ -1,6 +1,7 @@
 import numpy as np
 import scanpy as sc
-from scipy import sparse
+
+from .batch_transfer import _dense, _onehot
 
 
 class LinearPerturbationModel:
@@ -20,10 +21,9 @@ class LinearPerturbationModel:
         self.intercept_ = np.asarray(adata.X[is_ctrl].mean(axis=0)).ravel()
 
         self.perturbations_, idx = np.unique(labels[~is_ctrl], return_inverse=True)
-        onehot = sparse.csr_matrix((np.ones(len(idx)), (idx, np.arange(len(idx)))))  # perts x cells
+        onehot = _onehot(idx, len(self.perturbations_))  # perts x cells
         counts = np.asarray(onehot.sum(axis=1)).ravel()
-        sums = onehot @ adata.X[~is_ctrl]
-        sums = sums.toarray() if sparse.issparse(sums) else np.asarray(sums)
+        sums = _dense(onehot @ adata.X[~is_ctrl])
         self.coef_ = (sums - np.outer(counts, self.intercept_)) / (counts + self.alpha)[:, None]
         return self
 

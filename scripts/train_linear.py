@@ -19,7 +19,7 @@ from omegaconf import DictConfig
 from genetic_perturbation_playground.data.data_loader import load_dataset
 from genetic_perturbation_playground.model.linear import LinearPerturbationModel
 from genetic_perturbation_playground.utils import metrics
-from genetic_perturbation_playground.utils.plotting import plot_metric
+from genetic_perturbation_playground.utils.plotting import report
 
 
 def evaluate(
@@ -48,12 +48,7 @@ def main(cfg: DictConfig):
     adata = load_dataset()
     results, cells = evaluate(adata, cfg.alpha, cfg.test_frac, cfg.seed, cfg.top_k)
 
-    plot_dir = Path(HydraConfig.get().runtime.output_dir) / "plots"
-    for name, series in results.items():
-        for label, values in series.items():
-            print(f"{name:>12} | {label:<20}: {np.nanmean(values):.4f}")
-        plot_metric(series, name, plot_dir / f"{name}.png", cells, log=name == "mse")
-    print(f"Plots saved to {plot_dir}")
+    report(results, cells, Path(HydraConfig.get().runtime.output_dir) / "plots")
 
 
 if __name__ == "__main__":
