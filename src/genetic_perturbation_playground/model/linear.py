@@ -11,16 +11,12 @@ class LinearPerturbationModel:
     beta_p = sum_{cells in p}(y - b) / (n_p + alpha), i.e. the mean shift shrunk towards 0.
     """
 
-    def __init__(
-        self, alpha: float = 0.0, condition_key: str = "perturbation", ctrl_label: str = "control"
-    ):
+    def __init__(self, alpha: float = 0.0):
         self.alpha = alpha
-        self.ck = condition_key
-        self.ctrl = ctrl_label
 
     def fit(self, adata: sc.AnnData) -> "LinearPerturbationModel":
-        labels = adata.obs[self.ck].astype(str).to_numpy()
-        is_ctrl = labels == self.ctrl
+        labels = adata.obs["perturbation"].astype(str).to_numpy()
+        is_ctrl = labels == "control"
         self.intercept_ = np.asarray(adata.X[is_ctrl].mean(axis=0)).ravel()
 
         self.perturbations_, idx = np.unique(labels[~is_ctrl], return_inverse=True)
@@ -29,9 +25,8 @@ class LinearPerturbationModel:
         sums = onehot @ adata.X[~is_ctrl]
         sums = sums.toarray() if sparse.issparse(sums) else np.asarray(sums)
         self.coef_ = (sums - np.outer(counts, self.intercept_)) / (counts + self.alpha)[:, None]
-        self._row = {p: i for i, p in enumerate(self.perturbations_)}
         return self
 
     def predict(self, perturbations: list[str]) -> np.ndarray:
         """Average effect (vs control) for each perturbation, shape (n_perts, n_genes)."""
-        return self.coef_[[self._row[p] for p in perturbations]]
+        return self.coef_[np.searchsorted(self.perturbations_, perturbations)]

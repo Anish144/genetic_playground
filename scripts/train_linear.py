@@ -45,7 +45,7 @@ def evaluate(
 
 @hydra.main(config_path="../configs", config_name="train_linear", version_base=None)
 def main(cfg: DictConfig):
-    adata = load_dataset(cfg.dataset)
+    adata = load_dataset()
     results, cells = evaluate(adata, cfg.alpha, cfg.test_frac, cfg.seed, cfg.top_k)
 
     plot_dir = Path(HydraConfig.get().runtime.output_dir) / "plots"

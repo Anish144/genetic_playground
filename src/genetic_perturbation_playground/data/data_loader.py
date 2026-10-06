@@ -4,18 +4,7 @@ import scanpy as sc
 
 from .perturbation_datasets import replogle_load_and_preprocess
 
-_DATASETS: dict[str, tuple[callable, str]] = {
-    "replogle_k562": (replogle_load_and_preprocess, "replogle_k562_preprocessed.h5ad"),
-}
-
-
-def _data_dir() -> Path:
-    _pkg_root = Path(__file__).parents[3]  # src/genetic_perturbation_playground/data/ -> project root
-    candidates = [Path("data"), Path("../data"), _pkg_root / "data"]
-    data_dir = next((p for p in candidates if p.is_dir()), None)
-    if data_dir is None:
-        raise FileNotFoundError(f"Cannot locate data/ directory from CWD: {Path.cwd()}")
-    return data_dir
+CACHE_PATH = Path(__file__).parents[3] / "data" / "replogle_k562_preprocessed.h5ad"
 
 
 def _try_load(path: Path) -> sc.AnnData | None:
@@ -29,20 +18,16 @@ def _try_load(path: Path) -> sc.AnnData | None:
         return None
 
 
-def load_dataset(name: str = "replogle_k562", **preprocess_kwargs) -> sc.AnnData:
-    if name not in _DATASETS:
-        raise ValueError(f"Unknown dataset {name!r}. Available: {list(_DATASETS)}")
-
-    preprocess_fn, cache_filename = _DATASETS[name]
-    cache_path = _data_dir() / cache_filename
-
-    adata = _try_load(cache_path) if cache_path.exists() else None
+def load_dataset() -> sc.AnnData:
+    """Replogle 2022 K562 essential screen, preprocessed once and cached under data/."""
+    adata = _try_load(CACHE_PATH) if CACHE_PATH.exists() else None
     if adata is None:
-        adata = preprocess_fn(**preprocess_kwargs)
-        adata.write_h5ad(cache_path, compression="gzip")
-        print(f"Saved to {cache_path}")
+        adata = replogle_load_and_preprocess()
+        CACHE_PATH.parent.mkdir(exist_ok=True)
+        adata.write_h5ad(CACHE_PATH, compression="gzip")
+        print(f"Saved to {CACHE_PATH}")
     else:
-        print(f"Loaded from {cache_path}")
+        print(f"Loaded from {CACHE_PATH}")
 
     print(f"  {adata.n_obs:,} cells  ×  {adata.n_vars:,} genes  |  {adata.obs['perturbation'].nunique():,} perturbations")
     return adata

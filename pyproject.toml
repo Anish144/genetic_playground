@@ -7,21 +7,10 @@ requires-python = ">=3.12"
 dependencies = [
     "numpy",
     "hydra-core",        # config system
-    "omegaconf",         # comes with hydra, but explicit is fine
-    "wandb",             # experiment tracking
-    "einops",            # readable tensor ops
-    "tqdm",              # progress bars
-    "rich",
     "ipywidgets>=8.1.8",
     "pertpy>=1.0.6",
     "scanpy>=1.12.1",
-    "torch>=2.11.0",
     "jupyterlab>=4.5.7",
-    "scvi-tools>=1.4.3",
-    "jax>=0.10.0",
-    "jax[cuda12]>=0.10.0; sys_platform == 'linux'",
-    "cpa-tools>=0.0.0",
-    "rdkit>=2026.3.2",
     "tueplots>=0.2.4",
 ]
 
@@ -33,9 +22,6 @@ dev = [
     "ipykernel",  # Jupyter support
     "nvitop",     # nicer GPU monitoring
 ]
-
-[project.scripts]
-genetic-perturbation-playground = "genetic_perturbation_playground:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -49,16 +35,6 @@ packages = ["src/genetic_perturbation_playground"]
 line-length = 100
 target-version = "py312"
 extend-exclude = ["notebooks", "data", "outputs"]
-
-
-[[tool.uv.index]]
-name = "pytorch-cu128"
-url = "https://download.pytorch.org/whl/cu128"
-explicit = true
-
-[tool.uv.sources]
-torch = [{ index = "pytorch-cu128", marker = "sys_platform == 'linux'" }]
-torchvision = [{ index = "pytorch-cu128", marker = "sys_platform == 'linux'" }]
 
 
 [tool.ruff.lint]
