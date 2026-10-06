@@ -1,0 +1,5 @@
+dataset: replogle_k562
+alpha: 0.0       # ridge penalty; 0 = plain mean shift
+test_frac: 0.2   # fraction of cells held out
+seed: 0
+top_k: 20        # genes used for pearson_top_k

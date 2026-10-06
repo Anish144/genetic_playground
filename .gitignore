@@ -11,3 +11,4 @@ wheels/
 
 /data/
 *.h5ad
+/outputs/
