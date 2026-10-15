@@ -1,0 +1,10 @@
+tasks: [1, 2, 3]  # source/target P(U=0) settings, see data/proxy_multidomain.TASKS
+n_seeds: 10       # independent data draws per task (paper: 10)
+n_source: 3200    # training samples per source domain
+n_target: 9600    # unlabelled target samples (labelled for ORACLE)
+n_test: 2000      # held-out target samples
+a_w: 1.0          # scale of the W | U mean
+lengthscale_x: 1.0
+lengthscale_w: 1.0
+reg_cme: 1.0e-3     # lambda_3, stage-1 conditional mean embeddings
+reg_bridge: 1.0e-3  # lambda_4, stage-2 bridge regression

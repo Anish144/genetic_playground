@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+from scipy.stats import rankdata
 
 
 def mse(pred: np.ndarray, true: np.ndarray) -> np.ndarray:
@@ -33,3 +34,20 @@ def score(preds: dict[str, np.ndarray], true: np.ndarray, perturbations, k: int)
     scores[("mse", "no effect")] = mse(np.zeros_like(true), true)
     table = pd.DataFrame(scores, index=pd.Index(perturbations, name="perturbation"))
     return table.melt(ignore_index=False, var_name=["metric", "model"]).reset_index()
+
+
+def auroc(scores: np.ndarray, labels: np.ndarray) -> float:
+    """Area under the ROC curve for binary labels, via the Mann-Whitney U statistic (ties averaged)."""
+    ranks = rankdata(scores)
+    n_pos = int(labels.sum())
+    n_neg = len(labels) - n_pos
+    return float((ranks[labels == 1].sum() - n_pos * (n_pos + 1) / 2) / (n_pos * n_neg))
+
+
+def accuracy(scores: np.ndarray, labels: np.ndarray, threshold: float = 0.5) -> float:
+    return float(np.mean((scores > threshold) == labels))
+
+
+def brier(scores: np.ndarray, labels: np.ndarray) -> float:
+    """Mean squared error of the scores as estimates of P(Y=1 | x)."""
+    return float(np.mean((scores - labels) ** 2))
