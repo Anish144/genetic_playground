@@ -1,4 +1,4 @@
-tasks: [1, 2, 3]  # source/target P(U=0) settings, see data/proxy_multidomain.TASKS
+tasks: [1, 2, 3]  # source/target P(U=0) settings, see data/proxy_confounded.TASKS
 n_seeds: 10       # independent data draws per task (paper: 10)
 n_source: 3200    # training samples per source domain
 n_target: 9600    # unlabelled target samples (labelled for ORACLE)

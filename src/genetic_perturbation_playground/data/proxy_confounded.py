@@ -43,7 +43,7 @@ TASKS: dict[int, tuple[tuple[float, ...], float]] = {
 
 
 @dataclass(frozen=True)
-class DomainSample:
+class ConfoundedSample:
     """Samples from one domain; ``z`` is the domain index, constant within a domain."""
 
     x: np.ndarray  # (n, 2) float
@@ -54,7 +54,7 @@ class DomainSample:
     c: np.ndarray  # (n, 3) int, latent in the multi-domain setting
 
     @classmethod
-    def concat(cls, samples: list["DomainSample"]) -> "DomainSample":
+    def concat(cls, samples: list["ConfoundedSample"]) -> "ConfoundedSample":
         names = [f.name for f in fields(cls)]
         return cls(**{n: np.concatenate([getattr(s, n) for s in samples]) for n in names})
 
@@ -65,7 +65,7 @@ def _bernoulli_logit(logits: np.ndarray, rng: np.random.Generator) -> np.ndarray
 
 def sample_domain(
     n: int, p_u0: float, z: int, rng: np.random.Generator, a_w: float = 1.0
-) -> DomainSample:
+) -> ConfoundedSample:
     """Draw ``n`` samples from the domain with P(U=0) = ``p_u0``."""
     u = (rng.random(n) >= p_u0).astype(int)
     one_hot_u = np.eye(2)[u]
@@ -75,7 +75,7 @@ def sample_domain(
     c = _bernoulli_logit(np.einsum("nd,ndk->nk", x, _M_C_XU[u]) + one_hot_u @ _M_C_U, rng)
     y = _bernoulli_logit(np.einsum("nk,nk->n", c, _M_Y_CU[u]) + one_hot_u @ _M_Y_U, rng)
 
-    return DomainSample(x=x, w=w, y=y, z=np.full(n, z), u=u, c=c)
+    return ConfoundedSample(x=x, w=w, y=y, z=np.full(n, z), u=u, c=c)
 
 
 def sample_task(
@@ -84,7 +84,7 @@ def sample_task(
     n_target: int,
     rng: np.random.Generator,
     a_w: float = 1.0,
-) -> tuple[list[DomainSample], DomainSample]:
+) -> tuple[list[ConfoundedSample], ConfoundedSample]:
     """Draw source domains (z = 0, 1, ...) and the target domain (z = number of sources).
 
     The paper uses ``n_source=3200`` per source and ``n_target=9600`` for training; call again

@@ -44,7 +44,7 @@ class ConditionalMeanEmbedding:
         return cho_solve(self.cholesky_factor_, self.kernel_x(self.x_train_, x_new))
 
 
-class MultiDomainBridge:
+class ConditionalEmbeddingBridge:
     """Kernel bridge function m_0 for multi-domain adaptation (Tsai et al., 2024, Sec. 4.3).
 
     Stage 1: a conditional mean embedding mu_e(x) of W | X for each source domain e.
@@ -79,7 +79,7 @@ class MultiDomainBridge:
 
     def fit(
         self, x: np.ndarray, w: np.ndarray, y: np.ndarray, e: np.ndarray, rng: np.random.Generator
-    ) -> "MultiDomainBridge":
+    ) -> "ConditionalEmbeddingBridge":
         """Fit on pooled source samples; ``e`` gives each sample's domain."""
         stage1 = rng.random(len(x)) < 0.5
         x1, w1, e1 = x[stage1], w[stage1], e[stage1]

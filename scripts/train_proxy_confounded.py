@@ -5,9 +5,9 @@ For each task and seed, three predictors are scored on held-out target samples:
   no_adapt   the same bridge with a W | X embedding fit on the pooled sources instead
   oracle     bridge fit on labelled target data (Tsai et al., 2024, Appendix D.2)
 
-Config: configs/train_proxy_multidomain.yaml. Usage:
+Config: configs/train_proxy_confounded.yaml. Usage:
 
-    uv run python scripts/train_proxy_multidomain.py n_seeds=3 tasks=[1]
+    uv run python scripts/train_proxy_confounded.py n_seeds=3 tasks=[1]
 
 Per-run scores are written to the Hydra run dir as scores.csv; a summary is printed.
 """
@@ -20,10 +20,10 @@ import pandas as pd
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig
 
-from genetic_perturbation_playground.data.proxy_multidomain import DomainSample, sample_task
-from genetic_perturbation_playground.model.proxy_multidomain import (
+from genetic_perturbation_playground.data.proxy_confounded import ConfoundedSample, sample_task
+from genetic_perturbation_playground.model.proxy_confounded import (
+    ConditionalEmbeddingBridge,
     ConditionalMeanEmbedding,
-    MultiDomainBridge,
 )
 from genetic_perturbation_playground.utils import metrics
 from genetic_perturbation_playground.utils.kernels import RBF
@@ -36,14 +36,16 @@ def run(cfg: DictConfig, task: int, seed: int) -> dict[str, np.ndarray]:
     rng = np.random.default_rng(seed)
     sources, target = sample_task(task, cfg.n_source, cfg.n_target, rng, cfg.a_w)
     _, test = sample_task(task, 0, cfg.n_test, rng, cfg.a_w)
-    pooled = DomainSample.concat(sources)
+    pooled = ConfoundedSample.concat(sources)
 
     kx, kw = RBF(lengthscales=cfg.lengthscale_x), RBF(lengthscales=cfg.lengthscale_w)
 
-    def bridge(d: DomainSample) -> MultiDomainBridge:
-        return MultiDomainBridge(kx, kw, cfg.reg_cme, cfg.reg_bridge).fit(d.x, d.w, d.y, d.z, rng)
+    def bridge(d: ConfoundedSample) -> ConditionalEmbeddingBridge:
+        return ConditionalEmbeddingBridge(kx, kw, cfg.reg_cme, cfg.reg_bridge).fit(
+            d.x, d.w, d.y, d.z, rng
+        )
 
-    def cme(d: DomainSample) -> ConditionalMeanEmbedding:
+    def cme(d: ConfoundedSample) -> ConditionalMeanEmbedding:
         return ConditionalMeanEmbedding(kx, cfg.reg_cme).fit(d.x, d.w)
 
     source_bridge, target_cme = bridge(pooled), cme(target)
@@ -71,7 +73,7 @@ def evaluate(cfg: DictConfig) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-@hydra.main(config_path="../configs", config_name="train_proxy_multidomain", version_base=None)
+@hydra.main(config_path="../configs", config_name="train_proxy_confounded", version_base=None)
 def main(cfg: DictConfig):
     scores = evaluate(cfg)
     scores.to_csv(Path(HydraConfig.get().runtime.output_dir) / "scores.csv", index=False)
