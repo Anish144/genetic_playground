@@ -38,9 +38,10 @@ from genetic_perturbation_playground.utils.plotting import plot_excess_mse_vs_n_
 def run(cfg: DictConfig, proxy: str, d: int, theta_star: float, seed: int) -> dict[str, float]:
     """Held-out target MSE of each predictor."""
     rng = np.random.default_rng(seed)
-    sources = sample_environments(d, cfg.n, cfg.m, rng, proxy=proxy)
-    target = sample_environment(theta_star, cfg.n_target_labels, cfg.m, rng, proxy=proxy)
-    test = sample_environment(theta_star, cfg.n_test, 0, rng, proxy=proxy)
+    sources = sample_environments(d, cfg.n, cfg.m, rng, dim_u=cfg.dim_u, proxy=proxy)
+    theta = np.full(cfg.dim_u, theta_star)  # same mean in every latent coordinate
+    target = sample_environment(theta, cfg.n_target_labels, cfg.m, rng, proxy=proxy)
+    test = sample_environment(theta, cfg.n_test, 0, rng, proxy=proxy)
 
     xs, ys, ws = [e.x for e in sources], [e.y for e in sources], [e.w for e in sources]
     kx = RBF(lengthscales=median_heuristic(np.concatenate(xs)))
@@ -54,7 +55,7 @@ def run(cfg: DictConfig, proxy: str, d: int, theta_star: float, seed: int) -> di
         "bridge": bridge.predict(test.x, target.w),
         "pooled": kernel_ridge(np.concatenate(xs), np.concatenate(ys)),
         "oracle": kernel_ridge(target.x, target.y),
-        "bayes": conditional_mean(test.x, theta_star),
+        "bayes": conditional_mean(test.x, theta),
     }
     return {model: float(np.mean((p - test.y) ** 2)) for model, p in preds.items()}
 

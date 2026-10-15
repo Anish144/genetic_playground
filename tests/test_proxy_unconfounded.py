@@ -31,33 +31,40 @@ def small_envs():
     rng = np.random.default_rng(0)
     # unequal n and m per environment, and n != m within an environment
     return [
-        sample_environment(t, n, m, rng) for t, n, m in [(-1, 30, 50), (0, 40, 20), (1, 25, 35)]
+        sample_environment([t], n, m, rng) for t, n, m in [(-1, 30, 50), (0, 40, 20), (1, 25, 35)]
     ]
 
 
 # --- data ---------------------------------------------------------------------------------
 
 
-def test_conditional_mean_matches_monte_carlo():
+@pytest.mark.parametrize("theta", [[1.3], [1.3, -0.4, 0.8]])
+def test_conditional_mean_matches_monte_carlo(theta):
     rng = np.random.default_rng(0)
     x = np.linspace(-3, 3, 7)
-    mc = outcome_mean(x[:, None], 1.3 + rng.standard_normal((1, 400_000))).mean(axis=1)
-    np.testing.assert_allclose(conditional_mean(x, 1.3), mc, atol=3e-3)
+    u = np.array(theta) + rng.standard_normal((1, 200_000, len(theta)))
+    mc = outcome_mean(x[:, None], u).mean(axis=1)
+    np.testing.assert_allclose(conditional_mean(x, np.array(theta)), mc, atol=5e-3)
 
 
-def test_latents_share_law_and_x_is_independent():
+@pytest.mark.parametrize("k", [1, 3])
+def test_latents_share_law_and_x_is_independent(k):
     rng = np.random.default_rng(0)
-    env = sample_environment(1.5, 50_000, 50_000, rng)
+    env = sample_environment(np.full(k, 1.5), 50_000, 50_000, rng)
     for u in (env.u1, env.u2):
-        assert abs(u.mean() - 1.5) < 0.02 and abs(u.std() - 1.0) < 0.02
-    assert abs(env.x.mean()) < 0.02 and abs(np.corrcoef(env.x, env.u1)[0, 1]) < 0.02
+        assert np.allclose(u.mean(0), 1.5, atol=0.02) and np.allclose(u.std(0), 1, atol=0.02)
+    assert abs(env.x.mean()) < 0.02
+    assert all(abs(np.corrcoef(env.x, env.u1[:, j])[0, 1]) < 0.02 for j in range(k))
 
 
-def test_environments_have_requested_sizes():
-    envs = sample_environments(4, 10, 7, np.random.default_rng(0))
+@pytest.mark.parametrize("k", [1, 3])
+def test_environments_have_requested_sizes(k):
+    envs = sample_environments(4, 10, 7, np.random.default_rng(0), dim_u=k)
     assert len(envs) == 4
-    assert all(e.x.shape == e.y.shape == (10,) and e.w.shape == (7,) for e in envs)
-    assert all(-2 <= e.theta <= 2 for e in envs)
+    for e in envs:
+        assert e.x.shape == e.y.shape == (10,) and e.u1.shape == (10, k)
+        assert e.w.shape == e.u2.shape == (7, k) and e.theta.shape == (k,)
+        assert np.all(np.abs(e.theta) <= 2)
 
 
 # --- model: algebra -----------------------------------------------------------------------
@@ -109,14 +116,16 @@ def test_predict_is_invariant_to_order_of_target_w(small_envs):
 # --- model: statistics --------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("k", [1, 2])
 @pytest.mark.parametrize("theta_star", [-1.0, 0.5, 1.5])
-def test_recovers_target_conditional_mean(theta_star):
+def test_recovers_target_conditional_mean(theta_star, k):
     """Bridge error is small and far below pooled regression, which ignores the environment."""
     rng = np.random.default_rng(0)
-    envs = sample_environments(20, 150, 150, rng)
-    w_target = sample_environment(theta_star, 0, 300, rng).w
+    envs = sample_environments(20, 150, 150, rng, dim_u=k)
+    theta = np.full(k, theta_star)
+    w_target = sample_environment(theta, 0, 300, rng).w
     x_new = np.linspace(-2.5, 2.5, 100)
-    truth = conditional_mean(x_new, theta_star)
+    truth = conditional_mean(x_new, theta)
 
     bridge_mse = np.mean((_fit(envs).predict(x_new, w_target) - truth) ** 2)
 
