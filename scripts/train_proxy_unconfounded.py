@@ -11,7 +11,8 @@ Config: configs/train_proxy_unconfounded.yaml. Usage:
 
     uv run python scripts/train_proxy_unconfounded.py n_seeds=3 'n_envs=[20]'
 
-Per-run scores are written to the Hydra run dir as scores.csv; a summary is printed.
+Per-run scores are written to the Hydra run dir as scores.csv, with one plot per proxy of MSE
+against the number of source environments in plots/; a summary is printed.
 """
 
 import itertools
@@ -31,6 +32,7 @@ from genetic_perturbation_playground.data.proxy_unconfounded import (
 from genetic_perturbation_playground.model.proxy_confounded import ConditionalMeanEmbedding
 from genetic_perturbation_playground.model.proxy_unconfounded import MarginalEmbeddingBridge
 from genetic_perturbation_playground.utils.kernels import RBF, median_heuristic
+from genetic_perturbation_playground.utils.plotting import plot_mse_vs_n_envs
 
 
 def run(cfg: DictConfig, proxy: str, d: int, theta_star: float, seed: int) -> dict[str, float]:
@@ -84,7 +86,11 @@ def evaluate(cfg: DictConfig) -> pd.DataFrame:
 @hydra.main(config_path="../configs", config_name="train_proxy_unconfounded", version_base=None)
 def main(cfg: DictConfig):
     scores = evaluate(cfg)
-    scores.to_csv(Path(HydraConfig.get().runtime.output_dir) / "scores.csv", index=False)
+    out_dir = Path(HydraConfig.get().runtime.output_dir)
+    scores.to_csv(out_dir / "scores.csv", index=False)
+    models = {"bridge": "domain transfer (target W only)", "oracle": "oracle (target labels)"}
+    for proxy, s in scores.groupby("proxy"):
+        plot_mse_vs_n_envs(s, models, "bayes", out_dir / "plots" / f"mse_vs_n_envs_{proxy}.png")
     summary = scores.groupby(["proxy", "n_envs", "theta_star", "model"])["mse"].agg(["mean", "std"])
     print(summary.unstack("model").round(4).to_string())
 
