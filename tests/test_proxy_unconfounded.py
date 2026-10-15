@@ -8,6 +8,7 @@ from genetic_perturbation_playground.data.proxy_unconfounded import (
     sample_environment,
     sample_environments,
 )
+from genetic_perturbation_playground.model.proxy_confounded import ConditionalMeanEmbedding
 from genetic_perturbation_playground.model.proxy_unconfounded import MarginalEmbeddingBridge
 from genetic_perturbation_playground.utils.kernels import RBF, Kernel
 
@@ -17,9 +18,6 @@ class Linear(Kernel):
 
     def K(self, X, X2):
         return X @ X2.T
-
-    def K_diag(self, X):
-        return np.sum(X**2, axis=1)
 
 
 def _fit(envs, kernel_w=None, reg=1e-3):
@@ -124,7 +122,7 @@ def test_recovers_target_conditional_mean(theta_star):
 
     x = np.concatenate([e.x for e in envs])
     y = np.concatenate([e.y for e in envs])
-    pooled = RBF()(x, x_new).T @ cho_solve(cho_factor(RBF()(x) + 1e-3 * len(x) * np.eye(len(x))), y)
+    pooled = ConditionalMeanEmbedding(RBF(), 1e-3).fit(x, y).weights(x_new).T @ y
     pooled_mse = np.mean((pooled - truth) ** 2)
 
     assert bridge_mse < 0.05

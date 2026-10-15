@@ -6,6 +6,4 @@ n: 200                # (X, Y) pairs per source environment
 m: 200                # proxies W per environment, also for the target
 n_target_labels: 4000 # labelled target pairs for the oracle (= pooled source size at D=20)
 n_test: 2000          # held-out labelled target pairs for MSE
-lengthscale_x: 1.0
-lengthscale_w: 1.0
 reg: 1.0e-3

@@ -27,11 +27,6 @@ class MarginalEmbeddingBridge:
         self.kernel_w = kernel_w
         self.reg = reg
 
-        self.x_train_ = None
-        self.env_ = None
-        self.w_envs_ = None
-        self.coef_ = None
-
     def fit(
         self, xs: list[np.ndarray], ys: list[np.ndarray], ws: list[np.ndarray]
     ) -> "MarginalEmbeddingBridge":

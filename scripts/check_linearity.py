@@ -65,9 +65,8 @@ def main(cfg: DictConfig):
     W = s["W"]  # (batches, genes)
     r = (s["batch_y_sum"] - s["pert_batch_n"].T @ model.gamma_) / s["batch_n"][:, None]
     spread = W.std(axis=0)
-    ranked = np.argsort(-spread)[
-        : (spread > 0).sum()
-    ]  # largest spread first; constant genes dropped
+    # largest spread first; constant genes dropped
+    ranked = np.argsort(-spread)[: (spread > 0).sum()]
     n, mid = cfg.n_genes, len(ranked) // 2
     groups = {
         "high": ranked[:n],

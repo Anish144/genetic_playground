@@ -9,8 +9,7 @@ Each domain differs only in the prior over the binary latent U:
     C_i | X,U ~ Bernoulli(sigmoid([X M_{C|X,U} + o(U) M_{C|U}]_i)),   i = 1..3
     Y | C,U   ~ Bernoulli(sigmoid(C M_{Y|C,U} + o(U) M_{Y|U}))
 
-where o(.) is the one-hot encoder. In the multi-domain setting C is latent; it is returned
-only for diagnostics.
+where o(.) is the one-hot encoder. U and C are latent and not returned.
 
 Parameters follow the reference implementation (``MultiWSimulator`` in
 google-research/latent_shift_adaptation/data/lsa_synthetic.py), which differs from the
@@ -50,8 +49,6 @@ class ConfoundedSample:
     w: np.ndarray  # (n,) float
     y: np.ndarray  # (n,) int
     z: np.ndarray  # (n,) int
-    u: np.ndarray  # (n,) int, latent
-    c: np.ndarray  # (n, 3) int, latent in the multi-domain setting
 
     @classmethod
     def concat(cls, samples: list["ConfoundedSample"]) -> "ConfoundedSample":
@@ -75,7 +72,7 @@ def sample_domain(
     c = _bernoulli_logit(np.einsum("nd,ndk->nk", x, _M_C_XU[u]) + one_hot_u @ _M_C_U, rng)
     y = _bernoulli_logit(np.einsum("nk,nk->n", c, _M_Y_CU[u]) + one_hot_u @ _M_Y_U, rng)
 
-    return ConfoundedSample(x=x, w=w, y=y, z=np.full(n, z), u=u, c=c)
+    return ConfoundedSample(x=x, w=w, y=y, z=np.full(n, z))
 
 
 def sample_task(

@@ -29,10 +29,6 @@ class ConditionalMeanEmbedding:
         self.kernel_x = kernel_x
         self.reg = reg
 
-        self.x_train_ = None
-        self.w_train_ = None
-        self.cholesky_factor_ = None
-
     def fit(self, x: np.ndarray, w: np.ndarray) -> "ConditionalMeanEmbedding":
         n = len(x)
         self.x_train_, self.w_train_ = x, w
@@ -71,12 +67,6 @@ class ConditionalEmbeddingBridge:
         self.reg_cme = reg_cme
         self.reg_bridge = reg_bridge
 
-        self.cmes_: dict[int, ConditionalMeanEmbedding] = {}
-        self.w_stage1_ = None
-        self.x_stage2_ = None
-        self.gamma_ = None
-        self.coef_ = None
-
     def fit(
         self, x: np.ndarray, w: np.ndarray, y: np.ndarray, e: np.ndarray, rng: np.random.Generator
     ) -> "ConditionalEmbeddingBridge":
@@ -89,10 +79,8 @@ class ConditionalEmbeddingBridge:
         gamma = np.zeros((len(x1), len(x2)))
         for domain in np.unique(e):
             rows, cols = np.flatnonzero(e1 == domain), np.flatnonzero(e2 == domain)
-            self.cmes_[domain] = ConditionalMeanEmbedding(self.kernel_x, self.reg_cme).fit(
-                x1[rows], w1[rows]
-            )
-            gamma[np.ix_(rows, cols)] = self.cmes_[domain].weights(x2[cols])
+            cme = ConditionalMeanEmbedding(self.kernel_x, self.reg_cme).fit(x1[rows], w1[rows])
+            gamma[np.ix_(rows, cols)] = cme.weights(x2[cols])
 
         # Stage 2: kernel ridge regression of y on v_i.
         n = len(x2)

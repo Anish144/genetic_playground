@@ -22,20 +22,15 @@ import numpy as np
 import pandas as pd
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig
-from scipy.linalg import cho_factor, cho_solve
 
 from genetic_perturbation_playground.data.proxy_unconfounded import (
     conditional_mean,
     sample_environment,
     sample_environments,
 )
+from genetic_perturbation_playground.model.proxy_confounded import ConditionalMeanEmbedding
 from genetic_perturbation_playground.model.proxy_unconfounded import MarginalEmbeddingBridge
-from genetic_perturbation_playground.utils.kernels import RBF, Kernel
-
-
-def kernel_ridge(x, y, x_new, kernel: Kernel, reg: float) -> np.ndarray:
-    n = len(x)
-    return kernel(x, x_new).T @ cho_solve(cho_factor(kernel(x) + reg * n * np.eye(n)), y)
+from genetic_perturbation_playground.utils.kernels import RBF, median_heuristic
 
 
 def run(cfg: DictConfig, proxy: str, d: int, theta_star: float, seed: int) -> dict[str, float]:
@@ -45,13 +40,18 @@ def run(cfg: DictConfig, proxy: str, d: int, theta_star: float, seed: int) -> di
     target = sample_environment(theta_star, cfg.n_target_labels, cfg.m, rng, proxy=proxy)
     test = sample_environment(theta_star, cfg.n_test, 0, rng, proxy=proxy)
 
-    kx, kw = RBF(lengthscales=cfg.lengthscale_x), RBF(lengthscales=cfg.lengthscale_w)
-    xs, ys = [e.x for e in sources], [e.y for e in sources]
-    bridge = MarginalEmbeddingBridge(kx, kw, cfg.reg).fit(xs, ys, [e.w for e in sources])
+    xs, ys, ws = [e.x for e in sources], [e.y for e in sources], [e.w for e in sources]
+    kx = RBF(lengthscales=median_heuristic(np.concatenate(xs)))
+    kw = RBF(lengthscales=median_heuristic(np.concatenate(ws)))
+    bridge = MarginalEmbeddingBridge(kx, kw, cfg.reg).fit(xs, ys, ws)
+
+    def kernel_ridge(x, y):  # regression of y on x = ConditionalMeanEmbedding read out at y
+        return ConditionalMeanEmbedding(kx, cfg.reg).fit(x, y).weights(test.x).T @ y
+
     preds = {
         "bridge": bridge.predict(test.x, target.w),
-        "pooled": kernel_ridge(np.concatenate(xs), np.concatenate(ys), test.x, kx, cfg.reg),
-        "oracle": kernel_ridge(target.x, target.y, test.x, kx, cfg.reg),
+        "pooled": kernel_ridge(np.concatenate(xs), np.concatenate(ys)),
+        "oracle": kernel_ridge(target.x, target.y),
         "bayes": conditional_mean(test.x, theta_star),
     }
     return {model: float(np.mean((p - test.y) ** 2)) for model, p in preds.items()}

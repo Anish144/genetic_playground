@@ -16,9 +16,7 @@ dependencies = [
 dev = [
     "ruff>=0.8",  # linter + formatter
     "pre-commit", # git hooks
-    "ipykernel",  # Jupyter support
     "jupyterlab>=4.5.7",
-    "nvitop",     # nicer GPU monitoring
 ]
 
 [build-system]

@@ -26,7 +26,7 @@ from genetic_perturbation_playground.model.proxy_confounded import (
     ConditionalMeanEmbedding,
 )
 from genetic_perturbation_playground.utils import metrics
-from genetic_perturbation_playground.utils.kernels import RBF
+from genetic_perturbation_playground.utils.kernels import RBF, median_heuristic
 
 METRICS = {"auroc": metrics.auroc, "accuracy": metrics.accuracy, "brier": metrics.brier}
 
@@ -38,7 +38,8 @@ def run(cfg: DictConfig, task: int, seed: int) -> dict[str, np.ndarray]:
     _, test = sample_task(task, 0, cfg.n_test, rng, cfg.a_w)
     pooled = ConfoundedSample.concat(sources)
 
-    kx, kw = RBF(lengthscales=cfg.lengthscale_x), RBF(lengthscales=cfg.lengthscale_w)
+    kx = RBF(lengthscales=median_heuristic(pooled.x))
+    kw = RBF(lengthscales=median_heuristic(pooled.w))
 
     def bridge(d: ConfoundedSample) -> ConditionalEmbeddingBridge:
         return ConditionalEmbeddingBridge(kx, kw, cfg.reg_cme, cfg.reg_bridge).fit(
