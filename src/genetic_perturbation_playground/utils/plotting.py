@@ -82,28 +82,27 @@ def report(scores: pd.DataFrame, unit: str, out_dir: Path) -> None:
     print(f"Plots saved to {out_dir}")
 
 
-def plot_mse_vs_n_envs(scores: pd.DataFrame, models: dict[str, str], path: Path) -> None:
-    """Mean ± sd of MSE against the number of source environments, one panel per theta*.
+def plot_excess_mse_vs_n_envs(scores: pd.DataFrame, models: dict[str, str], path: Path) -> None:
+    """Excess MSE over the oracle against the number of source environments, one panel per theta*.
 
-    `scores` is a long table with columns [n_envs, theta_star, model, mse]. `models` maps the
-    model names to plot onto legend labels, in the fixed categorical colour order.
+    `scores` is a long table with columns [n_envs, theta_star, seed, model, mse]. The excess is
+    paired, model minus oracle on the same seed and test set, so test-set noise cancels.
+    Lines are mean over seeds, bands ± 1 sd (lower edge clipped, the y-axis is log).
+    `models` maps model names onto legend labels, in the fixed categorical colour order.
     """
-    colors = ["#2a78d6", "#eb6834"]  # categorical slots 1-2, validated light-mode palette
-    stats = scores.groupby(["theta_star", "model", "n_envs"])["mse"].agg(["mean", "std"])
+    colors = ["#2a78d6", "#eb6834"]  # categorical slots 1-2, validated palette
+    wide = scores.pivot_table(index=["theta_star", "n_envs", "seed"], columns="model", values="mse")
+    excess = wide[list(models)].sub(wide["oracle"], axis=0)
+    stats = excess.groupby(["theta_star", "n_envs"]).agg(["mean", "std"])
     thetas = scores["theta_star"].unique()
     with plt.rc_context(bundles.icml2024(column="full", ncols=len(thetas), usetex=False)):
-        fig, axes = plt.subplots(1, len(thetas), squeeze=False, sharey=True)
+        width = plt.rcParams["figure.figsize"][0]
+        fig, axes = plt.subplots(1, len(thetas), squeeze=False, sharey=True, figsize=(width, 2.6))
         for ax, theta in zip(axes.flat, thetas, strict=True):
-            for (model, label), color in zip(models.items(), colors, strict=False):
-                s = stats.loc[(theta, model)]
-                ax.fill_between(
-                    s.index,
-                    s["mean"] - s["std"],
-                    s["mean"] + s["std"],
-                    color=color,
-                    alpha=0.1,
-                    lw=0,
-                )
+            for (model, label), color in zip(models.items(), colors, strict=True):
+                s = stats.loc[theta, model]
+                lower = (s["mean"] - s["std"]).clip(lower=s["mean"].min() / 10)
+                ax.fill_between(s.index, lower, s["mean"] + s["std"], color=color, alpha=0.1, lw=0)
                 ax.plot(
                     s.index,
                     s["mean"],
@@ -115,15 +114,21 @@ def plot_mse_vs_n_envs(scores: pd.DataFrame, models: dict[str, str], path: Path)
                     mew=1.5,
                     label=label,
                 )
-            ax.set_xscale("log")
+            ax.set(xscale="log", yscale="log")
             ax.set_xticks(s.index, [str(d) for d in s.index])
-            ax.minorticks_off()
+            ax.xaxis.set_minor_locator(plt.NullLocator())
             ax.set(title=rf"$\theta^\star = {theta:g}$", xlabel="number of source environments")
             ax.grid(color="#e5e4df", lw=0.5)
             ax.set_axisbelow(True)
             ax.spines[["top", "right"]].set_visible(False)
-        axes.flat[0].set_ylabel("held-out target MSE")
-        axes.flat[0].legend(frameon=False)
+        axes.flat[0].set_ylabel("target MSE $-$ oracle MSE")
+        fig.suptitle("Excess held-out target MSE over the oracle")
+        fig.legend(
+            *axes.flat[0].get_legend_handles_labels(),
+            loc="outside lower center",
+            ncols=len(models),
+            frameon=False,
+        )
         path.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(path, dpi=300)
         plt.close(fig)
