@@ -1,10 +1,11 @@
 """Train the marginal-embedding bridge on the unconfounded proxy setting and report target MSE.
 
-For each proxy function g, number of source environments D, target theta* and seed, three predictors of
-E[Y | x, e*] are compared with the exact value on a grid of x:
+For each proxy function g, number of source environments D, target theta* and seed, predictors
+are scored by MSE on held-out (x, y) pairs from the target environment:
   bridge  MarginalEmbeddingBridge on the sources, given only the target's proxies W
   pooled  kernel ridge regression of y on x over all sources, ignoring the environment
   oracle  kernel ridge regression of y on x over labelled target data
+  bayes   the true E[Y | x, e*]; its MSE is the irreducible error Var(Y | x, e*)
 
 Config: configs/train_proxy_unconfounded.yaml. Usage:
 
@@ -38,22 +39,22 @@ def kernel_ridge(x, y, x_new, kernel: Kernel, reg: float) -> np.ndarray:
 
 
 def run(cfg: DictConfig, proxy: str, d: int, theta_star: float, seed: int) -> dict[str, float]:
-    """MSE against the true E[Y | x, e*] for each predictor."""
+    """Held-out target MSE of each predictor."""
     rng = np.random.default_rng(seed)
     sources = sample_environments(d, cfg.n, cfg.m, rng, proxy=proxy)
     target = sample_environment(theta_star, cfg.n_target_labels, cfg.m, rng, proxy=proxy)
-    x_grid = np.linspace(-3, 3, cfg.n_grid)
-    truth = conditional_mean(x_grid, theta_star)
+    test = sample_environment(theta_star, cfg.n_test, 0, rng, proxy=proxy)
 
     kx, kw = RBF(lengthscales=cfg.lengthscale_x), RBF(lengthscales=cfg.lengthscale_w)
     xs, ys = [e.x for e in sources], [e.y for e in sources]
     bridge = MarginalEmbeddingBridge(kx, kw, cfg.reg).fit(xs, ys, [e.w for e in sources])
     preds = {
-        "bridge": bridge.predict(x_grid, target.w),
-        "pooled": kernel_ridge(np.concatenate(xs), np.concatenate(ys), x_grid, kx, cfg.reg),
-        "oracle": kernel_ridge(target.x, target.y, x_grid, kx, cfg.reg),
+        "bridge": bridge.predict(test.x, target.w),
+        "pooled": kernel_ridge(np.concatenate(xs), np.concatenate(ys), test.x, kx, cfg.reg),
+        "oracle": kernel_ridge(target.x, target.y, test.x, kx, cfg.reg),
+        "bayes": conditional_mean(test.x, theta_star),
     }
-    return {model: float(np.mean((p - truth) ** 2)) for model, p in preds.items()}
+    return {model: float(np.mean((p - test.y) ** 2)) for model, p in preds.items()}
 
 
 def evaluate(cfg: DictConfig) -> pd.DataFrame:
