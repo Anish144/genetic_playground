@@ -82,14 +82,11 @@ def report(scores: pd.DataFrame, unit: str, out_dir: Path) -> None:
     print(f"Plots saved to {out_dir}")
 
 
-def plot_mse_vs_n_envs(
-    scores: pd.DataFrame, models: dict[str, str], floor: str | None, path: Path
-) -> None:
+def plot_mse_vs_n_envs(scores: pd.DataFrame, models: dict[str, str], path: Path) -> None:
     """Mean ± sd of MSE against the number of source environments, one panel per theta*.
 
     `scores` is a long table with columns [n_envs, theta_star, model, mse]. `models` maps the
-    model names to plot onto legend labels, in the fixed categorical colour order; `floor`
-    names a model drawn as a grey reference line (e.g. the irreducible error).
+    model names to plot onto legend labels, in the fixed categorical colour order.
     """
     colors = ["#2a78d6", "#eb6834"]  # categorical slots 1-2, validated light-mode palette
     stats = scores.groupby(["theta_star", "model", "n_envs"])["mse"].agg(["mean", "std"])
@@ -97,9 +94,6 @@ def plot_mse_vs_n_envs(
     with plt.rc_context(bundles.icml2024(column="full", ncols=len(thetas), usetex=False)):
         fig, axes = plt.subplots(1, len(thetas), squeeze=False, sharey=True)
         for ax, theta in zip(axes.flat, thetas, strict=True):
-            if floor is not None:
-                ref = stats.loc[(theta, floor), "mean"]
-                ax.plot(ref.index, ref, color="#8a8984", lw=1, label="irreducible error")
             for (model, label), color in zip(models.items(), colors, strict=False):
                 s = stats.loc[(theta, model)]
                 ax.fill_between(

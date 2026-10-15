@@ -90,7 +90,7 @@ def main(cfg: DictConfig):
     scores.to_csv(out_dir / "scores.csv", index=False)
     models = {"bridge": "domain transfer (target W only)", "oracle": "oracle (target labels)"}
     for proxy, s in scores.groupby("proxy"):
-        plot_mse_vs_n_envs(s, models, "bayes", out_dir / "plots" / f"mse_vs_n_envs_{proxy}.png")
+        plot_mse_vs_n_envs(s, models, out_dir / "plots" / f"mse_vs_n_envs_{proxy}.png")
     summary = scores.groupby(["proxy", "n_envs", "theta_star", "model"])["mse"].agg(["mean", "std"])
     print(summary.unstack("model").round(4).to_string())
 
