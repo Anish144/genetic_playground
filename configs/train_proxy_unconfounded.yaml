@@ -15,4 +15,4 @@ neural:               # NeuralMarginalEmbeddingBridge settings; see model/proxy_
   depth: 2
   lr: 1.0e-3
   n_steps: 200        # more steps memorise the source environments; held-out error rises
-  device: cpu         # cuda on GPU nodes; not mps (float64 is unsupported there)
+  device: cuda         # cuda on GPU nodes; not mps (float64 is unsupported there)
