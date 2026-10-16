@@ -10,6 +10,8 @@ dependencies = [
     "pertpy>=1.0.6",
     "scanpy>=1.12.1",
     "tueplots>=0.2.4",
+    "torch>=2.14.1",
+    "tqdm>=4.67.3",
 ]
 
 [dependency-groups]

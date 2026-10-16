@@ -1,8 +1,9 @@
-"""Train the marginal-embedding bridge on the unconfounded proxy setting and report target MSE.
+"""Train a marginal-embedding bridge on the unconfounded proxy setting and report target MSE.
 
 For each proxy function g, number of source environments D, target theta* and seed, predictors
 are scored by MSE on held-out (x, y) pairs from the target environment:
-  bridge  MarginalEmbeddingBridge on the sources, given only the target's proxies W
+  bridge  a bridge fit on the sources, given only the target's proxies W: the kernel
+          MarginalEmbeddingBridge (bridge=kernel) or NeuralMarginalEmbeddingBridge (bridge=neural)
   pooled  kernel ridge regression of y on x over all sources, ignoring the environment
   oracle  kernel ridge regression of y on x over labelled target data
   bayes   the true E[Y | x, e*]; its MSE is the irreducible error Var(Y | x, e*)
@@ -10,6 +11,7 @@ are scored by MSE on held-out (x, y) pairs from the target environment:
 Config: configs/train_proxy_unconfounded.yaml. Usage:
 
     uv run python scripts/train_proxy_unconfounded.py n_seeds=3 'n_envs=[20]'
+    uv run python scripts/train_proxy_unconfounded.py bridge=neural neural.n_steps=200
 
 Per-run scores are written to the Hydra run dir as scores.csv, with one plot per proxy of
 excess MSE over the oracle against the number of source environments in plots/; a summary is printed.
@@ -31,6 +33,9 @@ from genetic_perturbation_playground.data.proxy_unconfounded import (
 )
 from genetic_perturbation_playground.model.proxy_confounded import ConditionalMeanEmbedding
 from genetic_perturbation_playground.model.proxy_unconfounded import MarginalEmbeddingBridge
+from genetic_perturbation_playground.model.proxy_unconfounded_neural import (
+    NeuralMarginalEmbeddingBridge,
+)
 from genetic_perturbation_playground.utils.kernels import RBF, median_heuristic
 from genetic_perturbation_playground.utils.plotting import plot_excess_mse_vs_n_envs
 
@@ -46,7 +51,11 @@ def run(cfg: DictConfig, proxy: str, d: int, theta_star: float, seed: int) -> di
     xs, ys, ws = [e.x for e in sources], [e.y for e in sources], [e.w for e in sources]
     kx = RBF(lengthscales=median_heuristic(np.concatenate(xs)))
     kw = RBF(lengthscales=median_heuristic(np.concatenate(ws)))
-    bridge = MarginalEmbeddingBridge(kx, kw, cfg.reg).fit(xs, ys, ws)
+    bridges = {
+        "kernel": lambda: MarginalEmbeddingBridge(kx, kw, cfg.reg),
+        "neural": lambda: NeuralMarginalEmbeddingBridge(reg=cfg.reg, seed=seed, **cfg.neural),
+    }
+    bridge = bridges[cfg.bridge]().fit(xs, ys, ws)
 
     def kernel_ridge(x, y):  # regression of y on x = ConditionalMeanEmbedding read out at y
         return ConditionalMeanEmbedding(kx, cfg.reg).fit(x, y).weights(test.x).T @ y
@@ -94,7 +103,7 @@ def main(cfg: DictConfig):
         "pooled": "pooled sources (ignores environment)",
     }
     for proxy, s in scores.groupby("proxy"):
-        path = out_dir / "plots" / f"excess_mse_vs_n_envs_{proxy}.png"
+        path = out_dir / "plots" / f"excess_mse_vs_n_envs_{proxy}_{cfg.bridge}.png"
         plot_excess_mse_vs_n_envs(s, models, path)
     summary = scores.groupby(["proxy", "n_envs", "theta_star", "model"])["mse"].agg(["mean", "std"])
     print(summary.unstack("model").round(4).to_string())
