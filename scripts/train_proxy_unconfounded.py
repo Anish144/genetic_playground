@@ -1,9 +1,9 @@
-"""Train a marginal-embedding bridge on the unconfounded proxy setting and report target MSE.
+"""Train marginal-embedding bridges on the unconfounded proxy setting and report target MSE.
 
 For each proxy function g, number of source environments D, target theta* and seed, predictors
 are scored by MSE on held-out (x, y) pairs from the target environment:
-  bridge  a bridge fit on the sources, given only the target's proxies W: the kernel
-          MarginalEmbeddingBridge (bridge=kernel) or NeuralMarginalEmbeddingBridge (bridge=neural)
+  kernel  MarginalEmbeddingBridge fit on the sources, given only the target's proxies W
+  neural  NeuralMarginalEmbeddingBridge, likewise; ``bridges`` in the config picks which run
   pooled  kernel ridge regression of y on x over all sources, ignoring the environment
   oracle  kernel ridge regression of y on x over labelled target data
   bayes   the true E[Y | x, e*]; its MSE is the irreducible error Var(Y | x, e*)
@@ -11,10 +11,11 @@ are scored by MSE on held-out (x, y) pairs from the target environment:
 Config: configs/train_proxy_unconfounded.yaml. Usage:
 
     uv run python scripts/train_proxy_unconfounded.py n_seeds=3 'n_envs=[20]'
-    uv run python scripts/train_proxy_unconfounded.py bridge=neural neural.n_steps=200
+    uv run python scripts/train_proxy_unconfounded.py 'bridges=[kernel,neural]' neural.device=cuda
 
 Per-run scores are written to the Hydra run dir as scores.csv, with one plot per proxy of
-excess MSE over the oracle against the number of source environments in plots/; a summary is printed.
+excess MSE over the oracle (every bridge and pooled, against the same oracle) against the
+number of source environments in plots/; a summary is printed.
 """
 
 import itertools
@@ -39,6 +40,13 @@ from genetic_perturbation_playground.model.proxy_unconfounded_neural import (
 from genetic_perturbation_playground.utils.kernels import RBF, median_heuristic
 from genetic_perturbation_playground.utils.plotting import plot_excess_mse_vs_n_envs
 
+# model -> (legend label, colour); a model keeps its colour across figures (validated palette)
+SERIES = {
+    "kernel": ("kernel bridge (target W only)", "#2a78d6"),
+    "pooled": ("pooled sources (ignores environment)", "#eb6834"),
+    "neural": ("neural bridge (target W only)", "#1baf7a"),
+}
+
 
 def run(cfg: DictConfig, proxy: str, d: int, theta_star: float, seed: int) -> dict[str, float]:
     """Held-out target MSE of each predictor."""
@@ -55,13 +63,12 @@ def run(cfg: DictConfig, proxy: str, d: int, theta_star: float, seed: int) -> di
         "kernel": lambda: MarginalEmbeddingBridge(kx, kw, cfg.reg),
         "neural": lambda: NeuralMarginalEmbeddingBridge(reg=cfg.reg, seed=seed, **cfg.neural),
     }
-    bridge = bridges[cfg.bridge]().fit(xs, ys, ws)
 
     def kernel_ridge(x, y):  # regression of y on x = ConditionalMeanEmbedding read out at y
         return ConditionalMeanEmbedding(kx, cfg.reg).fit(x, y).weights(test.x).T @ y
 
     preds = {
-        "bridge": bridge.predict(test.x, target.w),
+        **{b: bridges[b]().fit(xs, ys, ws).predict(test.x, target.w) for b in cfg.bridges},
         "pooled": kernel_ridge(np.concatenate(xs), np.concatenate(ys)),
         "oracle": kernel_ridge(target.x, target.y),
         "bayes": conditional_mean(test.x, theta),
@@ -87,9 +94,7 @@ def evaluate(cfg: DictConfig) -> pd.DataFrame:
                     }
                     for k, v in mse.items()
                 ]
-            print(
-                f"{proxy} D={d} theta*={theta_star:+.1f}: bridge MSE {mse['bridge']:.4f} (last seed)"
-            )
+            print(f"{proxy} D={d} theta*={theta_star:+.1f} done")
     return pd.DataFrame(rows)
 
 
@@ -98,12 +103,9 @@ def main(cfg: DictConfig):
     scores = evaluate(cfg)
     out_dir = Path(HydraConfig.get().runtime.output_dir)
     scores.to_csv(out_dir / "scores.csv", index=False)
-    models = {
-        "bridge": "domain transfer (target W only)",
-        "pooled": "pooled sources (ignores environment)",
-    }
+    models = {m: SERIES[m] for m in [*cfg.bridges, "pooled"]}
     for proxy, s in scores.groupby("proxy"):
-        path = out_dir / "plots" / f"excess_mse_vs_n_envs_{proxy}_{cfg.bridge}.png"
+        path = out_dir / "plots" / f"excess_mse_vs_n_envs_{proxy}.png"
         plot_excess_mse_vs_n_envs(s, models, path)
     summary = scores.groupby(["proxy", "n_envs", "theta_star", "model"])["mse"].agg(["mean", "std"])
     print(summary.unstack("model").round(4).to_string())

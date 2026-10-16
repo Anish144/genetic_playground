@@ -82,15 +82,17 @@ def report(scores: pd.DataFrame, unit: str, out_dir: Path) -> None:
     print(f"Plots saved to {out_dir}")
 
 
-def plot_excess_mse_vs_n_envs(scores: pd.DataFrame, models: dict[str, str], path: Path) -> None:
+def plot_excess_mse_vs_n_envs(
+    scores: pd.DataFrame, models: dict[str, tuple[str, str]], path: Path
+) -> None:
     """Excess MSE over the oracle against the number of source environments, one panel per theta*.
 
     `scores` is a long table with columns [n_envs, theta_star, seed, model, mse]. The excess is
     paired, model minus oracle on the same seed and test set, so test-set noise cancels.
-    Lines are mean over seeds, bands ± 1 sd (lower edge clipped, the y-axis is log).
-    `models` maps model names onto legend labels, in the fixed categorical colour order.
+    Lines are mean over seeds, bands ± 1 sd. The y-axis is symmetric-log (linear within ±1e-3), so
+    a model that beats the oracle (negative excess) is still drawn; the grey line marks zero.
+    `models` maps each model name to plot onto its (legend label, colour).
     """
-    colors = ["#2a78d6", "#eb6834"]  # categorical slots 1-2, validated palette
     wide = scores.pivot_table(index=["theta_star", "n_envs", "seed"], columns="model", values="mse")
     excess = wide[list(models)].sub(wide["oracle"], axis=0)
     stats = excess.groupby(["theta_star", "n_envs"]).agg(["mean", "std"])
@@ -99,13 +101,13 @@ def plot_excess_mse_vs_n_envs(scores: pd.DataFrame, models: dict[str, str], path
         width = plt.rcParams["figure.figsize"][0]
         fig, axes = plt.subplots(1, len(thetas), squeeze=False, sharey=True, figsize=(width, 2.6))
         for ax, theta in zip(axes.flat, thetas, strict=True):
-            for (model, label), color in zip(models.items(), colors, strict=True):
+            for model, (label, color) in models.items():
                 s = stats.loc[theta, model]
-                lower = (s["mean"] - s["std"]).clip(lower=s["mean"].min() / 10)
-                ax.fill_between(s.index, lower, s["mean"] + s["std"], color=color, alpha=0.1, lw=0)
+                mean, sd = s["mean"], s["std"]
+                ax.fill_between(s.index, mean - sd, mean + sd, color=color, alpha=0.1, lw=0)
                 ax.plot(
                     s.index,
-                    s["mean"],
+                    mean,
                     color=color,
                     lw=2,
                     marker="o",
@@ -114,7 +116,9 @@ def plot_excess_mse_vs_n_envs(scores: pd.DataFrame, models: dict[str, str], path
                     mew=1.5,
                     label=label,
                 )
-            ax.set(xscale="log", yscale="log")
+            ax.set_xscale("log")
+            ax.set_yscale("symlog", linthresh=1e-3)
+            ax.axhline(0, color="#8a8984", lw=0.75)
             ax.set_xticks(s.index, [str(d) for d in s.index])
             ax.xaxis.set_minor_locator(plt.NullLocator())
             ax.set(title=rf"$\theta^\star = {theta:g}$", xlabel="number of source environments")
