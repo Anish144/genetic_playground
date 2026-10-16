@@ -15,3 +15,4 @@ neural:               # used when bridge=neural; see model/proxy_unconfounded_ne
   depth: 2
   lr: 1.0e-3
   n_steps: 200        # more steps memorise the source environments; held-out error rises
+  device: cpu         # cuda on GPU nodes; not mps (float64 is unsupported there)

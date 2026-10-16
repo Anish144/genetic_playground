@@ -34,9 +34,9 @@ def _mlp(d_in: int, width: int, depth: int, d_out: int) -> nn.Sequential:
     return nn.Sequential(*layers, nn.Linear(d, d_out)).double()
 
 
-def _tensor(a: np.ndarray) -> torch.Tensor:
-    """(n,) or (n, d) array -> float64 tensor of shape (n, d)."""
-    return torch.as_tensor(np.asarray(a, dtype=np.float64)).reshape(len(a), -1)
+def _tensor(a: np.ndarray, device: str) -> torch.Tensor:
+    """(n,) or (n, d) array -> float64 tensor of shape (n, d) on ``device``."""
+    return torch.as_tensor(np.asarray(a, dtype=np.float64), device=device).reshape(len(a), -1)
 
 
 @dataclass
@@ -49,6 +49,8 @@ class NeuralMarginalEmbeddingBridge:
     reg         ridge penalty lambda on A, scaled by N as in the kernel bridge
     lr          Adam learning rate for the parameters of phi and psi
     n_steps     full-batch Adam steps
+    device      torch device to train and predict on, e.g. "cpu" or "cuda" (not "mps": the model
+                is float64, which the Apple backend does not support)
 
     After ``fit``: ``phi_``, ``psi_`` (the MLPs) and ``A_``, A flattened to shape (p q,).
     """
@@ -60,6 +62,7 @@ class NeuralMarginalEmbeddingBridge:
     lr: float = 1e-3
     n_steps: int = 2000
     seed: int = 0
+    device: str = "cpu"
 
     def fit(
         self, xs: list[np.ndarray], ys: list[np.ndarray], ws: list[np.ndarray]
@@ -69,12 +72,16 @@ class NeuralMarginalEmbeddingBridge:
         xs[e]: (n_e,) or (n_e, d_x);  ys[e]: (n_e,);  ws[e]: (m_e,) or (m_e, d_w).
         """
         torch.manual_seed(self.seed)
-        x = _tensor(np.concatenate(xs))  # (N, d_x)
-        y = _tensor(np.concatenate(ys))[:, 0]  # (N,)
-        env = torch.from_numpy(np.repeat(np.arange(len(xs)), [len(xi) for xi in xs]))  # (N,)
-        w_envs = [_tensor(w) for w in ws]  # D tensors of shape (m_e, d_w)
-        self.phi_ = _mlp(x.shape[1], self.width, self.depth, self.n_features)
-        self.psi_ = _mlp(w_envs[0].shape[1], self.width, self.depth, self.n_features)
+        x = _tensor(np.concatenate(xs), self.device)  # (N, d_x)
+        y = _tensor(np.concatenate(ys), self.device)[:, 0]  # (N,)
+        env = torch.as_tensor(
+            np.repeat(np.arange(len(xs)), [len(xi) for xi in xs]), device=self.device
+        )
+        w_envs = [_tensor(w, self.device) for w in ws]  # D tensors of shape (m_e, d_w)
+        self.phi_ = _mlp(x.shape[1], self.width, self.depth, self.n_features).to(self.device)
+        self.psi_ = _mlp(w_envs[0].shape[1], self.width, self.depth, self.n_features).to(
+            self.device
+        )
 
         params = [*self.phi_.parameters(), *self.psi_.parameters()]
         optimizer = torch.optim.Adam(params, lr=self.lr)
@@ -95,8 +102,9 @@ class NeuralMarginalEmbeddingBridge:
         x: (n_new,) or (n_new, d_x);  w_target: (m*,) or (m*, d_w);  returns (n_new,).
         """
         with torch.no_grad():
-            mu = self.psi_(_tensor(w_target)).mean(dim=0, keepdim=True)  # (1, q)
-            return (self._features(self.phi_(_tensor(x)), mu) @ self.A_).numpy()
+            mu = self.psi_(_tensor(w_target, self.device)).mean(dim=0, keepdim=True)  # (1, q)
+            phi_x = self.phi_(_tensor(x, self.device))
+            return (self._features(phi_x, mu) @ self.A_).cpu().numpy()
 
     def _stage2(self, x, y, env, w_envs) -> tuple[torch.Tensor, torch.Tensor]:
         """Closed-form ridge A for the current features, and its mean squared error.
@@ -108,7 +116,8 @@ class NeuralMarginalEmbeddingBridge:
         feats = self._features(self.phi_(x), mu[env])  # (N, p q)
         n, d = feats.shape
         A = torch.linalg.solve(
-            feats.T @ feats + self.reg * n * torch.eye(d, dtype=torch.float64), feats.T @ y
+            feats.T @ feats + self.reg * n * torch.eye(d, dtype=feats.dtype, device=feats.device),
+            feats.T @ y,
         )
         return torch.mean((feats @ A - y) ** 2), A
 
