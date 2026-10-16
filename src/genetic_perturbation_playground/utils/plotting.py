@@ -3,7 +3,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from matplotlib.colors import LinearSegmentedColormap, LogNorm
+from matplotlib.colors import LinearSegmentedColormap, LogNorm, to_rgba
 from matplotlib.ticker import FuncFormatter, MultipleLocator
 from tueplots import bundles
 
@@ -85,50 +85,55 @@ def report(scores: pd.DataFrame, unit: str, out_dir: Path) -> None:
 def plot_excess_mse_vs_n_envs(
     scores: pd.DataFrame, models: dict[str, tuple[str, str]], path: Path
 ) -> None:
-    """Excess MSE over the oracle against the number of source environments, one panel per theta*.
+    """Excess MSE over the oracle for each number of source environments, one panel per theta*.
 
     `scores` is a long table with columns [n_envs, theta_star, seed, model, mse]. The excess is
-    paired, model minus oracle on the same seed and test set, so test-set noise cancels.
-    Lines are mean over seeds, bands ± 1 sd. The y-axis is symmetric-log (linear within ±1e-3), so
-    a model that beats the oracle (negative excess) is still drawn; the grey line marks zero.
+    paired, model minus oracle on the same seed and test set, so test-set noise cancels. Each
+    model gets a box per number of environments (median, interquartile range, whiskers to
+    1.5 IQR) with every seed drawn as a dot on top. The y-axis is symmetric-log (linear within
+    ±1e-3), so seeds that beat the oracle (negative excess) are still drawn; grey marks zero.
     `models` maps each model name to plot onto its (legend label, colour).
     """
     wide = scores.pivot_table(index=["theta_star", "n_envs", "seed"], columns="model", values="mse")
     excess = wide[list(models)].sub(wide["oracle"], axis=0)
-    stats = excess.groupby(["theta_star", "n_envs"]).agg(["mean", "std"])
     thetas = scores["theta_star"].unique()
+    n_envs = np.sort(scores["n_envs"].unique())
+    box_width = 0.8 / len(models)
+    rng = np.random.default_rng(0)  # jitter only
     with plt.rc_context(bundles.icml2024(column="full", ncols=len(thetas), usetex=False)):
         width = plt.rcParams["figure.figsize"][0]
         fig, axes = plt.subplots(1, len(thetas), squeeze=False, sharey=True, figsize=(width, 2.6))
         for ax, theta in zip(axes.flat, thetas, strict=True):
-            for model, (label, color) in models.items():
-                s = stats.loc[theta, model]
-                mean, sd = s["mean"], s["std"]
-                ax.fill_between(s.index, mean - sd, mean + sd, color=color, alpha=0.1, lw=0)
-                ax.plot(
-                    s.index,
-                    mean,
-                    color=color,
-                    lw=2,
-                    marker="o",
-                    ms=5,
-                    mec="white",
-                    mew=1.5,
-                    label=label,
+            handles = []
+            for j, (model, (label, color)) in enumerate(models.items()):
+                groups = [excess.loc[(theta, d), model].to_numpy() for d in n_envs]
+                pos = np.arange(len(n_envs)) + (j - (len(models) - 1) / 2) * box_width
+                box = ax.boxplot(
+                    groups,
+                    positions=pos,
+                    widths=0.8 * box_width,
+                    patch_artist=True,
+                    showfliers=False,  # every seed is drawn as a dot below
+                    boxprops={"facecolor": to_rgba(color, 0.25), "edgecolor": color, "lw": 1},
+                    medianprops={"color": "#0b0b0b", "lw": 1},
+                    whiskerprops={"color": color, "lw": 1},
+                    capprops={"color": color, "lw": 1},
                 )
-            ax.set_xscale("log")
+                for p, g in zip(pos, groups, strict=True):
+                    jitter = rng.uniform(-0.25, 0.25, len(g)) * box_width
+                    ax.scatter(p + jitter, g, s=4, color=color, lw=0, zorder=3)
+                handles.append((box["boxes"][0], label))
+            ax.set_xticks(range(len(n_envs)), [str(d) for d in n_envs])
             ax.set_yscale("symlog", linthresh=1e-3)
             ax.axhline(0, color="#8a8984", lw=0.75)
-            ax.set_xticks(s.index, [str(d) for d in s.index])
-            ax.xaxis.set_minor_locator(plt.NullLocator())
             ax.set(title=rf"$\theta^\star = {theta:g}$", xlabel="number of source environments")
-            ax.grid(color="#e5e4df", lw=0.5)
+            ax.grid(axis="y", color="#e5e4df", lw=0.5)
             ax.set_axisbelow(True)
             ax.spines[["top", "right"]].set_visible(False)
         axes.flat[0].set_ylabel("target MSE $-$ oracle MSE")
-        fig.suptitle("Excess held-out target MSE over the oracle")
+        fig.suptitle("Excess held-out target MSE over the oracle (one dot per seed)")
         fig.legend(
-            *axes.flat[0].get_legend_handles_labels(),
+            *zip(*handles, strict=True),
             loc="outside lower center",
             ncols=len(models),
             frameon=False,
