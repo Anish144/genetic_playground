@@ -81,6 +81,8 @@ def cross_validate(adata: sc.AnnData, n_folds: int, seed: int, k: int, bridge_re
         is_test = np.isin(batch, held_out)
         models, test = fit(adata[~is_test], bridge_reg), adata[is_test]
         pert_scores.append(score(models, test, k))
+        fold_means = pert_scores[-1].groupby(["metric", "model"], sort=False)["value"].mean()
+        print(fold_means.unstack("model").round(4).to_string(), flush=True)
         batch_scores += [
             score(models, test[batch[is_test] == b], k).assign(batch=b, cells=(batch == b).sum())
             for b in held_out
