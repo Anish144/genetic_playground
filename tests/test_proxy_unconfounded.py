@@ -9,7 +9,10 @@ from genetic_perturbation_playground.data.proxy_unconfounded import (
     sample_environments,
 )
 from genetic_perturbation_playground.model.proxy_confounded import ConditionalMeanEmbedding
-from genetic_perturbation_playground.model.proxy_unconfounded import MarginalEmbeddingBridge
+from genetic_perturbation_playground.model.proxy_unconfounded import (
+    MarginalEmbeddingBridge,
+    mean_inner,
+)
 from genetic_perturbation_playground.utils.kernels import RBF, Kernel
 
 
@@ -85,7 +88,7 @@ def test_predict_on_source_environment_reproduces_fitted_values(small_envs):
     bridge = _fit(small_envs)
     x = np.concatenate([e.x for e in small_envs])
     env = np.repeat(np.arange(len(small_envs)), [len(e.x) for e in small_envs])
-    gram = RBF()(x) * bridge._mean_inner(bridge.w_envs_)[np.ix_(env, env)]
+    gram = RBF()(x) * mean_inner(RBF(), bridge.w_envs_)[np.ix_(env, env)]
     for d, e in enumerate(small_envs):
         np.testing.assert_allclose(bridge.predict(e.x, e.w), (gram @ bridge.coef_)[env == d])
 

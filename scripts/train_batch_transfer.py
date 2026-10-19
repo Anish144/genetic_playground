@@ -25,16 +25,21 @@ from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig
 
 from genetic_perturbation_playground.data.data_loader import load_dataset
-from genetic_perturbation_playground.model.batch_transfer import BatchTransferModel, summary_stats
+from genetic_perturbation_playground.model.batch_transfer import (
+    BatchTransferModel,
+    KernelBridgeTransfer,
+    summary_stats,
+)
 from genetic_perturbation_playground.utils import metrics
 from genetic_perturbation_playground.utils.plotting import report
 
 MODELS = {"pooled (b=0)": 0.0, "shift (b=1)": 1.0, "transfer (fit b)": None}
 
 
-def fit(train: sc.AnnData) -> dict:
+def fit(train: sc.AnnData, bridge_reg: float) -> dict:
     """Fit every model variant on the training batches."""
     models = {name: BatchTransferModel(s).fit(train) for name, s in MODELS.items()}
+    models["kernel bridge"] = KernelBridgeTransfer(bridge_reg).fit(train)
     slope = models["transfer (fit b)"].slope_
     print(
         f"fitted b: median {np.median(slope):.3f}, "
@@ -51,14 +56,17 @@ def score(models: dict, test: sc.AnnData, k: int) -> pd.DataFrame:
     s = summary_stats(test)
     keep = np.isin(s["perturbations"], next(iter(models.values())).perturbations_)
     perts, w = s["perturbations"][keep], s["w_mean"][keep]
-    preds = {name: m.predict(perts, w) - w for name, m in models.items()}
+    preds = {
+        name: m.predict(perts, test if isinstance(m, KernelBridgeTransfer) else w) - w
+        for name, m in models.items()
+    }
     scores = metrics.score(preds, s["y_mean"][keep] - w, perts, k)
     return scores.assign(
         cells=scores["perturbation"].map(dict(zip(perts, s["n"][keep], strict=True)))
     )
 
 
-def cross_validate(adata: sc.AnnData, n_folds: int, seed: int, k: int) -> tuple:
+def cross_validate(adata: sc.AnnData, n_folds: int, seed: int, k: int, bridge_reg: float) -> tuple:
     """K-fold over batches: each batch is held out exactly once, models refit per fold.
 
     Returns (per-perturbation scores, per-batch scores) as long tables. Per-perturbation scores are
@@ -71,7 +79,7 @@ def cross_validate(adata: sc.AnnData, n_folds: int, seed: int, k: int) -> tuple:
     for i, held_out in enumerate(folds):
         print(f"fold {i + 1}/{n_folds}: holding out {len(held_out)} batches")
         is_test = np.isin(batch, held_out)
-        models, test = fit(adata[~is_test]), adata[is_test]
+        models, test = fit(adata[~is_test], bridge_reg), adata[is_test]
         pert_scores.append(score(models, test, k))
         batch_scores += [
             score(models, test[batch[is_test] == b], k).assign(batch=b, cells=(batch == b).sum())
@@ -90,7 +98,7 @@ def cross_validate(adata: sc.AnnData, n_folds: int, seed: int, k: int) -> tuple:
 @hydra.main(config_path="../configs", config_name="train_batch_transfer", version_base=None)
 def main(cfg: DictConfig):
     adata = load_dataset()
-    per_pert, per_batch = cross_validate(adata, cfg.n_folds, cfg.seed, cfg.top_k)
+    per_pert, per_batch = cross_validate(adata, cfg.n_folds, cfg.seed, cfg.top_k, cfg.bridge_reg)
 
     plot_dir = Path(HydraConfig.get().runtime.output_dir) / "plots"
     report(per_pert, "perturbation", plot_dir / "per_perturbation")

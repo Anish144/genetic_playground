@@ -1,3 +1,4 @@
 n_folds: 5   # K-fold over batches; each batch is held out exactly once
 seed: 0      # shuffles batches into folds
 top_k: 20    # genes used for pearson_top_k
+bridge_reg: 1.0e-6  # KernelBridgeTransfer ridge, scaled by training cells N; shrinks predictions toward 0
