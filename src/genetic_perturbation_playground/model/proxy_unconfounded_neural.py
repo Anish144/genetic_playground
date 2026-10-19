@@ -14,7 +14,7 @@ identification needs).
 
 Stage 1: mu_e = mean_j psi(w_ej), the closed-form embedding of each environment (X ⊥ (U, E)
 means no regression on x is needed). Stage 2: A = ridge regression of y on the p q features
-phi(x_i) ⊗ mu_env(i), also closed form. phi and psi are trained with Adam on the stage-2 squared
+phi(x_i) ⊗ mu_env(i), also closed form. phi and psi are trained with AdamW on the stage-2 squared
 error, backpropagating through A and mu_e (as in DFPV, Xu et al., 2021).
 """
 
@@ -47,8 +47,9 @@ class NeuralMarginalEmbeddingBridge:
     width       hidden units per layer of each MLP
     depth       hidden layers per MLP
     reg         ridge penalty lambda on A, scaled by N as in the kernel bridge
-    lr          Adam learning rate for the parameters of phi and psi
-    n_steps     full-batch Adam steps
+    lr          AdamW learning rate for the parameters of phi and psi
+    weight_decay  AdamW decoupled weight decay on phi and psi (0 is plain Adam)
+    n_steps     full-batch AdamW steps
     device      torch device to train and predict on, e.g. "cpu" or "cuda" (not "mps": the model
                 is float64, which the Apple backend does not support)
 
@@ -60,20 +61,32 @@ class NeuralMarginalEmbeddingBridge:
     depth: int = 2
     reg: float = 1e-3
     lr: float = 1e-3
+    weight_decay: float = 0.0
     n_steps: int = 2000
     seed: int = 0
     device: str = "cpu"
 
     def fit(
-        self, xs: list[np.ndarray], ys: list[np.ndarray], ws: list[np.ndarray]
+        self,
+        xs: list[np.ndarray],
+        ys: list[np.ndarray],
+        ws: list[np.ndarray],
+        counts: list[np.ndarray] | None = None,
     ) -> "NeuralMarginalEmbeddingBridge":
         """Fit from D source environments; element e of each list belongs to environment e.
 
-        xs[e]: (n_e,) or (n_e, d_x);  ys[e]: (n_e,);  ws[e]: (m_e,) or (m_e, d_w).
+        xs[e]: (n_e,) or (n_e, d_x);  ys[e]: (n_e,) or (n_e, d_y);  ws[e]: (m_e,) or (m_e, d_w).
+        counts[e]: (n_e,), optional; pair i stands for counts[e][i] replicates with mean y_i, so the
+        fit equals the fit on the replicates (weighted loss, ridge scaled by their total).
         """
         torch.manual_seed(self.seed)
         x = _tensor(np.concatenate(xs), self.device)  # (N, d_x)
-        y = _tensor(np.concatenate(ys), self.device)[:, 0]  # (N,)
+        y = torch.as_tensor(np.concatenate(ys), dtype=torch.float64, device=self.device)
+        c = torch.as_tensor(
+            np.ones(len(x)) if counts is None else np.concatenate(counts),
+            dtype=torch.float64,
+            device=self.device,
+        )
         env = torch.as_tensor(
             np.repeat(np.arange(len(xs)), [len(xi) for xi in xs]), device=self.device
         )
@@ -84,42 +97,45 @@ class NeuralMarginalEmbeddingBridge:
         )
 
         params = [*self.phi_.parameters(), *self.psi_.parameters()]
-        optimizer = torch.optim.Adam(params, lr=self.lr)
+        optimizer = torch.optim.AdamW(params, lr=self.lr, weight_decay=self.weight_decay)
         progress = trange(self.n_steps, desc="neural bridge", leave=False)
         for _ in progress:
             optimizer.zero_grad()
-            loss, _ = self._stage2(x, y, env, w_envs)
+            loss, _ = self._stage2(x, y, c, env, w_envs)
             loss.backward()
             optimizer.step()
             progress.set_postfix(loss=f"{loss.item():.4f}")
         with torch.no_grad():
-            _, self.A_ = self._stage2(x, y, env, w_envs)
+            _, self.A_ = self._stage2(x, y, c, env, w_envs)
         return self
 
     def predict(self, x: np.ndarray, w_target: np.ndarray) -> np.ndarray:
         """E[Y | x, e*] for the target environment whose proxies are ``w_target``.
 
-        x: (n_new,) or (n_new, d_x);  w_target: (m*,) or (m*, d_w);  returns (n_new,).
+        x: (n_new,) or (n_new, d_x);  w_target: (m*,) or (m*, d_w);  returns (n_new,) or (n_new, d_y).
         """
         with torch.no_grad():
             mu = self.psi_(_tensor(w_target, self.device)).mean(dim=0, keepdim=True)  # (1, q)
             phi_x = self.phi_(_tensor(x, self.device))
             return (self._features(phi_x, mu) @ self.A_).cpu().numpy()
 
-    def _stage2(self, x, y, env, w_envs) -> tuple[torch.Tensor, torch.Tensor]:
-        """Closed-form ridge A for the current features, and its mean squared error.
+    def _stage2(self, x, y, c, env, w_envs) -> tuple[torch.Tensor, torch.Tensor]:
+        """Closed-form weighted ridge A for the current features, and its weighted squared error.
 
-        x: (N, d_x), y: (N,), env: (N,) environment index of each pair, w_envs: D x (m_e, d_w).
-        Returns the scalar loss and A flattened to (p q,).
+        x: (N, d_x), y: (N,) or (N, d_y), c: (N,) replicate counts, env: (N,) environment index of
+        each pair, w_envs: D x (m_e, d_w). Returns the scalar loss and A, shape (p q,) or (p q, d_y).
         """
         mu = torch.stack([self.psi_(w).mean(dim=0) for w in w_envs])  # (D, q), stage 1
         feats = self._features(self.phi_(x), mu[env])  # (N, p q)
-        n, d = feats.shape
+        weighted = feats * c[:, None]
+        n, d = c.sum(), feats.shape[1]
         A = torch.linalg.solve(
-            feats.T @ feats + self.reg * n * torch.eye(d, dtype=feats.dtype, device=feats.device),
-            feats.T @ y,
+            weighted.T @ feats
+            + self.reg * n * torch.eye(d, dtype=feats.dtype, device=feats.device),
+            weighted.T @ y,
         )
-        return torch.mean((feats @ A - y) ** 2), A
+        sq_err = ((feats @ A - y) ** 2).reshape(len(c), -1).mean(dim=1)
+        return (c * sq_err).sum() / n, A
 
     @staticmethod
     def _features(phi_x: torch.Tensor, mu: torch.Tensor) -> torch.Tensor:

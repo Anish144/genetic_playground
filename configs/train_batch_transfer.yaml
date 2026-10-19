@@ -1,4 +1,13 @@
 n_folds: 5   # K-fold over batches; each batch is held out exactly once
 seed: 0      # shuffles batches into folds
 top_k: 20    # genes used for pearson_top_k
-bridge_reg: 1.0e-6  # KernelBridgeTransfer ridge, scaled by training cells N; shrinks predictions toward 0
+bridge_reg: 1.0e-6  # ridge of both bridges, scaled by training cells N; shrinks predictions toward 0
+bridges: [kernel, neural]  # bridge models to fit next to the linear ones; neural wants a GPU
+neural:               # NeuralBridgeTransfer settings; see model/proxy_unconfounded_neural.py
+  n_features: 16      # p = q, output dimension of phi and psi
+  width: 64
+  depth: 2
+  lr: 1.0e-3
+  weight_decay: 1.0e-2  # AdamW, on the weights of phi and psi
+  n_steps: 500        # full-batch AdamW steps per fold
+  device: cuda        # cpu works but is slow at this size; not mps (float64)

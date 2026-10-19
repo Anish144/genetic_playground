@@ -6,6 +6,9 @@ from genetic_perturbation_playground.model.proxy_unconfounded import (
     MarginalEmbeddingBridge,
     mean_inner,
 )
+from genetic_perturbation_playground.model.proxy_unconfounded_neural import (
+    NeuralMarginalEmbeddingBridge,
+)
 from genetic_perturbation_playground.utils.kernels import RBF, median_heuristic
 
 
@@ -110,50 +113,25 @@ class KernelBridgeTransfer:
         self.reg = reg
 
     def fit(self, adata: sc.AnnData) -> "KernelBridgeTransfer":
-        s = summary_stats(adata)
-        labels = adata.obs["perturbation"].astype(str).to_numpy()
-        b_idx = np.searchsorted(s["batches"], adata.obs["batch"].astype(str).to_numpy())
-        is_ctrl = labels == "control"
-
-        self.ctrl_ = _per_batch_controls(adata, is_ctrl, b_idx, len(s["batches"]))
+        s, self.ctrl_, pert, batch, y_pe, n_pe = _bridge_data(adata)
         self.kernel_w_ = RBF(lengthscales=median_heuristic(np.concatenate(self.ctrl_)))
         inner = mean_inner(self.kernel_w_, self.ctrl_)
 
-        # per-(perturbation, batch) means of y; a block's ridge uses the global N as one bridge would
-        p_idx = np.searchsorted(s["perturbations"], labels[~is_ctrl])
-        pair = p_idx * len(s["batches"]) + b_idx[~is_ctrl]
-        pairs, pair_idx = np.unique(pair, return_inverse=True)
-        n_pe = np.bincount(pair_idx)
-        y_pe = _dense(_onehot(pair_idx, len(pairs)) @ adata.X[~is_ctrl]) / n_pe[:, None]
-        n_total = n_pe.sum()
-
+        # a block's ridge uses the global N, as the one cell-level bridge would
         self.perturbations_, self.bridges_ = s["perturbations"], []
         for p in range(len(s["perturbations"])):
-            rows = np.flatnonzero(pairs // len(s["batches"]) == p)
-            bridge = MarginalEmbeddingBridge(
-                RBF(), self.kernel_w_, self.reg * n_total / n_pe[rows].sum()
-            )
-            env = pairs[rows] % len(s["batches"])
+            rows = np.flatnonzero(pert == p)
+            reg = self.reg * n_pe.sum() / n_pe[rows].sum()
+            bridge = MarginalEmbeddingBridge(RBF(), self.kernel_w_, reg)
             self.bridges_.append(
-                bridge.fit_embedded(np.zeros(len(rows)), y_pe[rows], env, inner, n_pe[rows])
+                bridge.fit_embedded(np.zeros(len(rows)), y_pe[rows], batch[rows], inner, n_pe[rows])
             )
         return self
 
     def predict(self, perturbations: list[str], test: sc.AnnData) -> np.ndarray:
-        """Mean expression of each perturbation in `test`, given only `test`'s control cells.
-
-        If `test` pools several batches, each perturbation's target embedding is the mixture of
-        their mu_b weighted by where its cells fall, matching summary_stats' w_mean.
-        """
-        st = summary_stats(test)
-        is_ctrl = test.obs["perturbation"].astype(str).to_numpy() == "control"
-        b_idx = np.searchsorted(st["batches"], test.obs["batch"].astype(str).to_numpy())
-        ctrl = _per_batch_controls(test, is_ctrl, b_idx, len(st["batches"]))
-        mix = st["pert_batch_n"] / st["n"][:, None]  # (test perts, test batches)
-        targets = (
-            mix[np.searchsorted(st["perturbations"], perturbations)]
-            @ mean_inner(self.kernel_w_, self.ctrl_, ctrl).T
-        )
+        """Mean expression of each perturbation in `test`, given only `test`'s control cells."""
+        ctrl, mix = _targets(test, perturbations)
+        targets = mix @ mean_inner(self.kernel_w_, self.ctrl_, ctrl).T
         rows = np.searchsorted(self.perturbations_, perturbations)
         return np.concatenate(
             [
@@ -161,6 +139,62 @@ class KernelBridgeTransfer:
                 for p, t in zip(rows, targets, strict=True)
             ]
         )
+
+
+class NeuralBridgeTransfer:
+    """NeuralMarginalEmbeddingBridge with x = one-hot perturbation and w = control cell.
+
+    Fit on the same count-weighted per-(perturbation, batch) means as KernelBridgeTransfer. Unlike
+    the delta kernel, phi(x) and A are shared, so perturbations borrow strength from each other.
+    """
+
+    def __init__(self, **bridge_kwargs):
+        self.bridge_kwargs = bridge_kwargs
+
+    def fit(self, adata: sc.AnnData) -> "NeuralBridgeTransfer":
+        s, ctrl, pert, batch, y_pe, n_pe = _bridge_data(adata)
+        self.perturbations_ = s["perturbations"]
+        onehot = np.eye(len(self.perturbations_))
+        envs = [batch == b for b in range(len(ctrl))]
+        self.bridge_ = NeuralMarginalEmbeddingBridge(**self.bridge_kwargs).fit(
+            [onehot[pert[e]] for e in envs], [y_pe[e] for e in envs], ctrl, [n_pe[e] for e in envs]
+        )
+        return self
+
+    def predict(self, perturbations: list[str], test: sc.AnnData) -> np.ndarray:
+        """Mean expression of each perturbation in `test`, given only `test`'s control cells."""
+        ctrl, mix = _targets(test, perturbations)
+        x = np.eye(len(self.perturbations_))[np.searchsorted(self.perturbations_, perturbations)]
+        # prediction is linear in mu, so a batch mixture is the mix-weighted per-batch prediction
+        return sum(mix[:, [b]] * self.bridge_.predict(x, w) for b, w in enumerate(ctrl))
+
+
+def _bridge_data(adata: sc.AnnData) -> tuple:
+    """Bridge training data: summary_stats, control cells per batch, and per-(perturbation, batch)
+    pairs as (perturbation index, batch index, mean of y, cell count)."""
+    s = summary_stats(adata)
+    labels = adata.obs["perturbation"].astype(str).to_numpy()
+    b_idx = np.searchsorted(s["batches"], adata.obs["batch"].astype(str).to_numpy())
+    is_ctrl = labels == "control"
+    n_b = len(s["batches"])
+
+    p_idx = np.searchsorted(s["perturbations"], labels[~is_ctrl])
+    pairs, pair_idx = np.unique(p_idx * n_b + b_idx[~is_ctrl], return_inverse=True)
+    n_pe = np.bincount(pair_idx)
+    y_pe = _dense(_onehot(pair_idx, len(pairs)) @ adata.X[~is_ctrl]) / n_pe[:, None]
+    ctrl = _per_batch_controls(adata, is_ctrl, b_idx, n_b)
+    return s, ctrl, pairs // n_b, pairs % n_b, y_pe, n_pe
+
+
+def _targets(test: sc.AnnData, perturbations: list[str]) -> tuple:
+    """Control cells per batch of `test`, and for each perturbation the share of its cells in each
+    batch (rows sum to 1), so a pooled `test` is the mixture its cells came from."""
+    st = summary_stats(test)
+    is_ctrl = test.obs["perturbation"].astype(str).to_numpy() == "control"
+    b_idx = np.searchsorted(st["batches"], test.obs["batch"].astype(str).to_numpy())
+    mix = st["pert_batch_n"] / st["n"][:, None]
+    rows = np.searchsorted(st["perturbations"], perturbations)
+    return _per_batch_controls(test, is_ctrl, b_idx, len(st["batches"])), mix[rows]
 
 
 def _per_batch_controls(adata, is_ctrl, b_idx, n_batches) -> list[np.ndarray]:

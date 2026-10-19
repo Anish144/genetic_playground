@@ -4,6 +4,9 @@ import pandas as pd
 
 from genetic_perturbation_playground.model.batch_transfer import KernelBridgeTransfer
 from genetic_perturbation_playground.model.proxy_unconfounded import MarginalEmbeddingBridge
+from genetic_perturbation_playground.model.proxy_unconfounded_neural import (
+    NeuralMarginalEmbeddingBridge,
+)
 from genetic_perturbation_playground.utils.kernels import RBF
 
 
@@ -43,3 +46,26 @@ def test_matches_cell_level_marginal_embedding_bridge():
         [bridge.fit(xs, [y[:, g] for y in ys], ws).predict(x_query, w_test) for g in range(5)], 1
     )
     np.testing.assert_allclose(model.predict(query, test), expected, rtol=1e-8, atol=1e-10)
+
+
+def test_neural_bridge_counts_match_replicated_rows():
+    """A pair with count c fits exactly like c identical rows (weighted loss and ridge)."""
+    rng = np.random.default_rng(0)
+    xs = [rng.normal(size=(6, 2)) for _ in range(3)]
+    ys = [rng.normal(size=(6, 4)) for _ in range(3)]  # multi-output y
+    ws = [rng.normal(size=(10, 3)) for _ in range(3)]
+    counts = [rng.integers(1, 4, size=6) for _ in range(3)]
+
+    def fit(xs, ys, counts=None):
+        bridge = NeuralMarginalEmbeddingBridge(n_steps=5, weight_decay=1e-2, n_features=4)
+        return bridge.fit(xs, ys, ws, counts)
+
+    weighted = fit(xs, ys, counts)
+    replicated = fit(
+        [np.repeat(x, c, 0) for x, c in zip(xs, counts, strict=True)],
+        [np.repeat(y, c, 0) for y, c in zip(ys, counts, strict=True)],
+    )
+    x_new = rng.normal(size=(5, 2))
+    np.testing.assert_allclose(
+        weighted.predict(x_new, ws[0]), replicated.predict(x_new, ws[0]), rtol=1e-6
+    )
