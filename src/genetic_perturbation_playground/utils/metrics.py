@@ -44,8 +44,8 @@ def auroc(scores: np.ndarray, labels: np.ndarray) -> float:
     return float((ranks[labels == 1].sum() - n_pos * (n_pos + 1) / 2) / (n_pos * n_neg))
 
 
-def accuracy(scores: np.ndarray, labels: np.ndarray, threshold: float = 0.5) -> float:
-    return float(np.mean((scores > threshold) == labels))
+def accuracy(scores: np.ndarray, labels: np.ndarray) -> float:
+    return float(np.mean((scores > 0.5) == labels))
 
 
 def brier(scores: np.ndarray, labels: np.ndarray) -> float:

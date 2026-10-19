@@ -1,7 +1,7 @@
 import numpy as np
 import scanpy as sc
 
-from .batch_transfer import _dense, _onehot
+from .batch_transfer import summary_stats
 
 
 class LinearPerturbationModel:
@@ -13,15 +13,10 @@ class LinearPerturbationModel:
     """
 
     def fit(self, adata: sc.AnnData) -> "LinearPerturbationModel":
-        labels = adata.obs["perturbation"].astype(str).to_numpy()
-        is_ctrl = labels == "control"
+        is_ctrl = adata.obs["perturbation"].astype(str).to_numpy() == "control"
         self.intercept_ = np.asarray(adata.X[is_ctrl].mean(axis=0)).ravel()
-
-        self.perturbations_, idx = np.unique(labels[~is_ctrl], return_inverse=True)
-        onehot = _onehot(idx, len(self.perturbations_))  # perts x cells
-        counts = np.asarray(onehot.sum(axis=1)).ravel()
-        sums = _dense(onehot @ adata.X[~is_ctrl])
-        self.coef_ = sums / counts[:, None] - self.intercept_
+        s = summary_stats(adata)
+        self.perturbations_, self.coef_ = s["perturbations"], s["y_mean"] - self.intercept_
         return self
 
     def predict(self, perturbations: list[str]) -> np.ndarray:

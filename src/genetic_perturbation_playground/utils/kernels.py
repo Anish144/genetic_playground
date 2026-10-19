@@ -1,11 +1,5 @@
-"""NumPy kernels with the same class hierarchy as GPflow (gpflow/kernels/{base,stationaries}.py).
+"""NumPy kernels. A kernel is a callable ``k(X, X2=None)`` returning the (n, n2) Gram matrix.
 
-    Kernel                      K(X, X2)
-    └── Stationary              variance, lengthscales (scalar, or one per column for ARD)
-        └── IsotropicStationary depends only on r = ‖(x - x') / ℓ‖; implement K_r2 or K_r
-            └── RBF
-
-A new isotropic kernel only needs ``K_r2`` (e.g. rational quadratic) or ``K_r`` (e.g. Matérn).
 Inputs are (n, d) arrays; 1-D inputs are treated as a single column.
 """
 
@@ -42,37 +36,16 @@ class Kernel(abc.ABC):
         """Gram matrix between the rows of X (n, d) and X2 (n2, d), shape (n, n2)."""
 
 
-class Stationary(Kernel):
-    """Kernel depending only on x - x'. An array of lengthscales gives ARD (one per column)."""
+class RBF(Kernel):
+    """k(x, x') = exp(-‖x - x'‖² / (2ℓ²)). An array of lengthscales gives ARD (one per column)."""
 
-    def __init__(self, variance: float = 1.0, lengthscales: float | np.ndarray = 1.0) -> None:
+    def __init__(self, lengthscales: float | np.ndarray = 1.0) -> None:
         self.lengthscales = np.asarray(lengthscales, dtype=float)
-        if variance <= 0 or np.any(self.lengthscales <= 0):
-            raise ValueError("variance and lengthscales must be positive")
-        self.variance = float(variance)
-
-    def scale(self, X: np.ndarray) -> np.ndarray:
-        return X / self.lengthscales
-
-
-class IsotropicStationary(Stationary):
-    """Kernel depending only on r = ‖(x - x') / ℓ‖. Subclasses implement K_r2 or K_r."""
+        if np.any(self.lengthscales <= 0):
+            raise ValueError("lengthscales must be positive")
 
     def K(self, X: np.ndarray, X2: np.ndarray) -> np.ndarray:
-        return self.K_r2(square_distance(self.scale(X), self.scale(X2)))
-
-    def K_r2(self, r2: np.ndarray) -> np.ndarray:
-        return self.K_r(np.sqrt(r2))
-
-    def K_r(self, r: np.ndarray) -> np.ndarray:
-        raise NotImplementedError(f"{type(self).__name__} must implement K_r2 or K_r")
-
-
-class RBF(IsotropicStationary):
-    """k(x, x') = σ² exp(-‖x - x'‖² / (2ℓ²)), a.k.a. the squared exponential / Gaussian kernel."""
-
-    def K_r2(self, r2: np.ndarray) -> np.ndarray:
-        return self.variance * np.exp(-0.5 * r2)
+        return np.exp(-0.5 * square_distance(X / self.lengthscales, X2 / self.lengthscales))
 
 
 def _as_2d(X: np.ndarray) -> np.ndarray:

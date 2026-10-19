@@ -3,11 +3,11 @@
 Within environment e, (X, Y) pairs and proxies W are observed in separate, unpaired samples.
 The latent has ``dim_u`` = k dimensions:
 
-    theta_e      ~ Uniform(theta_low, theta_high)^k     once per environment
+    theta_e      ~ Uniform(-2, 2)^k                     once per environment
     U1_ei, U2_ej ~ N(theta_e, I_k)                       same law, drawn independently
     X_ei         ~ N(0, 1)                               independent of E and U
-    Y_ei         = f(X_ei, U1_ei) + N(0, noise_y^2),     f(x, u) = sum_j f1(x, u_j) / sqrt(k)
-    W_ej         = g(U2_ej) + N(0, noise_w^2 I_k),       g from PROXIES, applied per coordinate
+    Y_ei         = f(X_ei, U1_ei) + N(0, 0.1^2),         f(x, u) = sum_j f1(x, u_j) / sqrt(k)
+    W_ej         = g(U2_ej) + N(0, 0.5^2 I_k),           g from PROXIES, applied per coordinate
 
 with f1(x, u) = tanh(x u) + sin(u) / 2. The 1 / sqrt(k) keeps the spread of E[Y | x, e] across
 environments comparable as k grows; k = 1 is the original one-dimensional setting.
@@ -50,9 +50,9 @@ def outcome_mean(x: np.ndarray, u: np.ndarray) -> np.ndarray:
     return np.sum(np.tanh(x * u) + 0.5 * np.sin(u), axis=-1) / np.sqrt(u.shape[-1])
 
 
-def conditional_mean(x: np.ndarray, theta: np.ndarray, n_nodes: int = 60) -> np.ndarray:
+def conditional_mean(x: np.ndarray, theta: np.ndarray) -> np.ndarray:
     """E[Y | x, e] = E_{U ~ N(theta, I)}[f(x, U)]; f is additive in U, so 1-D quadrature per j."""
-    nodes, weights = hermegauss(n_nodes)
+    nodes, weights = hermegauss(60)
     f = outcome_mean(np.asarray(x)[:, None], theta + nodes[:, None])  # (n, nodes)
     return f @ weights / weights.sum()
 
@@ -62,8 +62,6 @@ def sample_environment(
     n: int,
     m: int,
     rng: np.random.Generator,
-    noise_y: float = 0.1,
-    noise_w: float = 0.5,
     proxy: str = "identity",
 ) -> UnconfoundedSample:
     """Draw ``n`` (X, Y) pairs and ``m`` proxies W from the environment with mean ``theta``."""
@@ -71,8 +69,8 @@ def sample_environment(
     u1 = theta + rng.standard_normal((n, k))
     u2 = theta + rng.standard_normal((m, k))
     x = rng.standard_normal(n)
-    y = outcome_mean(x, u1) + noise_y * rng.standard_normal(n)
-    w = PROXIES[proxy](u2) + noise_w * rng.standard_normal((m, k))
+    y = outcome_mean(x, u1) + 0.1 * rng.standard_normal(n)
+    w = PROXIES[proxy](u2) + 0.5 * rng.standard_normal((m, k))
     return UnconfoundedSample(theta=theta, x=x, y=y, w=w, u1=u1, u2=u2)
 
 
@@ -82,10 +80,8 @@ def sample_environments(
     m: int,
     rng: np.random.Generator,
     dim_u: int = 1,
-    theta_low: float = -2.0,
-    theta_high: float = 2.0,
     proxy: str = "identity",
 ) -> list[UnconfoundedSample]:
-    """Draw ``d`` environments with theta_e ~ Uniform(theta_low, theta_high)^dim_u."""
-    thetas = rng.uniform(theta_low, theta_high, size=(d, dim_u))
+    """Draw ``d`` environments with theta_e ~ Uniform(-2, 2)^dim_u."""
+    thetas = rng.uniform(-2.0, 2.0, size=(d, dim_u))
     return [sample_environment(theta, n, m, rng, proxy=proxy) for theta in thetas]
