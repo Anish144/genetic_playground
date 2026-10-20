@@ -16,6 +16,7 @@
 
 set -euo pipefail
 cd "$SLURM_SUBMIT_DIR"
+export PATH="$HOME/.local/bin:$PATH"  # uv; batch jobs don't read ~/.bashrc
 export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK OPENBLAS_NUM_THREADS=$SLURM_CPUS_PER_TASK
 
 # what was run: commit, uncommitted changes, GPU
