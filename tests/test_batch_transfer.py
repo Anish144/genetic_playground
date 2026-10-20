@@ -91,8 +91,12 @@ def test_score_truth_uses_only_unseen_controls():
     s = score(models, data, 2, seen)
 
     effect = data.X[~is_ctrl].mean(0) - data.X[is_ctrl & ~seen].mean(0)
-    no_effect = s[(s.model == "no effect") & (s.metric == "mse")]["value"].item()
-    np.testing.assert_allclose(no_effect, np.mean(effect**2))
+    mse = s[s.metric == "mse"].set_index("model")["value"]
+    np.testing.assert_allclose(mse["no effect"], np.mean(effect**2))
+    # shift predicts gamma + (seen control mean); its predicted effect is gamma, free of test controls
+    np.testing.assert_allclose(
+        mse["shift (b=1)"], np.mean((models["shift (b=1)"].gamma_[0] - effect) ** 2)
+    )
 
 
 def test_unweighted_bridge_ignores_cell_counts():

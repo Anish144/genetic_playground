@@ -63,16 +63,18 @@ def score(models: dict, test: sc.AnnData, k: int, seen: np.ndarray) -> pd.DataFr
     """Per-perturbation scores on `test` (long table, see metrics.score) plus cells per perturbation.
 
     Truth is each perturbation's mean minus its batch-matched control mean in `test`. The control
-    cells are split: the models only see those marked `seen`, the truth's control mean uses the
-    rest, so noise in the control mean is not shared by prediction and truth (it inflates pearson).
+    cells are split: the models see only those marked `seen`, and predicted effects are relative to
+    their mean; true effects are relative to the mean of the rest. A shared control mean would put
+    the same noise in prediction and truth, which inflates pearson.
     """
     is_ctrl = test.obs["perturbation"].astype(str).to_numpy() == "control"
     inputs = test[~is_ctrl | seen]
     s, w_inputs = summary_stats(test[~is_ctrl | ~seen]), summary_stats(inputs)["w_mean"]
     keep = np.isin(s["perturbations"], next(iter(models.values())).perturbations_)
     perts, w = s["perturbations"][keep], s["w_mean"][keep]
+    w_seen = w_inputs[keep]  # predicted effects are relative to the controls the models saw
     preds = {
-        name: m.predict(perts, w_inputs[keep] if isinstance(m, BatchTransferModel) else inputs) - w
+        name: m.predict(perts, w_seen if isinstance(m, BatchTransferModel) else inputs) - w_seen
         for name, m in models.items()
     }
     scores = metrics.score(preds, s["y_mean"][keep] - w, perts, k)
