@@ -57,16 +57,20 @@ def fit(train: sc.AnnData, cfg: DictConfig) -> dict:
     return models
 
 
-def score(models: dict, test: sc.AnnData, k: int) -> pd.DataFrame:
+def score(models: dict, test: sc.AnnData, k: int, seen: np.ndarray) -> pd.DataFrame:
     """Per-perturbation scores on `test` (long table, see metrics.score) plus cells per perturbation.
 
-    Truth is each perturbation's mean minus its batch-matched control mean in `test`.
+    Truth is each perturbation's mean minus its batch-matched control mean in `test`. The control
+    cells are split: the models only see those marked `seen`, the truth's control mean uses the
+    rest, so noise in the control mean is not shared by prediction and truth (it inflates pearson).
     """
-    s = summary_stats(test)
+    is_ctrl = test.obs["perturbation"].astype(str).to_numpy() == "control"
+    inputs = test[~is_ctrl | seen]
+    s, w_inputs = summary_stats(test[~is_ctrl | ~seen]), summary_stats(inputs)["w_mean"]
     keep = np.isin(s["perturbations"], next(iter(models.values())).perturbations_)
     perts, w = s["perturbations"][keep], s["w_mean"][keep]
     preds = {
-        name: m.predict(perts, w if isinstance(m, BatchTransferModel) else test) - w
+        name: m.predict(perts, w_inputs[keep] if isinstance(m, BatchTransferModel) else inputs) - w
         for name, m in models.items()
     }
     scores = metrics.score(preds, s["y_mean"][keep] - w, perts, k)
@@ -83,18 +87,24 @@ def cross_validate(adata: sc.AnnData, cfg: DictConfig) -> tuple:
     """
     n_folds, k = cfg.n_folds, cfg.top_k
     batch = adata.obs["batch"].astype(str).to_numpy()
-    folds = np.array_split(np.random.default_rng(cfg.seed).permutation(np.unique(batch)), n_folds)
+    rng = np.random.default_rng(cfg.seed)
+    folds = np.array_split(rng.permutation(np.unique(batch)), n_folds)
+    # held-out controls the models see (see score): every other one within each batch, shuffled
+    is_ctrl = adata.obs["perturbation"].astype(str).to_numpy() == "control"
+    seen = pd.Series(rng.random(adata.n_obs)).groupby([batch, is_ctrl]).rank().to_numpy() % 2 == 0
 
     pert_scores, batch_scores = [], []
     for i, held_out in enumerate(folds):
         print(f"fold {i + 1}/{n_folds}: holding out {len(held_out)} batches")
         is_test = np.isin(batch, held_out)
         models, test = fit(adata[~is_test], cfg), adata[is_test]
-        pert_scores.append(score(models, test, k))
+        pert_scores.append(score(models, test, k, seen[is_test]))
         fold_means = pert_scores[-1].groupby(["metric", "model"], sort=False)["value"].mean()
         print(fold_means.unstack("model").to_string(float_format="%.4g"), flush=True)
         batch_scores += [
-            score(models, test[batch[is_test] == b], k).assign(batch=b, cells=(batch == b).sum())
+            score(models, test[(m := batch[is_test] == b)], k, seen[is_test][m]).assign(
+                batch=b, cells=(batch == b).sum()
+            )
             for b in held_out
         ]
 

@@ -1,8 +1,14 @@
+import sys
+from pathlib import Path
+
 import anndata as ad
 import numpy as np
 import pandas as pd
 
-from genetic_perturbation_playground.model.batch_transfer import KernelBridgeTransfer
+from genetic_perturbation_playground.model.batch_transfer import (
+    BatchTransferModel,
+    KernelBridgeTransfer,
+)
 from genetic_perturbation_playground.model.proxy_unconfounded import MarginalEmbeddingBridge
 from genetic_perturbation_playground.model.proxy_unconfounded_neural import (
     NeuralMarginalEmbeddingBridge,
@@ -71,3 +77,19 @@ def test_neural_bridge_counts_match_replicated_rows():
     np.testing.assert_allclose(
         weighted.predict(x_new, ws[0]), replicated.predict(x_new, ws[0]), rtol=1e-6
     )
+
+
+def test_score_truth_uses_only_unseen_controls():
+    sys.path.insert(0, str(Path(__file__).parents[1] / "scripts"))
+    from train_batch_transfer import MODELS, score
+
+    rng = np.random.default_rng(0)
+    data = _cells(rng, n_batches=1, perts=("a",))
+    is_ctrl = (data.obs["perturbation"] == "control").to_numpy()
+    seen = np.arange(data.n_obs) % 2 == 0
+    models = {n: BatchTransferModel(s).fit(data) for n, s in MODELS.items()}
+    s = score(models, data, 2, seen)
+
+    effect = data.X[~is_ctrl].mean(0) - data.X[is_ctrl & ~seen].mean(0)
+    no_effect = s[(s.model == "no effect") & (s.metric == "mse")]["value"].item()
+    np.testing.assert_allclose(no_effect, np.mean(effect**2))

@@ -45,7 +45,8 @@ def plot_metric(
                 (i + jitter)[order], y[order], c=c[order], cmap=CMAP, norm=norm, s=dot_size, lw=0
             )
             ax.hlines(y_mean, i - 0.3, i + 0.3, color="#0b0b0b", lw=1)
-            ticklabels.append(f"{label}\nmean {v.mean():.3g}")
+            # break at the first space so neighbouring labels don't overlap
+            ticklabels.append(f"{label.replace(' ', chr(10), 1)}\n{v.mean():.3g}")
 
         if log:
             lo, hi = ax.get_ylim()
