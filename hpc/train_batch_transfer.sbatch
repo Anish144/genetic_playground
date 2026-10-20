@@ -7,7 +7,7 @@
 #
 # Submit from the repo root. Log: outputs/slurm-<job name>-<job id>.out; results go to the Hydra
 # run dir outputs/<date>/<name>_<time>/. Flags on the sbatch command line override those below.
-#SBATCH --partition=gpu_lowp
+#SBATCH --partition=a100
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=96G
