@@ -10,6 +10,8 @@ effects (perturbation mean - batch-matched control mean). Two views:
 - per batch: each batch scored on its own when held out (mean of the per-perturbation scores
   within that batch); every batch appears once                          -> plots/per_batch/
 
+Raw scores (long tables) go to scores_per_perturbation.csv and scores_per_batch.csv.
+
 Config: configs/train_batch_transfer.yaml. Usage:
 
     uv run python scripts/train_batch_transfer.py n_folds=10
@@ -110,7 +112,10 @@ def main(cfg: DictConfig):
     adata = load_dataset()
     per_pert, per_batch = cross_validate(adata, cfg)
 
-    plot_dir = Path(HydraConfig.get().runtime.output_dir) / "plots"
+    out_dir = Path(HydraConfig.get().runtime.output_dir)
+    per_pert.to_csv(out_dir / "scores_per_perturbation.csv", index=False)
+    per_batch.to_csv(out_dir / "scores_per_batch.csv", index=False)
+    plot_dir = out_dir / "plots"
     report(per_pert, "perturbation", plot_dir / "per_perturbation")
     report(per_batch, "batch", plot_dir / "per_batch")
 

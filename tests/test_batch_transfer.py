@@ -57,7 +57,9 @@ def test_neural_bridge_counts_match_replicated_rows():
     counts = [rng.integers(1, 4, size=6) for _ in range(3)]
 
     def fit(xs, ys, counts=None):
-        bridge = NeuralMarginalEmbeddingBridge(n_steps=5, weight_decay=1e-2, n_features=4)
+        bridge = NeuralMarginalEmbeddingBridge(
+            n_steps=5, weight_decay=1e-2, n_features=4, n_features_w=3
+        )
         return bridge.fit(xs, ys, ws, counts)
 
     weighted = fit(xs, ys, counts)

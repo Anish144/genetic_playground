@@ -6,7 +6,7 @@ Notation:
     n_e, m_e  (X, Y) pairs and proxies W observed in environment e (unpaired samples)
     N         total (X, Y) pairs, sum_e n_e
     d_x, d_w  dimensions of X and W (1-D inputs are treated as one column)
-    p, q      feature dimensions of phi and psi; both equal ``n_features``
+    p, q      feature dimensions of phi and psi: ``n_features`` and ``n_features_w``
 
 h(x, w) = phi(x)^T A psi(w) with MLPs phi: R^d_x -> R^p, psi: R^d_w -> R^q and A in R^{p x q}, so
 E[Y | x, e] = phi(x)^T A mu_e with mu_e = E[psi(W) | e] in R^q (linear in mu_e, as
@@ -43,7 +43,8 @@ def _tensor(a: np.ndarray, device: str) -> torch.Tensor:
 class NeuralMarginalEmbeddingBridge:
     """Bridge h(x, w) = phi(x)^T A psi(w) learned from D source environments.
 
-    n_features  p = q, output dimension of phi and of psi
+    n_features  p, output dimension of phi
+    n_features_w  q, output dimension of psi; None means q = p
     width       hidden units per layer of each MLP
     depth       hidden layers per MLP
     reg         ridge penalty lambda on A, scaled by N as in the kernel bridge
@@ -57,6 +58,7 @@ class NeuralMarginalEmbeddingBridge:
     """
 
     n_features: int = 16
+    n_features_w: int | None = None
     width: int = 64
     depth: int = 2
     reg: float = 1e-3
@@ -92,9 +94,8 @@ class NeuralMarginalEmbeddingBridge:
         )
         w_envs = [_tensor(w, self.device) for w in ws]  # D tensors of shape (m_e, d_w)
         self.phi_ = _mlp(x.shape[1], self.width, self.depth, self.n_features).to(self.device)
-        self.psi_ = _mlp(w_envs[0].shape[1], self.width, self.depth, self.n_features).to(
-            self.device
-        )
+        q = self.n_features if self.n_features_w is None else self.n_features_w
+        self.psi_ = _mlp(w_envs[0].shape[1], self.width, self.depth, q).to(self.device)
 
         params = [*self.phi_.parameters(), *self.psi_.parameters()]
         optimizer = torch.optim.AdamW(params, lr=self.lr, weight_decay=self.weight_decay)
