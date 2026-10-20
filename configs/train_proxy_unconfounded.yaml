@@ -10,7 +10,8 @@ n_test: 2000          # held-out labelled target pairs for MSE
 reg: 1.0e-3
 bridges: [kernel, neural]  # trained on the same data, scored against the same oracle
 neural:               # NeuralMarginalEmbeddingBridge settings; see model/proxy_unconfounded_neural.py
-  n_features: 16      # p = q, output dimension of phi and psi
+  n_features: 16      # p, output dimension of phi
+  n_features_w: 16    # q, output dimension of psi
   width: 64
   depth: 2
   lr: 1.0e-3

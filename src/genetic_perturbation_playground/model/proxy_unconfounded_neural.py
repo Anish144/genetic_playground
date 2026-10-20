@@ -44,7 +44,7 @@ class NeuralMarginalEmbeddingBridge:
     """Bridge h(x, w) = phi(x)^T A psi(w) learned from D source environments.
 
     n_features  p, output dimension of phi
-    n_features_w  q, output dimension of psi; None means q = p
+    n_features_w  q, output dimension of psi
     width       hidden units per layer of each MLP
     depth       hidden layers per MLP
     reg         ridge penalty lambda on A, scaled by N as in the kernel bridge
@@ -58,7 +58,7 @@ class NeuralMarginalEmbeddingBridge:
     """
 
     n_features: int = 16
-    n_features_w: int | None = None
+    n_features_w: int = 16
     width: int = 64
     depth: int = 2
     reg: float = 1e-3
@@ -94,8 +94,9 @@ class NeuralMarginalEmbeddingBridge:
         )
         w_envs = [_tensor(w, self.device) for w in ws]  # D tensors of shape (m_e, d_w)
         self.phi_ = _mlp(x.shape[1], self.width, self.depth, self.n_features).to(self.device)
-        q = self.n_features if self.n_features_w is None else self.n_features_w
-        self.psi_ = _mlp(w_envs[0].shape[1], self.width, self.depth, q).to(self.device)
+        self.psi_ = _mlp(w_envs[0].shape[1], self.width, self.depth, self.n_features_w).to(
+            self.device
+        )
 
         params = [*self.phi_.parameters(), *self.psi_.parameters()]
         optimizer = torch.optim.AdamW(params, lr=self.lr, weight_decay=self.weight_decay)

@@ -1,13 +1,19 @@
 from pathlib import Path
 
-import pertpy as pt
 import scanpy as sc
 
-CACHE_PATH = Path(__file__).parents[3] / "data" / "replogle_k562_preprocessed.h5ad"
+DATA_DIR = Path(__file__).parents[3] / "data"
+CACHE_PATH = DATA_DIR / "replogle_k562_preprocessed.h5ad"
+RAW_URL = "https://exampledata.scverse.org/pertpy/replogle_2022_k562_essential.h5ad"
+
+
+def replogle_raw() -> sc.AnnData:
+    """Replogle 2022 K562 essential screen (scPerturb version), downloaded once into data/."""
+    return sc.read(DATA_DIR / "replogle_2022_k562_essential.h5ad", backup_url=RAW_URL)
 
 
 def replogle_load_and_preprocess() -> sc.AnnData:
-    adata = pt.data.replogle_2022_k562_essential()
+    adata = replogle_raw()
     sc.pp.filter_cells(adata, min_counts=100)
     sc.pp.filter_genes(adata, min_cells=5)
     sc.pp.normalize_total(adata, target_sum=4000.0)

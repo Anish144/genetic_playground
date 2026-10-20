@@ -77,8 +77,8 @@ def main(cfg: DictConfig):
     plot_dir = Path(HydraConfig.get().runtime.output_dir) / "plots"
     for label, genes in groups.items():
         title = f"{label} spread of $W_e$ across batches"
-        args = (adata.var_names, W, r, model.slope_, s["batch_n"])
-        plot_genes(genes, *args, title, plot_dir / f"linearity_{label}.png")
+        path = plot_dir / f"linearity_{label}.png"
+        plot_genes(genes, adata.var_names, W, r, model.slope_, s["batch_n"], title, path)
 
 
 if __name__ == "__main__":

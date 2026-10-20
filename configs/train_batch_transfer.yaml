@@ -1,3 +1,7 @@
+name: ???     # required: names the run folder, outputs/<date>/<name>_<time>/
+hydra:
+  run:
+    dir: outputs/${now:%Y-%m-%d}/${name}_${now:%H-%M-%S}
 n_folds: 5   # K-fold over batches; each batch is held out exactly once
 seed: 0      # shuffles batches into folds
 top_k: 20    # genes used for pearson_top_k

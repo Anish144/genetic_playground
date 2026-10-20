@@ -7,7 +7,6 @@ requires-python = ">=3.12"
 dependencies = [
     "numpy",
     "hydra-core",        # config system
-    "pertpy>=1.0.6",
     "scanpy>=1.12.1",
     "tueplots>=0.2.4",
     "torch>=2.14.1",

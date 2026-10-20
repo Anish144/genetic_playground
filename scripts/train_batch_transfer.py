@@ -12,11 +12,11 @@ effects (perturbation mean - batch-matched control mean). Two views:
 
 Raw scores (long tables) go to scores_per_perturbation.csv and scores_per_batch.csv.
 
-Config: configs/train_batch_transfer.yaml. Usage:
+Config: configs/train_batch_transfer.yaml. `name` is required and names the output folder. Usage:
 
-    uv run python scripts/train_batch_transfer.py n_folds=10
-    uv run python scripts/train_batch_transfer.py 'bridges=[kernel]'   # no GPU: skip the neural bridge
-    uv run python scripts/train_batch_transfer.py neural.n_steps=500 neural.weight_decay=1e-2
+    uv run python scripts/train_batch_transfer.py name=baseline n_folds=10
+    uv run python scripts/train_batch_transfer.py name=kernel_only 'bridges=[kernel]'   # no GPU: skip the neural bridge
+    uv run python scripts/train_batch_transfer.py name=neural_500 neural.n_steps=500 neural.weight_decay=1e-2
 """
 
 from pathlib import Path
