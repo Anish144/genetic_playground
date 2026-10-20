@@ -107,13 +107,15 @@ class KernelBridgeTransfer:
     makes the cell-level Gram block-diagonal over perturbations, so the one cell-level bridge splits
     exactly into one bridge per perturbation over the batches it was seen in (x constant within a
     block), fit on its per-batch means. All blocks share M = <mu_e, mu_e'>, computed once.
+
+    weight_by_cells=False gives every (perturbation, batch) mean equal weight instead.
     """
 
-    def __init__(self, reg: float = 1e-6):
-        self.reg = reg
+    def __init__(self, reg: float = 1e-6, weight_by_cells: bool = True):
+        self.reg, self.weight_by_cells = reg, weight_by_cells
 
     def fit(self, adata: sc.AnnData) -> "KernelBridgeTransfer":
-        s, self.ctrl_, pert, batch, y_pe, n_pe = _bridge_data(adata)
+        s, self.ctrl_, pert, batch, y_pe, n_pe = _bridge_data(adata, self.weight_by_cells)
         self.kernel_w_ = RBF(lengthscales=median_heuristic(np.concatenate(self.ctrl_)))
         inner = mean_inner(self.kernel_w_, self.ctrl_)
 
@@ -146,13 +148,14 @@ class NeuralBridgeTransfer:
 
     Fit on the same count-weighted per-(perturbation, batch) means as KernelBridgeTransfer. Unlike
     the delta kernel, phi(x) and A are shared, so perturbations borrow strength from each other.
+    weight_by_cells=False gives every (perturbation, batch) mean equal weight instead.
     """
 
-    def __init__(self, **bridge_kwargs):
-        self.bridge_kwargs = bridge_kwargs
+    def __init__(self, weight_by_cells: bool = True, **bridge_kwargs):
+        self.weight_by_cells, self.bridge_kwargs = weight_by_cells, bridge_kwargs
 
     def fit(self, adata: sc.AnnData) -> "NeuralBridgeTransfer":
-        s, ctrl, pert, batch, y_pe, n_pe = _bridge_data(adata)
+        s, ctrl, pert, batch, y_pe, n_pe = _bridge_data(adata, self.weight_by_cells)
         self.perturbations_ = s["perturbations"]
         onehot = np.eye(len(self.perturbations_))
         envs = [batch == b for b in range(len(ctrl))]
@@ -169,9 +172,10 @@ class NeuralBridgeTransfer:
         return sum(mix[:, [b]] * self.bridge_.predict(x, w) for b, w in enumerate(ctrl))
 
 
-def _bridge_data(adata: sc.AnnData) -> tuple:
+def _bridge_data(adata: sc.AnnData, weight_by_cells: bool = True) -> tuple:
     """Bridge training data: summary_stats, control cells per batch, and per-(perturbation, batch)
-    pairs as (perturbation index, batch index, mean of y, cell count)."""
+    pairs as (perturbation index, batch index, mean of y, weight). The weight is the pair's cell
+    count, or 1 for every pair if not weight_by_cells."""
     s = summary_stats(adata)
     labels = adata.obs["perturbation"].astype(str).to_numpy()
     b_idx = np.searchsorted(s["batches"], adata.obs["batch"].astype(str).to_numpy())
@@ -183,7 +187,8 @@ def _bridge_data(adata: sc.AnnData) -> tuple:
     n_pe = np.bincount(pair_idx)
     y_pe = _dense(_onehot(pair_idx, len(pairs)) @ adata.X[~is_ctrl]) / n_pe[:, None]
     ctrl = _per_batch_controls(adata, is_ctrl, b_idx, n_b)
-    return s, ctrl, pairs // n_b, pairs % n_b, y_pe, n_pe
+    weight = n_pe if weight_by_cells else np.ones_like(n_pe)
+    return s, ctrl, pairs // n_b, pairs % n_b, y_pe, weight
 
 
 def _targets(test: sc.AnnData, perturbations: list[str]) -> tuple:

@@ -93,3 +93,21 @@ def test_score_truth_uses_only_unseen_controls():
     effect = data.X[~is_ctrl].mean(0) - data.X[is_ctrl & ~seen].mean(0)
     no_effect = s[(s.model == "no effect") & (s.metric == "mse")]["value"].item()
     np.testing.assert_allclose(no_effect, np.mean(effect**2))
+
+
+def test_unweighted_bridge_ignores_cell_counts():
+    rng = np.random.default_rng(0)
+    data = _cells(rng)
+    train, test = data[data.obs["batch"] != "b3"], data[data.obs["batch"] == "b3"]
+    # duplicating batch b0's perturbed cells doubles their counts but leaves every pair mean as is
+    extra = train[
+        (train.obs["batch"] == "b0").to_numpy() & (train.obs["perturbation"] != "control")
+    ]
+    doubled = ad.concat([train, extra])
+    perts = sorted(set(test.obs["perturbation"]) - {"control"})
+
+    def pred(d, weighted):
+        return KernelBridgeTransfer(1e-2, weighted).fit(d).predict(perts, test)
+
+    np.testing.assert_allclose(pred(train, False), pred(doubled, False))
+    assert not np.allclose(pred(train, True), pred(doubled, True))

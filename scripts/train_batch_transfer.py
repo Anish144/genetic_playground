@@ -45,8 +45,10 @@ def fit(train: sc.AnnData, cfg: DictConfig) -> dict:
     """Fit every model variant on the training batches."""
     models = {name: BatchTransferModel(s).fit(train) for name, s in MODELS.items()}
     bridges = {
-        "kernel": lambda: KernelBridgeTransfer(cfg.bridge_reg),
-        "neural": lambda: NeuralBridgeTransfer(reg=cfg.bridge_reg, seed=cfg.seed, **cfg.neural),
+        "kernel": lambda: KernelBridgeTransfer(cfg.bridge_reg, cfg.weight_by_cells),
+        "neural": lambda: NeuralBridgeTransfer(
+            cfg.weight_by_cells, reg=cfg.bridge_reg, seed=cfg.seed, **cfg.neural
+        ),
     }
     models |= {f"{b} bridge": bridges[b]().fit(train) for b in cfg.bridges}
     slope = models["transfer (fit b)"].slope_
