@@ -62,19 +62,17 @@ def fit(train: sc.AnnData, cfg: DictConfig) -> dict:
 def score(models: dict, test: sc.AnnData, k: int, seen: np.ndarray) -> pd.DataFrame:
     """Per-perturbation scores on `test` (long table, see metrics.score) plus cells per perturbation.
 
-    Truth is each perturbation's mean minus its batch-matched control mean in `test`. The control
-    cells are split: the models see only those marked `seen`, and predicted effects are relative to
-    their mean; true effects are relative to the mean of the rest. A shared control mean would put
-    the same noise in prediction and truth, which inflates pearson.
+    Effects are relative to the batch-matched control mean in `test`. The control cells are split:
+    the models see only those marked `seen` (the proxy), and both predicted and true effects
+    subtract the mean of the rest, so the proxy's controls are never reused as the baseline.
     """
     is_ctrl = test.obs["perturbation"].astype(str).to_numpy() == "control"
     inputs = test[~is_ctrl | seen]
     s, w_inputs = summary_stats(test[~is_ctrl | ~seen]), summary_stats(inputs)["w_mean"]
     keep = np.isin(s["perturbations"], next(iter(models.values())).perturbations_)
     perts, w = s["perturbations"][keep], s["w_mean"][keep]
-    w_seen = w_inputs[keep]  # predicted effects are relative to the controls the models saw
     preds = {
-        name: m.predict(perts, w_seen if isinstance(m, BatchTransferModel) else inputs) - w_seen
+        name: m.predict(perts, w_inputs[keep] if isinstance(m, BatchTransferModel) else inputs) - w
         for name, m in models.items()
     }
     scores = metrics.score(preds, s["y_mean"][keep] - w, perts, k)
@@ -86,6 +84,9 @@ def score(models: dict, test: sc.AnnData, k: int, seen: np.ndarray) -> pd.DataFr
 def cross_validate(adata: sc.AnnData, cfg: DictConfig) -> tuple:
     """K-fold over batches: each batch is held out exactly once, models refit per fold.
 
+    Every batch's controls are split in two halves. The `seen` half is the proxy for all models, in
+    training and held-out batches alike; the other half is only the baseline in scoring.
+
     Returns (per-perturbation scores, per-batch scores) as long tables. Per-perturbation scores are
     averaged over folds (cells summed); per-batch scores average over the batch's perturbations.
     """
@@ -93,7 +94,7 @@ def cross_validate(adata: sc.AnnData, cfg: DictConfig) -> tuple:
     batch = adata.obs["batch"].astype(str).to_numpy()
     rng = np.random.default_rng(cfg.seed)
     folds = np.array_split(rng.permutation(np.unique(batch)), n_folds)
-    # held-out controls the models see (see score): every other one within each batch, shuffled
+    # controls the models see: every other one within each batch, shuffled
     is_ctrl = adata.obs["perturbation"].astype(str).to_numpy() == "control"
     seen = pd.Series(rng.random(adata.n_obs)).groupby([batch, is_ctrl]).rank().to_numpy() % 2 == 0
 
@@ -101,7 +102,7 @@ def cross_validate(adata: sc.AnnData, cfg: DictConfig) -> tuple:
     for i, held_out in enumerate(folds):
         print(f"fold {i + 1}/{n_folds}: holding out {len(held_out)} batches")
         is_test = np.isin(batch, held_out)
-        models, test = fit(adata[~is_test], cfg), adata[is_test]
+        models, test = fit(adata[~is_test & (~is_ctrl | seen)], cfg), adata[is_test]
         pert_scores.append(score(models, test, k, seen[is_test]))
         fold_means = pert_scores[-1].groupby(["metric", "model"], sort=False)["value"].mean()
         print(fold_means.unstack("model").to_string(float_format="%.4g"), flush=True)
