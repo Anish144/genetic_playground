@@ -5,13 +5,12 @@ defaults:  # folds, control split, scoring and neural settings as in train_batch
 inner_val_frac: 0.2  # share of each outer fold's training batches used for inner validation
 # random search: each bridge fits a fixed number of configurations drawn from its grid
 n_kernel_configs: 10   # of 21
-n_neural_configs: 10   # of 60; each also scored at every neural_checkpoints step
+n_neural_configs: 10   # of 30; each also scored at every neural_checkpoints step
 kernel_grid:
   reg: [1.0e-8, 3.0e-8, 1.0e-7, 3.0e-7, 1.0e-6, 3.0e-6, 1.0e-5]
   lengthscale_scale: [1, 2, 4]  # multiples of the median-heuristic lengthscale
-neural_grid:  # n_features_w and the rest come from train_batch_transfer.yaml's neural block
+neural_grid:  # the rest (n_features_w, cross_fit_folds, ...) from train_batch_transfer.yaml
   reg: [1.0e-7, 1.0e-6, 1.0e-5, 1.0e-4, 1.0e-3]  # 1e-5 won every fold of the full grid: extended
   weight_decay: [0.0, 1.0e-2, 1.0e-1]
   n_features: [32, 64]
-  cross_fit_folds: [0, 5]  # 0 = in-sample loss
 neural_checkpoints: [50, 100, 200, 300, 400]  # steps scored in one training run

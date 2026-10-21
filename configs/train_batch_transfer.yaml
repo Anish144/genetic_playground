@@ -17,4 +17,5 @@ neural:               # NeuralBridgeTransfer settings; see model/proxy_unconfoun
   lr: 1.0e-3
   weight_decay: 1.0e-2  # AdamW, on the weights of phi and psi
   n_steps: 200        # full-batch AdamW steps per fold
+  cross_fit_folds: 5  # phi, psi trained on a 5-fold cross-fitted loss over batches; 0 = in-sample
   device: cuda        # cpu works but is slow at this size; not mps (float64)
