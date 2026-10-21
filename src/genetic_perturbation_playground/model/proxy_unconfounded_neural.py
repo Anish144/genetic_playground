@@ -19,6 +19,8 @@ error, backpropagating through A and mu_e (as in DFPV, Xu et al., 2021).
 """
 
 from dataclasses import dataclass
+from itertools import pairwise
+from typing import NamedTuple
 
 import numpy as np
 import torch
@@ -27,16 +29,43 @@ from tqdm import trange
 
 
 def _mlp(d_in: int, width: int, depth: int, d_out: int) -> nn.Sequential:
-    layers, d = [], d_in
-    for _ in range(depth):
-        layers += [nn.Linear(d, width), nn.ReLU()]
-        d = width
-    return nn.Sequential(*layers, nn.Linear(d, d_out)).double()
+    """ReLU MLP with `depth` hidden layers of `width` units, in float64."""
+    dims = [d_in] + [width] * depth
+    hidden = [layer for a, b in pairwise(dims) for layer in (nn.Linear(a, b), nn.ReLU())]
+    return nn.Sequential(*hidden, nn.Linear(dims[-1], d_out)).double()
 
 
 def _tensor(a: np.ndarray, device: str) -> torch.Tensor:
     """(n,) or (n, d) array -> float64 tensor of shape (n, d) on ``device``."""
     return torch.as_tensor(np.asarray(a, dtype=np.float64), device=device).reshape(len(a), -1)
+
+
+class _Stage2Data(NamedTuple):
+    """Training tensors: pooled pairs (x, y, c, env) and per-environment proxies."""
+
+    x: torch.Tensor  # (N, d_x)
+    y: torch.Tensor  # (N,) or (N, d_y)
+    c: torch.Tensor  # (N,) replicate counts
+    env: torch.Tensor  # (N,) environment index of each pair
+    w_envs: list[torch.Tensor]  # D tensors of shape (m_e, d_w)
+
+
+def _features(phi_x: torch.Tensor, mu: torch.Tensor) -> torch.Tensor:
+    """phi_x: (N, p), mu: (N, q) or (1, q) -> rows phi(x_i) ⊗ mu_i, shape (N, p q)."""
+    return (phi_x[:, :, None] * mu[:, None, :]).flatten(1)
+
+
+def _weighted_ridge(feats: torch.Tensor, y: torch.Tensor, c: torch.Tensor, reg: float):
+    """A minimising sum_i c_i |feats_i A - y_i|^2 + reg * sum(c) * |A|^2."""
+    weighted = feats * c[:, None]
+    eye = torch.eye(feats.shape[1], dtype=feats.dtype, device=feats.device)
+    return torch.linalg.solve(weighted.T @ feats + reg * c.sum() * eye, weighted.T @ y)
+
+
+def _weighted_mse(pred: torch.Tensor, y: torch.Tensor, c: torch.Tensor) -> torch.Tensor:
+    """Count-weighted mean over pairs of the squared error averaged over outputs."""
+    sq_err = ((pred - y) ** 2).reshape(len(c), -1).mean(dim=1)
+    return (c * sq_err).sum() / c.sum()
 
 
 @dataclass
@@ -82,33 +111,11 @@ class NeuralMarginalEmbeddingBridge:
         fit equals the fit on the replicates (weighted loss, ridge scaled by their total).
         """
         torch.manual_seed(self.seed)
-        x = _tensor(np.concatenate(xs), self.device)  # (N, d_x)
-        y = torch.as_tensor(np.concatenate(ys), dtype=torch.float64, device=self.device)
-        c = torch.as_tensor(
-            np.ones(len(x)) if counts is None else np.concatenate(counts),
-            dtype=torch.float64,
-            device=self.device,
-        )
-        env = torch.as_tensor(
-            np.repeat(np.arange(len(xs)), [len(xi) for xi in xs]), device=self.device
-        )
-        w_envs = [_tensor(w, self.device) for w in ws]  # D tensors of shape (m_e, d_w)
-        self.phi_ = _mlp(x.shape[1], self.width, self.depth, self.n_features).to(self.device)
-        self.psi_ = _mlp(w_envs[0].shape[1], self.width, self.depth, self.n_features_w).to(
-            self.device
-        )
-
-        params = [*self.phi_.parameters(), *self.psi_.parameters()]
-        optimizer = torch.optim.AdamW(params, lr=self.lr, weight_decay=self.weight_decay)
-        progress = trange(self.n_steps, desc="neural bridge", leave=False)
-        for _ in progress:
-            optimizer.zero_grad()
-            loss, _ = self._stage2(x, y, c, env, w_envs)
-            loss.backward()
-            optimizer.step()
-            progress.set_postfix(loss=f"{loss.item():.4f}")
+        data = self._to_tensors(xs, ys, ws, counts)
+        self._build_networks(data.x.shape[1], data.w_envs[0].shape[1])
+        self._train(data)
         with torch.no_grad():
-            _, self.A_ = self._stage2(x, y, c, env, w_envs)
+            _, self.A_ = self._stage2(data)
         return self
 
     def predict(self, x: np.ndarray, w_target: np.ndarray) -> np.ndarray:
@@ -119,27 +126,47 @@ class NeuralMarginalEmbeddingBridge:
         with torch.no_grad():
             mu = self.psi_(_tensor(w_target, self.device)).mean(dim=0, keepdim=True)  # (1, q)
             phi_x = self.phi_(_tensor(x, self.device))
-            return (self._features(phi_x, mu) @ self.A_).cpu().numpy()
+            return (_features(phi_x, mu) @ self.A_).cpu().numpy()
 
-    def _stage2(self, x, y, c, env, w_envs) -> tuple[torch.Tensor, torch.Tensor]:
+    def _to_tensors(self, xs, ys, ws, counts) -> _Stage2Data:
+        """Pool the environments' pairs into tensors on the device."""
+        sizes = [len(xi) for xi in xs]
+        c = np.ones(sum(sizes)) if counts is None else np.concatenate(counts)
+        return _Stage2Data(
+            x=_tensor(np.concatenate(xs), self.device),
+            y=torch.as_tensor(np.concatenate(ys), dtype=torch.float64, device=self.device),
+            c=torch.as_tensor(c, dtype=torch.float64, device=self.device),
+            env=torch.as_tensor(np.repeat(np.arange(len(xs)), sizes), device=self.device),
+            w_envs=[_tensor(w, self.device) for w in ws],
+        )
+
+    def _build_networks(self, d_x: int, d_w: int) -> None:
+        """Freshly initialised phi and psi on the device."""
+        self.phi_ = _mlp(d_x, self.width, self.depth, self.n_features).to(self.device)
+        self.psi_ = _mlp(d_w, self.width, self.depth, self.n_features_w).to(self.device)
+
+    def _train(self, data: _Stage2Data) -> None:
+        """Full-batch AdamW on phi and psi against the stage-2 loss."""
+        params = [*self.phi_.parameters(), *self.psi_.parameters()]
+        optimizer = torch.optim.AdamW(params, lr=self.lr, weight_decay=self.weight_decay)
+        progress = trange(self.n_steps, desc="neural bridge", leave=False)
+        for _ in progress:
+            optimizer.zero_grad()
+            loss, _ = self._stage2(data)
+            loss.backward()
+            optimizer.step()
+            progress.set_postfix(loss=f"{loss.item():.4f}")
+
+    def _stage2(self, data: _Stage2Data) -> tuple[torch.Tensor, torch.Tensor]:
         """Closed-form weighted ridge A for the current features, and its weighted squared error.
 
-        x: (N, d_x), y: (N,) or (N, d_y), c: (N,) replicate counts, env: (N,) environment index of
-        each pair, w_envs: D x (m_e, d_w). Returns the scalar loss and A, shape (p q,) or (p q, d_y).
+        Returns the scalar loss and A, shape (p q,) or (p q, d_y).
         """
-        mu = torch.stack([self.psi_(w).mean(dim=0) for w in w_envs])  # (D, q), stage 1
-        feats = self._features(self.phi_(x), mu[env])  # (N, p q)
-        weighted = feats * c[:, None]
-        n, d = c.sum(), feats.shape[1]
-        A = torch.linalg.solve(
-            weighted.T @ feats
-            + self.reg * n * torch.eye(d, dtype=feats.dtype, device=feats.device),
-            weighted.T @ y,
-        )
-        sq_err = ((feats @ A - y) ** 2).reshape(len(c), -1).mean(dim=1)
-        return (c * sq_err).sum() / n, A
+        mu = self._embed(data.w_envs)  # (D, q), stage 1
+        feats = _features(self.phi_(data.x), mu[data.env])  # (N, p q)
+        A = _weighted_ridge(feats, data.y, data.c, self.reg)
+        return _weighted_mse(feats @ A, data.y, data.c), A
 
-    @staticmethod
-    def _features(phi_x: torch.Tensor, mu: torch.Tensor) -> torch.Tensor:
-        """phi_x: (N, p), mu: (N, q) or (1, q) -> rows phi(x_i) ⊗ mu_i, shape (N, p q)."""
-        return (phi_x[:, :, None] * mu[:, None, :]).flatten(1)
+    def _embed(self, w_envs: list[torch.Tensor]) -> torch.Tensor:
+        """Mean psi features of each environment's proxies, shape (D, q)."""
+        return torch.stack([self.psi_(w).mean(dim=0) for w in w_envs])

@@ -33,6 +33,8 @@ from genetic_perturbation_playground.model.batch_transfer import (
     BatchTransferModel,
     KernelBridgeTransfer,
     NeuralBridgeTransfer,
+    batch_labels,
+    is_control,
     summary_stats,
 )
 from genetic_perturbation_playground.utils import metrics
@@ -43,20 +45,34 @@ MODELS = {"pooled (b=0)": 0.0, "shift (b=1)": 1.0, "transfer (fit b)": None}
 
 def fit(train: sc.AnnData, cfg: DictConfig) -> dict:
     """Fit every model variant on the training batches."""
-    models = {name: BatchTransferModel(s).fit(train) for name, s in MODELS.items()}
-    bridges = {
-        "kernel": lambda: KernelBridgeTransfer(cfg.bridge_reg, cfg.weight_by_cells),
-        "neural": lambda: NeuralBridgeTransfer(
-            cfg.weight_by_cells, reg=cfg.bridge_reg, seed=cfg.seed, **cfg.neural
-        ),
-    }
-    models |= {f"{b} bridge": bridges[b]().fit(train) for b in cfg.bridges}
-    slope = models["transfer (fit b)"].slope_
-    print(
-        f"fitted b: median {np.median(slope):.3f}, "
-        f"IQR [{np.percentile(slope, 25):.3f}, {np.percentile(slope, 75):.3f}]"
-    )
+    models = _fit_linear(train) | _fit_bridges(train, cfg)
+    _print_slope(models["transfer (fit b)"].slope_)
     return models
+
+
+def _fit_linear(train: sc.AnnData) -> dict:
+    """The three BatchTransferModel variants of MODELS."""
+    return {name: BatchTransferModel(slope).fit(train) for name, slope in MODELS.items()}
+
+
+def _fit_bridges(train: sc.AnnData, cfg: DictConfig) -> dict:
+    """The bridges named in cfg.bridges."""
+    return {f"{b} bridge": _make_bridge(b, cfg).fit(train) for b in cfg.bridges}
+
+
+def _make_bridge(kind: str, cfg: DictConfig):
+    """An unfitted kernel or neural bridge with the config's settings."""
+    if kind == "kernel":
+        return KernelBridgeTransfer(cfg.bridge_reg, cfg.weight_by_cells)
+    return NeuralBridgeTransfer(
+        cfg.weight_by_cells, reg=cfg.bridge_reg, seed=cfg.seed, **cfg.neural
+    )
+
+
+def _print_slope(slope: np.ndarray) -> None:
+    """Median and interquartile range of the fitted per-gene slopes."""
+    q25, median, q75 = np.percentile(slope, [25, 50, 75])
+    print(f"fitted b: median {median:.3f}, IQR [{q25:.3f}, {q75:.3f}]")
 
 
 def score(models: dict, test: sc.AnnData, k: int, seen: np.ndarray) -> pd.DataFrame:
@@ -66,19 +82,21 @@ def score(models: dict, test: sc.AnnData, k: int, seen: np.ndarray) -> pd.DataFr
     the models see only those marked `seen` (the proxy), and both predicted and true effects
     subtract the mean of the rest, so the proxy's controls are never reused as the baseline.
     """
-    is_ctrl = test.obs["perturbation"].astype(str).to_numpy() == "control"
-    inputs = test[~is_ctrl | seen]
-    s, w_inputs = summary_stats(test[~is_ctrl | ~seen]), summary_stats(inputs)["w_mean"]
+    inputs, baseline = _split_controls(test, seen)
+    s = summary_stats(baseline)
     keep = np.isin(s["perturbations"], next(iter(models.values())).perturbations_)
-    perts, w = s["perturbations"][keep], s["w_mean"][keep]
-    preds = {
-        name: m.predict(perts, w_inputs[keep] if isinstance(m, BatchTransferModel) else inputs) - w
-        for name, m in models.items()
-    }
+    perts = s["perturbations"][keep]
+    w = s["w_mean"][keep]
+    preds = {name: m.predict(perts, inputs) - w for name, m in models.items()}
     scores = metrics.score(preds, s["y_mean"][keep] - w, perts, k)
-    return scores.assign(
-        cells=scores["perturbation"].map(dict(zip(perts, s["n"][keep], strict=True)))
-    )
+    cells = dict(zip(perts, s["n"][keep], strict=True))
+    return scores.assign(cells=scores["perturbation"].map(cells))
+
+
+def _split_controls(test: sc.AnnData, seen: np.ndarray) -> tuple:
+    """`test` with only the seen controls (model inputs), and with only the rest (baseline)."""
+    ctrl = is_control(test)
+    return test[~ctrl | seen], test[~ctrl | ~seen]
 
 
 def cross_validate(adata: sc.AnnData, cfg: DictConfig) -> tuple:
@@ -90,47 +108,81 @@ def cross_validate(adata: sc.AnnData, cfg: DictConfig) -> tuple:
     Returns (per-perturbation scores, per-batch scores) as long tables. Per-perturbation scores are
     averaged over folds (cells summed); per-batch scores average over the batch's perturbations.
     """
-    n_folds, k = cfg.n_folds, cfg.top_k
-    batch = adata.obs["batch"].astype(str).to_numpy()
+    batch = batch_labels(adata)
     rng = np.random.default_rng(cfg.seed)
-    folds = np.array_split(rng.permutation(np.unique(batch)), n_folds)
-    # controls the models see: every other one within each batch, shuffled
-    is_ctrl = adata.obs["perturbation"].astype(str).to_numpy() == "control"
-    seen = pd.Series(rng.random(adata.n_obs)).groupby([batch, is_ctrl]).rank().to_numpy() % 2 == 0
+    folds = _batch_folds(batch, cfg.n_folds, rng)
+    seen = _seen_controls(adata, batch, rng)
+    train_cells = ~is_control(adata) | seen
 
     pert_scores, batch_scores = [], []
     for i, held_out in enumerate(folds):
-        print(f"fold {i + 1}/{n_folds}: holding out {len(held_out)} batches")
+        print(f"fold {i + 1}/{cfg.n_folds}: holding out {len(held_out)} batches")
         is_test = np.isin(batch, held_out)
-        models, test = fit(adata[~is_test & (~is_ctrl | seen)], cfg), adata[is_test]
-        pert_scores.append(score(models, test, k, seen[is_test]))
-        fold_means = pert_scores[-1].groupby(["metric", "model"], sort=False)["value"].mean()
-        print(fold_means.unstack("model").to_string(float_format="%.4g"), flush=True)
-        batch_scores += [
-            score(models, test[(m := batch[is_test] == b)], k, seen[is_test][m]).assign(
-                batch=b, cells=(batch == b).sum()
-            )
-            for b in held_out
-        ]
+        models = fit(adata[~is_test & train_cells], cfg)
+        test = adata[is_test]
+        pert_scores.append(score(models, test, cfg.top_k, seen[is_test]))
+        _print_fold_means(pert_scores[-1])
+        batch_scores += _score_batches(models, test, seen[is_test], held_out, batch, cfg.top_k)
+    return _average_per_perturbation(pert_scores), _average_per_batch(batch_scores)
 
-    keys = ["metric", "model"]
-    per_pert = pd.concat(pert_scores).groupby(["perturbation", *keys], sort=False)
-    per_batch = pd.concat(batch_scores).groupby(["batch", *keys], sort=False)
-    return (
-        per_pert.agg(value=("value", "mean"), cells=("cells", "sum")).reset_index(),
-        per_batch.agg(value=("value", "mean"), cells=("cells", "first")).reset_index(),
-    )
+
+def _batch_folds(batch: np.ndarray, n_folds: int, rng: np.random.Generator) -> list:
+    """The batches, shuffled and split into n_folds groups."""
+    return np.array_split(rng.permutation(np.unique(batch)), n_folds)
+
+
+def _seen_controls(adata: sc.AnnData, batch: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+    """Mask of the controls the models see: every other one within each batch, shuffled."""
+    rank = pd.Series(rng.random(adata.n_obs)).groupby([batch, is_control(adata)]).rank()
+    return rank.to_numpy() % 2 == 0
+
+
+def _score_batches(models, test, seen, held_out, batch, k) -> list[pd.DataFrame]:
+    """Scores of each held-out batch on its own, tagged with the batch and its total cells."""
+    test_batch = batch_labels(test)
+    scores = []
+    for b in held_out:
+        in_b = test_batch == b
+        s = score(models, test[in_b], k, seen[in_b])
+        scores.append(s.assign(batch=b, cells=(batch == b).sum()))
+    return scores
+
+
+def _print_fold_means(scores: pd.DataFrame) -> None:
+    """Each model's mean score per metric in one fold."""
+    means = scores.groupby(["metric", "model"], sort=False)["value"].mean()
+    print(means.unstack("model").to_string(float_format="%.4g"), flush=True)
+
+
+def _average_per_perturbation(scores: list[pd.DataFrame]) -> pd.DataFrame:
+    """Scores averaged over folds per perturbation, with cells summed."""
+    grouped = pd.concat(scores).groupby(["perturbation", "metric", "model"], sort=False)
+    return grouped.agg(value=("value", "mean"), cells=("cells", "sum")).reset_index()
+
+
+def _average_per_batch(scores: list[pd.DataFrame]) -> pd.DataFrame:
+    """Scores averaged over each batch's perturbations."""
+    grouped = pd.concat(scores).groupby(["batch", "metric", "model"], sort=False)
+    return grouped.agg(value=("value", "mean"), cells=("cells", "first")).reset_index()
 
 
 @hydra.main(config_path="../configs", config_name="train_batch_transfer", version_base=None)
 def main(cfg: DictConfig):
     adata = load_dataset()
     per_pert, per_batch = cross_validate(adata, cfg)
-
     out_dir = Path(HydraConfig.get().runtime.output_dir)
+    _save_scores(per_pert, per_batch, out_dir)
+    _plot_scores(per_pert, per_batch, out_dir / "plots")
+
+
+def _save_scores(per_pert: pd.DataFrame, per_batch: pd.DataFrame, out_dir: Path) -> None:
+    """Both score tables as CSVs in out_dir."""
     per_pert.to_csv(out_dir / "scores_per_perturbation.csv", index=False)
     per_batch.to_csv(out_dir / "scores_per_batch.csv", index=False)
-    plot_dir = out_dir / "plots"
+
+
+def _plot_scores(per_pert: pd.DataFrame, per_batch: pd.DataFrame, plot_dir: Path) -> None:
+    """One plot per metric for each view, printing the model means."""
     report(per_pert, "perturbation", plot_dir / "per_perturbation")
     report(per_batch, "batch", plot_dir / "per_batch")
 

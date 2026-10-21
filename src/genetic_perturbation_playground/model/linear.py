@@ -1,7 +1,7 @@
 import numpy as np
 import scanpy as sc
 
-from .batch_transfer import summary_stats
+from .batch_transfer import is_control, summary_stats
 
 
 class LinearPerturbationModel:
@@ -13,8 +13,7 @@ class LinearPerturbationModel:
     """
 
     def fit(self, adata: sc.AnnData) -> "LinearPerturbationModel":
-        is_ctrl = adata.obs["perturbation"].astype(str).to_numpy() == "control"
-        self.intercept_ = np.asarray(adata.X[is_ctrl].mean(axis=0)).ravel()
+        self.intercept_ = np.asarray(adata.X[is_control(adata)].mean(axis=0)).ravel()
         s = summary_stats(adata)
         self.perturbations_, self.coef_ = s["perturbations"], s["y_mean"] - self.intercept_
         return self
