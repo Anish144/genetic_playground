@@ -4,6 +4,7 @@ from pathlib import Path
 import anndata as ad
 import numpy as np
 import pandas as pd
+import pytest
 
 from genetic_perturbation_playground.model.batch_transfer import (
     BatchTransferModel,
@@ -55,7 +56,8 @@ def test_matches_cell_level_marginal_embedding_bridge():
     np.testing.assert_allclose(model.predict(query, test), expected, rtol=1e-8, atol=1e-10)
 
 
-def test_neural_bridge_counts_match_replicated_rows():
+@pytest.mark.parametrize("cross_fit", [False, True])
+def test_neural_bridge_counts_match_replicated_rows(cross_fit):
     """A pair with count c fits exactly like c identical rows (weighted loss and ridge)."""
     rng = np.random.default_rng(0)
     xs = [rng.normal(size=(6, 2)) for _ in range(3)]
@@ -65,7 +67,7 @@ def test_neural_bridge_counts_match_replicated_rows():
 
     def fit(xs, ys, counts=None):
         bridge = NeuralMarginalEmbeddingBridge(
-            n_steps=5, weight_decay=1e-2, n_features=4, n_features_w=3
+            n_steps=5, weight_decay=1e-2, n_features=4, n_features_w=3, cross_fit=cross_fit
         )
         return bridge.fit(xs, ys, ws, counts)
 
@@ -130,3 +132,10 @@ def test_neural_checkpoint_equals_fit_with_that_many_steps():
 
     short = NeuralBridgeTransfer(**{**kwargs, "n_steps": 3}).fit(train)
     np.testing.assert_allclose(at_step[3], short.predict(perts, test))
+
+
+def test_cross_fit_needs_two_environments():
+    rng = np.random.default_rng(0)
+    bridge = NeuralMarginalEmbeddingBridge(n_steps=1, cross_fit=True)
+    with pytest.raises(ValueError, match="two environments"):
+        bridge.fit([rng.normal(size=5)], [rng.normal(size=5)], [rng.normal(size=(4, 2))])

@@ -63,10 +63,15 @@ def _weighted_ridge(feats: torch.Tensor, y: torch.Tensor, c: torch.Tensor, reg: 
     return torch.linalg.solve(weighted.T @ feats + reg * c.sum() * eye, weighted.T @ y)
 
 
+def _weighted_sse(pred: torch.Tensor, y: torch.Tensor, c: torch.Tensor) -> torch.Tensor:
+    """Count-weighted sum over pairs of the squared error averaged over outputs."""
+    sq_err = ((pred - y) ** 2).reshape(len(c), -1).mean(dim=1)
+    return (c * sq_err).sum()
+
+
 def _weighted_mse(pred: torch.Tensor, y: torch.Tensor, c: torch.Tensor) -> torch.Tensor:
     """Count-weighted mean over pairs of the squared error averaged over outputs."""
-    sq_err = ((pred - y) ** 2).reshape(len(c), -1).mean(dim=1)
-    return (c * sq_err).sum() / c.sum()
+    return _weighted_sse(pred, y, c) / c.sum()
 
 
 @dataclass
@@ -81,6 +86,9 @@ class NeuralMarginalEmbeddingBridge:
     lr          AdamW learning rate for the parameters of phi and psi
     weight_decay  AdamW decoupled weight decay on phi and psi (0 is plain Adam)
     n_steps     full-batch AdamW steps
+    cross_fit   train phi and psi on a cross-fitted loss: each step splits the environments into
+                two random halves, solves A on each half and scores it on the other. The final A
+                is still solved on all environments. Needs at least two environments.
     device      torch device to train and predict on, e.g. "cpu" or "cuda" (not "mps": the model
                 is float64, which the Apple backend does not support)
 
@@ -95,6 +103,7 @@ class NeuralMarginalEmbeddingBridge:
     lr: float = 1e-3
     weight_decay: float = 0.0
     n_steps: int = 2000
+    cross_fit: bool = False
     seed: int = 0
     device: str = "cpu"
 
@@ -156,13 +165,42 @@ class NeuralMarginalEmbeddingBridge:
         progress = trange(self.n_steps, desc="neural bridge", leave=False)
         for step in progress:
             optimizer.zero_grad()
-            loss, _ = self._stage2(data)
+            loss = self._training_loss(data)
             loss.backward()
             optimizer.step()
             progress.set_postfix(loss=f"{loss.item():.4f}")
             if step + 1 in checkpoints:
                 self._solve_A(data)
                 on_checkpoint(step + 1)
+
+    def _training_loss(self, data: _Stage2Data) -> torch.Tensor:
+        """The loss phi and psi are trained on: cross-fitted, or in-sample stage 2."""
+        if self.cross_fit:
+            return self._cross_fit_loss(data)
+        loss, _ = self._stage2(data)
+        return loss
+
+    def _cross_fit_loss(self, data: _Stage2Data) -> torch.Tensor:
+        """Weighted squared error of each half's pairs under A solved on the other half."""
+        mu = self._embed(data.w_envs)
+        feats = _features(self.phi_(data.x), mu[data.env])
+        first = self._random_half(data)
+        sse = self._held_out_sse(feats, data, first) + self._held_out_sse(feats, data, ~first)
+        return sse / data.c.sum()
+
+    def _held_out_sse(self, feats, data: _Stage2Data, fit: torch.Tensor) -> torch.Tensor:
+        """Weighted sum of squared errors of the pairs not in `fit`, under A solved on `fit`."""
+        A = _weighted_ridge(feats[fit], data.y[fit], data.c[fit], self.reg)
+        held = ~fit
+        return _weighted_sse(feats[held] @ A, data.y[held], data.c[held])
+
+    def _random_half(self, data: _Stage2Data) -> torch.Tensor:
+        """Mask of the pairs whose environment is in a random half of the environments."""
+        n_envs = len(data.w_envs)
+        if n_envs < 2:
+            raise ValueError("cross_fit needs at least two environments")
+        half = torch.randperm(n_envs)[: n_envs // 2].to(data.env.device)
+        return torch.isin(data.env, half)
 
     def _solve_A(self, data: _Stage2Data) -> None:
         """Set A_ to the ridge solution for the current phi and psi."""

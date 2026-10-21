@@ -1,4 +1,4 @@
-n_envs: [1, 3, 5, 10, 20, 50, 100]            # number of source environments D (sweep)
+n_envs: [3, 5, 10, 20, 50, 100]  # number of source environments D (sweep; cross-fitting needs 2+)
 proxies: [u_plus_sin]   # W = g(U2) + noise; see data/proxy_unconfounded.PROXIES
 dim_u: 3              # dimension k of the latents U1, U2 (and of W)
 theta_targets: [-1.0, 1.0]  # target mean in each latent coordinate; sources Uniform(-2, 2)^k
@@ -8,7 +8,7 @@ m: 200                # proxies W per environment, also for the target
 n_target_labels: 4000 # labelled target pairs for the oracle (= pooled source size at D=20)
 n_test: 2000          # held-out labelled target pairs for MSE
 reg: 1.0e-3
-bridges: [kernel, neural]  # trained on the same data, scored against the same oracle
+bridges: [kernel, neural, neural_crossfit]  # same data, scored against the same oracle
 neural:               # NeuralMarginalEmbeddingBridge settings; see model/proxy_unconfounded_neural.py
   n_features: 16      # p, output dimension of phi
   n_features_w: 16    # q, output dimension of psi
