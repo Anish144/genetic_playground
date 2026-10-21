@@ -170,3 +170,18 @@ def test_cross_fit_with_one_fold_per_environment_is_leave_one_environment_out():
             A = _weighted_ridge(feats[~held], data.y[~held], data.c[~held], bridge.reg)
             sse += _weighted_sse(feats[held] @ A, data.y[held], data.c[held])
     torch.testing.assert_close(loss, sse / data.c.sum())
+
+
+def test_sample_configs_draws_distinct_grid_points():
+    sys.path.insert(0, str(Path(__file__).parents[1] / "scripts"))
+    from omegaconf import OmegaConf
+    from tune_bridges import _grid_configs, _sample_configs
+
+    grid = OmegaConf.create({"reg": [1, 2, 3], "scale": [10, 20]})
+    every = _grid_configs(grid)
+    drawn = _sample_configs(grid, 4, seed=0)
+    assert len(every) == 6
+    assert len(drawn) == 4
+    assert all(c in every for c in drawn)
+    assert len({tuple(c.items()) for c in drawn}) == 4
+    assert _sample_configs(grid, 100, seed=0) == every
