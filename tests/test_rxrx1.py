@@ -1,9 +1,9 @@
+import anndata as ad
+import numpy as np
 import pandas as pd
-import pytest
 import torch
 
-from genetic_perturbation_playground.data import rxrx1
-from genetic_perturbation_playground.data.rxrx1 import crop, crop_obs
+from genetic_perturbation_playground.data.rxrx1 import crop, crop_obs, write_embeddings
 
 
 def test_crop_matches_slicing():
@@ -35,7 +35,13 @@ def test_crop_obs_labels():
     assert (obs["batch"].astype(str) == "E1").all()
 
 
-def test_load_rxrx1_missing_file_says_how_to_make_it(monkeypatch, tmp_path):
-    monkeypatch.setattr(rxrx1, "DATA_DIR", tmp_path)
-    with pytest.raises(FileNotFoundError, match="embed_rxrx1"):
-        rxrx1.load_rxrx1(4)
+def test_write_embeddings_round_trips(tmp_path):
+    meta = pd.DataFrame(
+        {"experiment": ["E1"], "plate": [1], "well": ["B02"], "site": [1], "cell_type": ["HEPG2"]}
+        | {"well_type": ["treatment"], "sirna": ["s1"]}
+    )
+    obs = crop_obs(meta, 2)
+    write_embeddings(np.zeros((len(obs), 3), dtype=np.float32), obs, tmp_path / "x.h5ad")
+    back = ad.read_h5ad(tmp_path / "x.h5ad")
+    assert list(back.obs["crop"]) == [0, 1, 2, 3]
+    assert list(back.obs["perturbation"].astype(str)) == ["s1"] * 4

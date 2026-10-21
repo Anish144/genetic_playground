@@ -1,4 +1,4 @@
-"""Nested cross-validation tuning of the kernel and neural bridges on Replogle K562.
+"""Nested cross-validation tuning of the kernel and neural bridges on Replogle K562 (or dataset=rxrx1).
 
 Outer folds, control split and scoring are those of train_batch_transfer. Within each outer fold,
 a share of the training batches (inner_val_frac) is held out for inner validation; every grid
@@ -34,10 +34,10 @@ from train_batch_transfer import (
     _save_scores,
     _score_batches,
     _seen_controls,
+    load_data,
     score,
 )
 
-from genetic_perturbation_playground.data.data_loader import load_dataset
 from genetic_perturbation_playground.model.batch_transfer import (
     KernelBridgeTransfer,
     NeuralBridgeTransfer,
@@ -187,7 +187,7 @@ def nested_cv(adata: sc.AnnData, cfg: DictConfig) -> tuple:
 
 @hydra.main(config_path="../configs", config_name="tune_bridges", version_base=None)
 def main(cfg: DictConfig):
-    adata = load_dataset()
+    adata = load_data(cfg)
     inner, selected, per_pert, per_batch = nested_cv(adata, cfg)
     out_dir = Path(HydraConfig.get().runtime.output_dir)
     inner.to_csv(out_dir / "inner_scores.csv", index=False)

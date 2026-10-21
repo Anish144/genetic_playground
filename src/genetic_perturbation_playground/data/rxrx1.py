@@ -6,6 +6,7 @@ channel. Embeddings are written by scripts/embed_rxrx1.py, one row per crop.
 
 from pathlib import Path
 
+import anndata as ad
 import numpy as np
 import pandas as pd
 import scanpy as sc
@@ -61,16 +62,22 @@ def crop_obs(meta: pd.DataFrame, grid: int) -> pd.DataFrame:
             "crop": np.tile(np.arange(n_crops), len(meta)),
         }
     )
-    obs.index = obs.index.astype(str)
-    cats = ["perturbation", "batch", "cell_type", "well_type", "well"]
-    return obs.astype(dict.fromkeys(cats, "category"))
+    # pandas 3 strings are arrow-backed, which anndata 0.12 can't write: index and categories as object
+    obs.index = obs.index.astype(str).astype(object)
+    for col in ["perturbation", "batch", "cell_type", "well_type", "well"]:
+        obs[col] = pd.Categorical(obs[col], pd.Index(sorted(set(obs[col])), dtype=object))
+    return obs
+
+
+def write_embeddings(X: np.ndarray, obs: pd.DataFrame, path: Path) -> None:
+    """Crop embeddings X (crops x features) with their crop_obs labels, as h5ad."""
+    var = pd.DataFrame(index=pd.Index([f"phenom_{i}" for i in range(X.shape[1])], dtype=object))
+    ad.AnnData(X, obs=obs, var=var).write_h5ad(path)
 
 
 def load_rxrx1(grid: int = 4) -> sc.AnnData:
     """RxRx1 Phenom embeddings, one row per crop, written by scripts/embed_rxrx1.py."""
     path = rxrx1_path(grid)
-    if not path.exists():
-        raise FileNotFoundError(f"{path} missing: run scripts/embed_rxrx1.py grid={grid} first")
     adata = sc.read_h5ad(path)
     print(f"Loaded {path}")
     print(

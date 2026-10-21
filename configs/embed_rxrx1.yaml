@@ -1,0 +1,8 @@
+name: embed_rxrx1_g${grid}  # run folder outputs/<date>/<name>_<time>/ (embeddings go to data/)
+hydra:
+  run:
+    dir: outputs/${now:%Y-%m-%d}/${name}_${now:%H-%M-%S}
+grid: 4           # crops per side of each 512px site: 4 -> 16 crops of 128px
+batch_size: 32    # sites per GPU batch (x grid^2 crops)
+workers: 8        # DataLoader workers decoding pngs, the bottleneck; match --cpus-per-task
+experiments: null # all 51; or a list for a smoke run, e.g. [HEPG2-01,HUVEC-01]

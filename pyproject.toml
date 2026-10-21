@@ -53,3 +53,6 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401"]         # allow unused imports in __init__
 "notebooks/*" = ["E402", "F401"] # notebooks are messy, accept it
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]  # data/ holds downloaded code with its own tests
