@@ -200,17 +200,22 @@ class KernelBridgeTransfer:
     block), fit on its per-batch means. All blocks share M = <mu_e, mu_e'>, computed once.
 
     weight_by_cells=False gives every (perturbation, batch) mean equal weight instead.
+    lengthscale_scale multiplies the median-heuristic lengthscale of the RBF kernel on w.
     """
 
-    def __init__(self, reg: float = 1e-6, weight_by_cells: bool = True):
+    def __init__(
+        self, reg: float = 1e-6, weight_by_cells: bool = True, lengthscale_scale: float = 1.0
+    ):
         self.reg = reg
         self.weight_by_cells = weight_by_cells
+        self.lengthscale_scale = lengthscale_scale
 
     def fit(self, adata: sc.AnnData) -> "KernelBridgeTransfer":
         data = _bridge_data(adata, self.weight_by_cells)
         self.perturbations_ = data.perturbations
         self.ctrl_ = data.ctrl
-        self.kernel_w_ = RBF(lengthscales=median_heuristic(np.concatenate(self.ctrl_)))
+        lengthscale = self.lengthscale_scale * median_heuristic(np.concatenate(self.ctrl_))
+        self.kernel_w_ = RBF(lengthscales=lengthscale)
         inner = mean_inner(self.kernel_w_, self.ctrl_)
         self.bridges_ = [self._fit_block(data, inner, p) for p in range(len(self.perturbations_))]
         return self
@@ -244,15 +249,17 @@ class NeuralBridgeTransfer:
         self.weight_by_cells = weight_by_cells
         self.bridge_kwargs = bridge_kwargs
 
-    def fit(self, adata: sc.AnnData) -> "NeuralBridgeTransfer":
+    def fit(self, adata: sc.AnnData, checkpoints=(), on_checkpoint=None) -> "NeuralBridgeTransfer":
+        """Fit on `adata`; checkpoints and on_checkpoint as in NeuralMarginalEmbeddingBridge.fit."""
         data = _bridge_data(adata, self.weight_by_cells)
         self.perturbations_ = data.perturbations
         envs = [data.batch == b for b in range(len(data.ctrl))]
         xs = [self._onehot(data.pert[e]) for e in envs]
         ys = [data.y[e] for e in envs]
         counts = [data.weight[e] for e in envs]
-        bridge = NeuralMarginalEmbeddingBridge(**self.bridge_kwargs)
-        self.bridge_ = bridge.fit(xs, ys, data.ctrl, counts)
+        # set before fitting: checkpoint callbacks predict with it
+        self.bridge_ = NeuralMarginalEmbeddingBridge(**self.bridge_kwargs)
+        self.bridge_.fit(xs, ys, data.ctrl, counts, checkpoints, on_checkpoint)
         return self
 
     def predict(self, perturbations: list[str], test: sc.AnnData) -> np.ndarray:

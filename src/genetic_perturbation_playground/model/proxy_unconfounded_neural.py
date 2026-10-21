@@ -18,6 +18,7 @@ phi(x_i) ⊗ mu_env(i), also closed form. phi and psi are trained with AdamW on 
 error, backpropagating through A and mu_e (as in DFPV, Xu et al., 2021).
 """
 
+from collections.abc import Callable, Collection
 from dataclasses import dataclass
 from itertools import pairwise
 from typing import NamedTuple
@@ -103,19 +104,22 @@ class NeuralMarginalEmbeddingBridge:
         ys: list[np.ndarray],
         ws: list[np.ndarray],
         counts: list[np.ndarray] | None = None,
+        checkpoints: Collection[int] = (),
+        on_checkpoint: Callable[[int], None] | None = None,
     ) -> "NeuralMarginalEmbeddingBridge":
         """Fit from D source environments; element e of each list belongs to environment e.
 
         xs[e]: (n_e,) or (n_e, d_x);  ys[e]: (n_e,) or (n_e, d_y);  ws[e]: (m_e,) or (m_e, d_w).
         counts[e]: (n_e,), optional; pair i stands for counts[e][i] replicates with mean y_i, so the
         fit equals the fit on the replicates (weighted loss, ridge scaled by their total).
+        After each step in ``checkpoints``, A_ is set and ``on_checkpoint(step)`` is called, so the
+        bridge can be scored there as if fit with n_steps=step.
         """
         torch.manual_seed(self.seed)
         data = self._to_tensors(xs, ys, ws, counts)
         self._build_networks(data.x.shape[1], data.w_envs[0].shape[1])
-        self._train(data)
-        with torch.no_grad():
-            _, self.A_ = self._stage2(data)
+        self._train(data, checkpoints, on_checkpoint)
+        self._solve_A(data)
         return self
 
     def predict(self, x: np.ndarray, w_target: np.ndarray) -> np.ndarray:
@@ -145,17 +149,25 @@ class NeuralMarginalEmbeddingBridge:
         self.phi_ = _mlp(d_x, self.width, self.depth, self.n_features).to(self.device)
         self.psi_ = _mlp(d_w, self.width, self.depth, self.n_features_w).to(self.device)
 
-    def _train(self, data: _Stage2Data) -> None:
+    def _train(self, data: _Stage2Data, checkpoints, on_checkpoint) -> None:
         """Full-batch AdamW on phi and psi against the stage-2 loss."""
         params = [*self.phi_.parameters(), *self.psi_.parameters()]
         optimizer = torch.optim.AdamW(params, lr=self.lr, weight_decay=self.weight_decay)
         progress = trange(self.n_steps, desc="neural bridge", leave=False)
-        for _ in progress:
+        for step in progress:
             optimizer.zero_grad()
             loss, _ = self._stage2(data)
             loss.backward()
             optimizer.step()
             progress.set_postfix(loss=f"{loss.item():.4f}")
+            if step + 1 in checkpoints:
+                self._solve_A(data)
+                on_checkpoint(step + 1)
+
+    def _solve_A(self, data: _Stage2Data) -> None:
+        """Set A_ to the ridge solution for the current phi and psi."""
+        with torch.no_grad():
+            _, self.A_ = self._stage2(data)
 
     def _stage2(self, data: _Stage2Data) -> tuple[torch.Tensor, torch.Tensor]:
         """Closed-form weighted ridge A for the current features, and its weighted squared error.

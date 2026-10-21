@@ -1,0 +1,13 @@
+defaults:  # folds, control split, scoring and neural settings as in train_batch_transfer
+  - train_batch_transfer
+  - _self_
+
+inner_val_frac: 0.2  # share of each outer fold's training batches used for inner validation
+kernel_grid:
+  reg: [1.0e-8, 3.0e-8, 1.0e-7, 3.0e-7, 1.0e-6, 3.0e-6, 1.0e-5]
+  lengthscale_scale: [1, 2, 4]  # multiples of the median-heuristic lengthscale
+neural_grid:
+  weight_decay: [0.0, 1.0e-2, 1.0e-1]
+  reg: [1.0e-7, 1.0e-6, 1.0e-5]
+  features: [[32, 32], [64, 32]]  # (n_features, n_features_w)
+  checkpoints: [50, 100, 200, 300, 400]  # steps scored in one training run

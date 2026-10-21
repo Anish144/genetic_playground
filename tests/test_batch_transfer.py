@@ -8,6 +8,7 @@ import pandas as pd
 from genetic_perturbation_playground.model.batch_transfer import (
     BatchTransferModel,
     KernelBridgeTransfer,
+    NeuralBridgeTransfer,
 )
 from genetic_perturbation_playground.model.proxy_unconfounded import MarginalEmbeddingBridge
 from genetic_perturbation_playground.model.proxy_unconfounded_neural import (
@@ -114,3 +115,18 @@ def test_unweighted_bridge_ignores_cell_counts():
 
     np.testing.assert_allclose(pred(train, False), pred(doubled, False))
     assert not np.allclose(pred(train, True), pred(doubled, True))
+
+
+def test_neural_checkpoint_equals_fit_with_that_many_steps():
+    rng = np.random.default_rng(0)
+    data = _cells(rng)
+    train, test = data[data.obs["batch"] != "b3"], data[data.obs["batch"] == "b3"]
+    perts = sorted(set(test.obs["perturbation"]) - {"control"})
+    kwargs = {"n_features": 4, "n_features_w": 3, "n_steps": 6}
+    at_step = {}
+
+    model = NeuralBridgeTransfer(**kwargs)
+    model.fit(train, [3], lambda step: at_step.update({step: model.predict(perts, test)}))
+
+    short = NeuralBridgeTransfer(**{**kwargs, "n_steps": 3}).fit(train)
+    np.testing.assert_allclose(at_step[3], short.predict(perts, test))
