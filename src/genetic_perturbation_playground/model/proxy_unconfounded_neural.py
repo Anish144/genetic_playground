@@ -56,11 +56,21 @@ def _features(phi_x: torch.Tensor, mu: torch.Tensor) -> torch.Tensor:
     return (phi_x[:, :, None] * mu[:, None, :]).flatten(1)
 
 
+def _normal_equations(feats: torch.Tensor, y: torch.Tensor, c: torch.Tensor) -> tuple:
+    """Weighted Gram F^T C F and cross term F^T C y of a weighted least-squares fit."""
+    weighted = feats * c[:, None]
+    return weighted.T @ feats, weighted.T @ y
+
+
+def _ridge_solve(gram: torch.Tensor, cross: torch.Tensor, weight: torch.Tensor, reg: float):
+    """Ridge solution from the normal equations, with penalty reg * weight * |A|^2."""
+    eye = torch.eye(gram.shape[0], dtype=gram.dtype, device=gram.device)
+    return torch.linalg.solve(gram + reg * weight * eye, cross)
+
+
 def _weighted_ridge(feats: torch.Tensor, y: torch.Tensor, c: torch.Tensor, reg: float):
     """A minimising sum_i c_i |feats_i A - y_i|^2 + reg * sum(c) * |A|^2."""
-    weighted = feats * c[:, None]
-    eye = torch.eye(feats.shape[1], dtype=feats.dtype, device=feats.device)
-    return torch.linalg.solve(weighted.T @ feats + reg * c.sum() * eye, weighted.T @ y)
+    return _ridge_solve(*_normal_equations(feats, y, c), c.sum(), reg)
 
 
 def _weighted_sse(pred: torch.Tensor, y: torch.Tensor, c: torch.Tensor) -> torch.Tensor:
@@ -86,9 +96,10 @@ class NeuralMarginalEmbeddingBridge:
     lr          AdamW learning rate for the parameters of phi and psi
     weight_decay  AdamW decoupled weight decay on phi and psi (0 is plain Adam)
     n_steps     full-batch AdamW steps
-    cross_fit   train phi and psi on a cross-fitted loss: each step splits the environments into
-                two random halves, solves A on each half and scores it on the other. The final A
-                is still solved on all environments. Needs at least two environments.
+    cross_fit_folds  0 trains phi and psi on the in-sample stage-2 loss. K >= 2 trains them on a
+                cross-fitted loss: each step splits the environments into K random folds (at most
+                one per environment), solves A on all folds but one and scores the held-out fold,
+                for every fold. The final A is still solved on all environments.
     device      torch device to train and predict on, e.g. "cpu" or "cuda" (not "mps": the model
                 is float64, which the Apple backend does not support)
 
@@ -103,7 +114,7 @@ class NeuralMarginalEmbeddingBridge:
     lr: float = 1e-3
     weight_decay: float = 0.0
     n_steps: int = 2000
-    cross_fit: bool = False
+    cross_fit_folds: int = 0
     seed: int = 0
     device: str = "cpu"
 
@@ -175,32 +186,38 @@ class NeuralMarginalEmbeddingBridge:
 
     def _training_loss(self, data: _Stage2Data) -> torch.Tensor:
         """The loss phi and psi are trained on: cross-fitted, or in-sample stage 2."""
-        if self.cross_fit:
+        if self.cross_fit_folds:
             return self._cross_fit_loss(data)
         loss, _ = self._stage2(data)
         return loss
 
     def _cross_fit_loss(self, data: _Stage2Data) -> torch.Tensor:
-        """Weighted squared error of each half's pairs under A solved on the other half."""
+        """Weighted squared error of each fold's pairs under A solved on the other folds."""
         mu = self._embed(data.w_envs)
         feats = _features(self.phi_(data.x), mu[data.env])
-        first = self._random_half(data)
-        sse = self._held_out_sse(feats, data, first) + self._held_out_sse(feats, data, ~first)
+        fold = self._random_folds(data)
+        held_out = [fold == k for k in range(int(fold.max()) + 1)]
+        parts = [_normal_equations(feats[h], data.y[h], data.c[h]) for h in held_out]
+        gram, cross = map(sum, zip(*parts, strict=True))
+        sse = sum(
+            self._held_out_sse(feats, data, h, gram - g, cross - b)
+            for h, (g, b) in zip(held_out, parts, strict=True)
+        )
         return sse / data.c.sum()
 
-    def _held_out_sse(self, feats, data: _Stage2Data, fit: torch.Tensor) -> torch.Tensor:
-        """Weighted sum of squared errors of the pairs not in `fit`, under A solved on `fit`."""
-        A = _weighted_ridge(feats[fit], data.y[fit], data.c[fit], self.reg)
-        held = ~fit
+    def _held_out_sse(self, feats, data: _Stage2Data, held, gram, cross) -> torch.Tensor:
+        """Weighted sum of squared errors of the `held` pairs, under A from the others' equations."""
+        A = _ridge_solve(gram, cross, data.c[~held].sum(), self.reg)
         return _weighted_sse(feats[held] @ A, data.y[held], data.c[held])
 
-    def _random_half(self, data: _Stage2Data) -> torch.Tensor:
-        """Mask of the pairs whose environment is in a random half of the environments."""
+    def _random_folds(self, data: _Stage2Data) -> torch.Tensor:
+        """Fold of each pair: its environment's fold in a random split of the environments."""
         n_envs = len(data.w_envs)
-        if n_envs < 2:
-            raise ValueError("cross_fit needs at least two environments")
-        half = torch.randperm(n_envs)[: n_envs // 2].to(data.env.device)
-        return torch.isin(data.env, half)
+        n_folds = min(self.cross_fit_folds, n_envs)
+        if n_folds < 2:
+            raise ValueError("cross-fitting needs at least two folds and two environments")
+        env_fold = torch.randperm(n_envs) % n_folds  # balanced: fold sizes differ by at most one
+        return env_fold.to(data.env.device)[data.env]
 
     def _solve_A(self, data: _Stage2Data) -> None:
         """Set A_ to the ridge solution for the current phi and psi."""

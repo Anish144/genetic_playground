@@ -4,7 +4,7 @@ For each proxy function g, number of source environments D, target theta* and se
 are scored by MSE on held-out (x, y) pairs from the target environment:
   kernel  MarginalEmbeddingBridge fit on the sources, given only the target's proxies W
   neural  NeuralMarginalEmbeddingBridge, likewise; ``bridges`` in the config picks which run
-  neural_crossfit  the same, with phi and psi trained on the cross-fitted loss (cross_fit=True)
+  neural_crossfit  the same, with phi and psi trained on a cross_fit_folds-fold cross-fitted loss
   pooled  kernel ridge regression of y on x over all sources, ignoring the environment
   oracle  kernel ridge regression of y on x over labelled target data
   bayes   the true E[Y | x, e*]; its MSE is the irreducible error Var(Y | x, e*)
@@ -65,7 +65,7 @@ def run(cfg: DictConfig, proxy: str, d: int, theta_star: float, seed: int) -> di
         "kernel": lambda: MarginalEmbeddingBridge(kx, kw, cfg.reg),
         "neural": lambda: NeuralMarginalEmbeddingBridge(reg=cfg.reg, seed=seed, **cfg.neural),
         "neural_crossfit": lambda: NeuralMarginalEmbeddingBridge(
-            reg=cfg.reg, seed=seed, **cfg.neural, cross_fit=True
+            reg=cfg.reg, seed=seed, **cfg.neural, cross_fit_folds=cfg.cross_fit_folds
         ),
     }
 

@@ -5,6 +5,7 @@ import anndata as ad
 import numpy as np
 import pandas as pd
 import pytest
+import torch
 
 from genetic_perturbation_playground.model.batch_transfer import (
     BatchTransferModel,
@@ -14,6 +15,9 @@ from genetic_perturbation_playground.model.batch_transfer import (
 from genetic_perturbation_playground.model.proxy_unconfounded import MarginalEmbeddingBridge
 from genetic_perturbation_playground.model.proxy_unconfounded_neural import (
     NeuralMarginalEmbeddingBridge,
+    _features,
+    _weighted_ridge,
+    _weighted_sse,
 )
 from genetic_perturbation_playground.utils.kernels import RBF
 
@@ -56,8 +60,8 @@ def test_matches_cell_level_marginal_embedding_bridge():
     np.testing.assert_allclose(model.predict(query, test), expected, rtol=1e-8, atol=1e-10)
 
 
-@pytest.mark.parametrize("cross_fit", [False, True])
-def test_neural_bridge_counts_match_replicated_rows(cross_fit):
+@pytest.mark.parametrize("cross_fit_folds", [0, 2, 3])
+def test_neural_bridge_counts_match_replicated_rows(cross_fit_folds):
     """A pair with count c fits exactly like c identical rows (weighted loss and ridge)."""
     rng = np.random.default_rng(0)
     xs = [rng.normal(size=(6, 2)) for _ in range(3)]
@@ -67,7 +71,11 @@ def test_neural_bridge_counts_match_replicated_rows(cross_fit):
 
     def fit(xs, ys, counts=None):
         bridge = NeuralMarginalEmbeddingBridge(
-            n_steps=5, weight_decay=1e-2, n_features=4, n_features_w=3, cross_fit=cross_fit
+            n_steps=5,
+            weight_decay=1e-2,
+            n_features=4,
+            n_features_w=3,
+            cross_fit_folds=cross_fit_folds,
         )
         return bridge.fit(xs, ys, ws, counts)
 
@@ -136,6 +144,29 @@ def test_neural_checkpoint_equals_fit_with_that_many_steps():
 
 def test_cross_fit_needs_two_environments():
     rng = np.random.default_rng(0)
-    bridge = NeuralMarginalEmbeddingBridge(n_steps=1, cross_fit=True)
+    bridge = NeuralMarginalEmbeddingBridge(n_steps=1, cross_fit_folds=2)
     with pytest.raises(ValueError, match="two environments"):
         bridge.fit([rng.normal(size=5)], [rng.normal(size=5)], [rng.normal(size=(4, 2))])
+
+
+def test_cross_fit_with_one_fold_per_environment_is_leave_one_environment_out():
+    """K = D: each environment's error under A solved on all the others, pooled by weight."""
+    rng = np.random.default_rng(0)
+    xs = [rng.normal(size=(6, 2)) for _ in range(4)]
+    ys = [rng.normal(size=(6, 3)) for _ in range(4)]
+    ws = [rng.normal(size=(10, 2)) for _ in range(4)]
+    counts = [rng.integers(1, 4, size=6) for _ in range(4)]
+    bridge = NeuralMarginalEmbeddingBridge(n_steps=2, n_features=3, n_features_w=2)
+    bridge.fit(xs, ys, ws, counts)
+    bridge.cross_fit_folds = 4
+    data = bridge._to_tensors(xs, ys, ws, counts)
+
+    with torch.no_grad():
+        loss = bridge._cross_fit_loss(data)
+        feats = _features(bridge.phi_(data.x), bridge._embed(data.w_envs)[data.env])
+        sse = 0
+        for e in range(4):
+            held = data.env == e
+            A = _weighted_ridge(feats[~held], data.y[~held], data.c[~held], bridge.reg)
+            sse += _weighted_sse(feats[held] @ A, data.y[held], data.c[held])
+    torch.testing.assert_close(loss, sse / data.c.sum())

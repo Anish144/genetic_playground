@@ -9,6 +9,7 @@ n_target_labels: 4000 # labelled target pairs for the oracle (= pooled source si
 n_test: 2000          # held-out labelled target pairs for MSE
 reg: 1.0e-3
 bridges: [kernel, neural, neural_crossfit]  # same data, scored against the same oracle
+cross_fit_folds: 5  # folds of neural_crossfit's loss (capped at the number of environments)
 neural:               # NeuralMarginalEmbeddingBridge settings; see model/proxy_unconfounded_neural.py
   n_features: 16      # p, output dimension of phi
   n_features_w: 16    # q, output dimension of psi
