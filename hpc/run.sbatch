@@ -1,10 +1,10 @@
 #!/bin/bash
 # Run one script on one GPU. First argument: the script; the rest are its Hydra overrides.
 #
-#   sbatch -J split_all hpc/run.sbatch scripts/train_batch_transfer.py name=split_all
-#   sbatch -J p32 hpc/run.sbatch scripts/train_batch_transfer.py name=p32 neural.n_features=32
+#   sbatch -J split_all hpc/run.sbatch scripts/train_batch_transfer_expression.py name=split_all
+#   sbatch -J p32 hpc/run.sbatch scripts/train_batch_transfer_expression.py name=p32 neural.n_features=32
 #   sbatch -J tune --time=8:00:00 hpc/run.sbatch scripts/tune_bridges.py name=tune
-#   sbatch -p gpu -w gpu-350-04 -J a4500 hpc/run.sbatch scripts/train_batch_transfer.py name=a4500
+#   sbatch -p gpu -w gpu-350-04 -J a4500 hpc/run.sbatch scripts/train_batch_transfer_expression.py name=a4500
 #
 # Submit from the repo root. Log: outputs/slurm-<job name>-<job id>.out; results go to the Hydra
 # run dir outputs/<date>/<name>_<time>/. Flags on the sbatch command line override those below.

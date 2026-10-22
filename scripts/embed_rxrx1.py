@@ -1,4 +1,4 @@
-"""Phenom embeddings of RxRx1, one row per image crop: the input to train_batch_transfer dataset=rxrx1.
+"""Phenom embeddings of RxRx1, one row per image crop: the input to train_batch_transfer_rxrx1.
 
 Each 512x512 6-channel site is cut into grid x grid crops in memory (crops are never written to
 disk), each crop is embedded by the frozen OpenPhenom encoder at native resolution (model/phenom.py

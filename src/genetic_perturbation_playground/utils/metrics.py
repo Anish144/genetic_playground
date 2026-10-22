@@ -1,3 +1,5 @@
+from collections.abc import Callable
+
 import numpy as np
 import pandas as pd
 from scipy.stats import rankdata
@@ -6,6 +8,21 @@ from scipy.stats import rankdata
 def mse(pred: np.ndarray, true: np.ndarray) -> np.ndarray:
     """Mean squared error across genes, one value per perturbation (row)."""
     return np.mean((pred - true) ** 2, axis=1)
+
+
+def control_whitener(
+    X: np.ndarray, batch: np.ndarray, eps: float = 1e-3
+) -> Callable[[np.ndarray], np.ndarray]:
+    """Linear map making typical within-batch variation of the controls X unit size in every direction.
+
+    Each batch's controls are centred on their own mean, so batch effects do not shape the map. The
+    pooled covariance V diag(vals) V^T gives z -> (z V) / sqrt(vals + eps * mean(vals)); eps floors
+    near-flat directions. Squared distance after the map is the Mahalanobis distance.
+    """
+    centred = X - pd.DataFrame(X).groupby(batch).transform("mean").to_numpy()
+    vals, vecs = np.linalg.eigh(centred.T @ centred / len(X))
+    scale = 1 / np.sqrt(vals + eps * vals.mean())
+    return lambda z: (z @ vecs) * scale
 
 
 def pearson_per_row(pred: np.ndarray, true: np.ndarray) -> np.ndarray:

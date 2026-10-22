@@ -1,4 +1,4 @@
-"""Out-of-batch prediction on Replogle K562 (or RxRx1 Phenom embeddings) with the batch-transfer model.
+"""Out-of-batch prediction on Replogle K562 gene expression with the batch-transfer model.
 
 K-fold cross-validation over batches: the batches are split into n_folds groups; each group is
 held out once while the models are fit on the rest. In held-out batches only the control cells are
@@ -12,12 +12,11 @@ effects (perturbation mean - batch-matched control mean). Two views:
 
 Raw scores (long tables) go to scores_per_perturbation.csv and scores_per_batch.csv.
 
-Config: configs/train_batch_transfer.yaml. `name` is required and names the output folder. Usage:
+Config: configs/train_batch_transfer_expression.yaml. `name` is required and names the output folder. Usage:
 
-    uv run python scripts/train_batch_transfer.py name=baseline n_folds=10
-    uv run python scripts/train_batch_transfer.py name=kernel_only 'bridges=[kernel]'   # no GPU: skip the neural bridge
-    uv run python scripts/train_batch_transfer.py name=neural_500 neural.n_steps=500 neural.weight_decay=1e-2
-    uv run python scripts/train_batch_transfer.py name=rxrx1 dataset=rxrx1   # run scripts/embed_rxrx1.py first
+    uv run python scripts/train_batch_transfer_expression.py name=baseline n_folds=10
+    uv run python scripts/train_batch_transfer_expression.py name=kernel_only 'bridges=[kernel]'   # no GPU: skip the neural bridge
+    uv run python scripts/train_batch_transfer_expression.py name=neural_500 neural.n_steps=500 neural.weight_decay=1e-2
 """
 
 from pathlib import Path
@@ -30,7 +29,6 @@ from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig
 
 from genetic_perturbation_playground.data.data_loader import load_dataset
-from genetic_perturbation_playground.data.rxrx1 import load_rxrx1
 from genetic_perturbation_playground.model.batch_transfer import (
     BatchTransferModel,
     KernelBridgeTransfer,
@@ -168,18 +166,15 @@ def _average_per_batch(scores: list[pd.DataFrame]) -> pd.DataFrame:
     return grouped.agg(value=("value", "mean"), cells=("cells", "first")).reset_index()
 
 
-@hydra.main(config_path="../configs", config_name="train_batch_transfer", version_base=None)
+@hydra.main(
+    config_path="../configs", config_name="train_batch_transfer_expression", version_base=None
+)
 def main(cfg: DictConfig):
-    adata = load_data(cfg)
+    adata = load_dataset()
     per_pert, per_batch = cross_validate(adata, cfg)
     out_dir = Path(HydraConfig.get().runtime.output_dir)
     _save_scores(per_pert, per_batch, out_dir)
     _plot_scores(per_pert, per_batch, out_dir / "plots")
-
-
-def load_data(cfg: DictConfig) -> sc.AnnData:
-    """The dataset named by cfg.dataset: Replogle cells x genes, or RxRx1 crops x Phenom features."""
-    return {"replogle": load_dataset, "rxrx1": load_rxrx1}[cfg.dataset]()
 
 
 def _save_scores(per_pert: pd.DataFrame, per_batch: pd.DataFrame, out_dir: Path) -> None:

@@ -92,7 +92,7 @@ def test_neural_bridge_counts_match_replicated_rows(cross_fit_folds):
 
 def test_score_truth_uses_only_unseen_controls():
     sys.path.insert(0, str(Path(__file__).parents[1] / "scripts"))
-    from train_batch_transfer import MODELS, score
+    from train_batch_transfer_expression import MODELS, score
 
     rng = np.random.default_rng(0)
     data = _cells(rng, n_batches=1, perts=("a",))
