@@ -147,7 +147,7 @@ def log_summary(prefix: str, table: pd.DataFrame) -> None:
 
 @hydra.main(config_path="../configs", config_name="train_batch_transfer_rxrx1", version_base=None)
 def main(cfg: DictConfig):
-    adata = select_cell_type(load_rxrx1(), cfg.cell_type)
+    adata = select_cell_type(load_rxrx1(**cfg.embeddings), cfg.cell_type)
     out_dir = Path(HydraConfig.get().runtime.output_dir)
     folds = []
     config = OmegaConf.to_container(cfg)

@@ -3,8 +3,15 @@
 Each 512x512 6-channel site is cut into grid x grid crops in memory (crops are never written to
 disk), each crop is embedded by the frozen OpenPhenom encoder at native resolution (model/phenom.py
 rebuilds its positional table for the crop size), and only the embeddings are saved, to
-data/rxrx1_phenom_<grid>x<grid>.h5ad with per-crop labels from data/rxrx1.crop_obs. No batch
-correction (OpenPhenom's README suggests PCA-CenterScale/TVN): batch effects are what we model.
+data/rxrx1_phenom_<grid>x<grid>[_sitenorm][_nuclei<f>].h5ad (data/rxrx1.rxrx1_path) with per-crop
+labels from data/rxrx1.crop_obs. No batch correction (OpenPhenom's README suggests
+PCA-CenterScale/TVN): batch effects are what we model.
+
+Each channel is standardised to mean 0, std 1 per crop, as OpenPhenom was trained, or with
+standardise_sites per site before cropping, so a crop with few cells keeps its low intensity rather
+than having its noise scaled up (self-standardisation, Sypetkowski et al. 2023). With
+min_nuclei_fraction, crops whose nuclei cover less of them are dropped: the share of a crop above its
+site's Otsu threshold in the DNA channel (Kim et al. 2025 drop crops under 1%).
 
 Config: configs/embed_rxrx1.yaml. Usage:
 
@@ -23,11 +30,23 @@ from genetic_perturbation_playground.data.rxrx1 import (
     crop,
     crop_obs,
     load_sites,
+    nuclear_fraction,
     rxrx1_path,
     site_prefixes,
     write_embeddings,
 )
-from genetic_perturbation_playground.model.phenom import embed, load_phenom
+from genetic_perturbation_playground.model.phenom import embed, load_phenom, standardise
+
+
+def embed_sites(model, x: torch.Tensor, cfg: DictConfig, device: str) -> tuple:
+    """Embeddings of the crops of uint8 sites x (cpu) kept by cfg.min_nuclei_fraction, and the
+    boolean mask of kept crops in crop() order."""
+    keep = nuclear_fraction(x, cfg.grid) >= cfg.min_nuclei_fraction
+    x = x.to(device)
+    crops = (
+        crop(standardise(x), cfg.grid) if cfg.standardise_sites else standardise(crop(x, cfg.grid))
+    )
+    return embed(model, crops[keep.to(device)]).cpu(), keep
 
 
 @hydra.main(config_path="../configs", config_name="embed_rxrx1", version_base=None)
@@ -44,14 +63,18 @@ def main(cfg: DictConfig):
     )
     print(f"embedding {len(prefixes):,} sites x {cfg.grid**2} crops on {device}", flush=True)
     # disable=False overrides run.sbatch's TQDM_DISABLE; one refresh per 30s keeps the log short
-    X = [
-        embed(model, crop(x.to(device), cfg.grid)).cpu()
+    out = [
+        embed_sites(model, x, cfg, device)
         for x in tqdm(loader, "batches", disable=False, mininterval=30)
     ]
 
-    X, path = torch.cat(X).numpy(), rxrx1_path(cfg.grid)
-    write_embeddings(X, crop_obs(meta, cfg.grid), path)
-    print(f"wrote {path}: {X.shape[0]:,} crops x {X.shape[1]} | {len(meta):,} sites")
+    X, keep = (torch.cat(t).numpy() for t in zip(*out, strict=True))
+    path = rxrx1_path(cfg.grid, cfg.standardise_sites, cfg.min_nuclei_fraction)
+    write_embeddings(X, crop_obs(meta, cfg.grid)[keep], path)
+    print(
+        f"wrote {path}: {X.shape[0]:,} crops x {X.shape[1]} | {len(meta):,} sites"
+        f" | dropped {(~keep).sum():,} crops under {cfg.min_nuclei_fraction} nuclei"
+    )
 
 
 if __name__ == "__main__":

@@ -5,4 +5,6 @@ hydra:
 grid: 4           # crops per side of each 512px site: 4 -> 16 crops of 128px
 batch_size: 32    # sites per GPU batch (x grid^2 crops)
 workers: 8        # DataLoader workers decoding pngs, the bottleneck; match --cpus-per-task
+standardise_sites: true   # true: standardise each channel per 512px site before cropping, not per crop
+min_nuclei_fraction: 0.01   # drop crops whose DNA-channel Otsu foreground covers less; Kim et al. 2025 use 0.01
 experiments: null # all 51; or a list for a smoke run, e.g. [HEPG2-01,HUVEC-01]

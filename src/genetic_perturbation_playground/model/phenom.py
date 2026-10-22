@@ -50,9 +50,14 @@ def load_phenom(crop_size: int) -> torch.nn.Module:
     return model.eval()
 
 
+def standardise(x: torch.Tensor) -> torch.Tensor:
+    """(N, C, H, W) uint8 -> float, each image's channels to mean 0, std 1 on their own (MAEModel's
+    input norm: scale to [0, 1], instance norm)."""
+    return F.instance_norm(x.float() / 255)
+
+
 @torch.no_grad()
 def embed(model: torch.nn.Module, x: torch.Tensor) -> torch.Tensor:
-    """(N, C, S, S) uint8 -> (N, 384), as MAEModel.predict: scale to [0, 1], standardise each crop's
-    channels on their own, mean over patch tokens (class token dropped)."""
-    x = F.instance_norm(x.float() / 255)
+    """(N, C, S, S) standardised crops -> (N, 384), as MAEModel.predict: mean over patch tokens
+    (class token dropped)."""
     return model.vit_backbone.forward_features(x)[:, 1:].mean(1)

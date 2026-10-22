@@ -2,6 +2,10 @@ name: ???     # required: names the run folder, outputs/<date>/<name>_<time>/
 hydra:
   run:
     dir: outputs/${now:%Y-%m-%d}/${name}_${now:%H-%M-%S}
+embeddings:         # which embed_rxrx1 output to load: its settings, see configs/embed_rxrx1.yaml
+  grid: 4
+  standardise_sites: false
+  min_nuclei_fraction: 0.0
 cell_type: HUVEC    # one cell type per run; HUVEC has the most experiments (24)
 n_folds: 5          # K-fold over experiments; each experiment is held out exactly once
 seed: 0             # shuffles experiments into folds

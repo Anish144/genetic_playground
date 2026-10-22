@@ -109,7 +109,7 @@ def nested_cv(adata: sc.AnnData, cfg: DictConfig) -> Iterator[tuple]:
 
 @hydra.main(config_path="../configs", config_name="tune_bridges_rxrx1", version_base=None)
 def main(cfg: DictConfig):
-    adata = select_cell_type(load_rxrx1(), cfg.cell_type)
+    adata = select_cell_type(load_rxrx1(**cfg.embeddings), cfg.cell_type)
     out_dir = Path(HydraConfig.get().runtime.output_dir)
     tables = {"inner_scores": [], "selected": [], "scores": []}
     config = OmegaConf.to_container(cfg)
