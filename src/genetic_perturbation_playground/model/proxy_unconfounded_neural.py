@@ -86,7 +86,8 @@ class NeuralMarginalEmbeddingBridge:
 
     n_features  p, output dimension of phi
     n_features_w  q, output dimension of psi
-    width       hidden units per layer of each MLP
+    width_x     hidden units per layer of phi
+    width_w     hidden units per layer of psi
     depth       hidden layers per MLP
     reg         ridge penalty lambda on A, scaled by N as in the kernel bridge
     lr          AdamW learning rate for the parameters of phi and psi
@@ -105,7 +106,8 @@ class NeuralMarginalEmbeddingBridge:
 
     n_features: int = 16
     n_features_w: int = 16
-    width: int = 64
+    width_x: int = 64
+    width_w: int = 64
     depth: int = 2
     reg: float = 1e-3
     lr: float = 1e-3
@@ -164,8 +166,8 @@ class NeuralMarginalEmbeddingBridge:
 
     def _build_networks(self, d_x: int, d_w: int) -> None:
         """Freshly initialised phi and psi on the device."""
-        self.phi_ = _mlp(d_x, self.width, self.depth, self.n_features).to(self.device)
-        self.psi_ = _mlp(d_w, self.width, self.depth, self.n_features_w).to(self.device)
+        self.phi_ = _mlp(d_x, self.width_x, self.depth, self.n_features).to(self.device)
+        self.psi_ = _mlp(d_w, self.width_w, self.depth, self.n_features_w).to(self.device)
 
     def _train(self, data: _Stage2Data, checkpoints, on_checkpoint) -> None:
         """Full-batch AdamW on phi and psi against the stage-2 loss."""

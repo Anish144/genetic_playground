@@ -45,7 +45,17 @@ from genetic_perturbation_playground.model.batch_transfer import (
     is_control,
 )
 
-INT_SETTINGS = ("n_features", "n_features_w", "width", "depth", "n_steps", "cross_fit_folds")
+INT_SETTINGS = (
+    "n_features",
+    "n_features_w",
+    "width_x",
+    "width_w",
+    "depth",
+    "n_steps",
+    "cross_fit_folds",
+    "phi_size",
+    "psi_size",
+)
 
 
 class Split(NamedTuple):

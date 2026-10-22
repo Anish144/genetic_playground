@@ -7,9 +7,9 @@ n_configs: 20        # per bridge, drawn at random from its grid (the same draw 
 kernel_grid:         # 28 configurations
   reg: [1.0e-8, 3.0e-8, 1.0e-7, 3.0e-7, 1.0e-6, 3.0e-6, 1.0e-5]
   lengthscale_scale: [0.5, 1, 2, 4]  # multiples of the median-heuristic lengthscale
-neural_grid:         # 72 configurations; the rest (n_features_w, cross_fit_folds, ...) from neural
+neural_grid:         # 480 configurations; the rest (depth, lr, cross_fit_folds, ...) from neural
   reg: [1.0e-7, 1.0e-6, 1.0e-5, 1.0e-4]
   weight_decay: [0.0, 1.0e-2, 1.0e-1]
-  n_features: [32, 64, 128]
-  width: [64, 128]
-neural_checkpoints: [100, 200, 300, 500, 750, 1000]  # steps scored in one training run
+  phi_size: [2, 4, 8, 16, 32, 64, 128, 256]  # phi's hidden width and output dimension p
+  psi_size: [2, 4, 8, 16, 32]           # psi's hidden width and output dimension q
+neural_checkpoints: [10, 25, 50, 100, 200, 300, 500]  # steps scored in one training run

@@ -121,9 +121,9 @@ def test_nested_cv_tunes_on_inner_validation_and_scores_the_outer_folds(tiny_rxr
             "n_folds": 3,
             "n_configs": 2,
             "kernel_grid": {"reg": [1e-3, 1e-2], "lengthscale_scale": [1]},
-            "neural_grid": {"reg": [1e-3], "weight_decay": [0.0], "n_features": [2], "width": [4]},
+            "neural_grid": {"reg": [1e-3], "weight_decay": [0.0], "phi_size": [2], "psi_size": [3]},
             "neural_checkpoints": [1, 2],
-            "neural": {"device": "cpu", "n_features_w": 2, "cross_fit_folds": 0},
+            "neural": {"device": "cpu", "cross_fit_folds": 0},
         },
     )
     huvec = mod.select_cell_type(tiny_rxrx1, "HUVEC")
@@ -131,7 +131,9 @@ def test_nested_cv_tunes_on_inner_validation_and_scores_the_outer_folds(tiny_rxr
     assert len(folds) == 3
     for inner, selected, scores in folds:
         assert len(inner) == 2 + 2  # 2 kernel configurations, 1 neural at 2 checkpoints
-        assert set(selected.set_index("bridge")["n_steps"].dropna()) <= {1, 2}
+        neural = selected.set_index("bridge").loc["neural"]
+        assert neural["n_steps"] in {1, 2}
+        assert (neural["phi_size"], neural["psi_size"]) == (2, 3)
         models = set(scores["model"])
         assert {"kernel bridge (tuned)", "neural bridge (tuned)", "tvn", "shift (b=1)"} <= models
 

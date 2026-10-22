@@ -201,3 +201,17 @@ def test_sample_configs_draws_distinct_grid_points():
     assert all(c in every for c in drawn)
     assert len({tuple(c.items()) for c in drawn}) == 4
     assert _sample_configs(grid, 100, seed=0) == every
+
+
+def test_neural_bridge_sizes_phi_and_psi_separately():
+    rng = np.random.default_rng(0)
+    xs, ys, ws = ([rng.normal(size=(5, 2)) for _ in range(2)] for _ in range(3))
+    bridge = NeuralMarginalEmbeddingBridge(
+        n_steps=1, width_x=3, n_features=4, width_w=5, n_features_w=6
+    ).fit(xs, ys, ws)
+
+    def last_two_sizes(mlp):
+        return [layer.out_features for layer in mlp if isinstance(layer, torch.nn.Linear)][-2:]
+
+    assert last_two_sizes(bridge.phi_) == [3, 4]  # hidden width, output dimension
+    assert last_two_sizes(bridge.psi_) == [5, 6]

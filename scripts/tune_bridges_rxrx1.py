@@ -78,7 +78,7 @@ def tune_neural(train: sc.AnnData, val: sc.AnnData, cfg: DictConfig) -> list[dic
     checkpoints = list(cfg.neural_checkpoints)
     rows = []
     for config in _sample_configs(cfg.neural_grid, cfg.n_configs, cfg.seed):
-        model = _make_neural({**config, "n_steps": max(checkpoints)}, cfg)
+        model = _make_neural(network_sizes(config) | {"n_steps": max(checkpoints)}, cfg)
 
         def record(step, model=model, config=config):
             scores = validation_scores(model, val, whiten)
@@ -89,10 +89,18 @@ def tune_neural(train: sc.AnnData, val: sc.AnnData, cfg: DictConfig) -> list[dic
     return rows
 
 
+def network_sizes(config: dict) -> dict:
+    """Neural bridge settings of a grid configuration: phi_size sets phi's hidden width and output
+    dimension, psi_size those of psi."""
+    settings = dict(config)
+    phi, psi = settings.pop("phi_size"), settings.pop("psi_size")
+    return settings | {"width_x": phi, "n_features": phi, "width_w": psi, "n_features_w": psi}
+
+
 def fit_tuned(train: sc.AnnData, selected: dict, cfg: DictConfig, log_key: str) -> dict:
     """Linear models, TVN and both bridges in their selected configurations, fit on `train`; the
     neural bridge logs its loss under `log_key`."""
-    neural = _make_neural({**selected["neural"], "log_key": log_key}, cfg)
+    neural = _make_neural(network_sizes(selected["neural"]) | {"log_key": log_key}, cfg)
     return _fit_linear(train) | {
         "tvn": TVNTransferModel().fit(train),
         "kernel bridge (tuned)": _make_kernel(selected["kernel"], cfg).fit(train),

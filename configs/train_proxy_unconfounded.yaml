@@ -13,7 +13,7 @@ cross_fit_folds: 5  # folds of neural_crossfit's loss (capped at the number of e
 neural:               # NeuralMarginalEmbeddingBridge settings; see model/proxy_unconfounded_neural.py
   n_features: 16      # p, output dimension of phi
   n_features_w: 16    # q, output dimension of psi
-  width: 64
+  width_x: 64         # hidden units of phi; psi's width_w defaults to 64
   depth: 2
   lr: 1.0e-3
   n_steps: 200        # more steps memorise the source environments; held-out error rises
