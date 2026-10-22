@@ -13,3 +13,4 @@ wheels/
 *.h5ad
 /outputs/
 docs/
+/wandb/
