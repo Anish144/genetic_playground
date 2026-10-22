@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 import torch
+import wandb
 
 from genetic_perturbation_playground.model.batch_transfer import (
     BatchTransferModel,
@@ -140,6 +141,17 @@ def test_neural_checkpoint_equals_fit_with_that_many_steps():
 
     short = NeuralBridgeTransfer(**{**kwargs, "n_steps": 3}).fit(train)
     np.testing.assert_allclose(at_step[3], short.predict(perts, test))
+
+
+def test_neural_bridge_logs_loss_every_step_to_an_open_wandb_run(monkeypatch):
+    rng = np.random.default_rng(0)
+    logged = []
+    monkeypatch.setattr(wandb, "run", object())
+    monkeypatch.setattr(wandb, "log", logged.append)
+    xs, ys, ws = ([rng.normal(size=(5, 2)) for _ in range(2)] for _ in range(3))
+    NeuralMarginalEmbeddingBridge(n_steps=3, log_key="fold 2/neural bridge").fit(xs, ys, ws)
+    assert [m["fold 2/neural bridge/step"] for m in logged] == [0, 1, 2]
+    assert all(np.isfinite(m["fold 2/neural bridge/loss"]) for m in logged)
 
 
 def test_cross_fit_needs_two_environments():

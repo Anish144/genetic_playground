@@ -29,8 +29,9 @@ import hydra
 import numpy as np
 import pandas as pd
 import scanpy as sc
+import wandb
 from hydra.core.hydra_config import HydraConfig
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 from train_batch_transfer_expression import _batch_folds, fit
 
 from genetic_perturbation_playground.data.rxrx1 import load_rxrx1
@@ -102,8 +103,12 @@ def cross_validate(adata: sc.AnnData, cfg: DictConfig) -> Iterator[pd.DataFrame]
             _dense(adata.X[train_negative]), batch[train_negative], cfg.whiten_eps
         )
         train = adata[~is_test]
+        log_key = f"fold {i + 1}/neural bridge"
+        if wandb.run is not None:  # each fold's loss curve against its own step
+            wandb.define_metric(f"{log_key}/*", step_metric=f"{log_key}/step")
+        fold_cfg = OmegaConf.merge(cfg, {"neural": {"log_key": log_key}})
         start = time.perf_counter()
-        models = fit(train, cfg) | {"tvn": TVNTransferModel().fit(train)}
+        models = fit(train, fold_cfg) | {"tvn": TVNTransferModel().fit(train)}
         print(f"  fit {len(models)} models in {time.perf_counter() - start:.0f}s", flush=True)
         scores = [score_batch(models, adata[batch == b], whiten).assign(batch=b) for b in held_out]
         yield pd.concat(scores, ignore_index=True).assign(fold=i)
@@ -120,10 +125,14 @@ def main(cfg: DictConfig):
     adata = select_cell_type(load_rxrx1(), cfg.cell_type)
     out_dir = Path(HydraConfig.get().runtime.output_dir)
     folds = []
-    for fold_scores in cross_validate(adata, cfg):
-        folds.append(fold_scores)
-        print(summary(fold_scores).to_string(float_format="%.4g"), flush=True)
-        pd.concat(folds).to_csv(out_dir / "scores.csv", index=False)  # rewritten every fold
+    config = OmegaConf.to_container(cfg)
+    with wandb.init(
+        project="genetic-playground", name=cfg.name, config=config, mode=cfg.wandb_mode
+    ):
+        for fold_scores in cross_validate(adata, cfg):
+            folds.append(fold_scores)
+            print(summary(fold_scores).to_string(float_format="%.4g"), flush=True)
+            pd.concat(folds).to_csv(out_dir / "scores.csv", index=False)  # rewritten every fold
     overall = summary(pd.concat(folds))
     overall.to_csv(out_dir / "summary.csv")
     print(f"all folds:\n{overall.to_string(float_format='%.4g')}\nsaved to {out_dir}")

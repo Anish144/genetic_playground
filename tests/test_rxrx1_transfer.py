@@ -15,9 +15,10 @@ import train_batch_transfer_rxrx1 as mod  # noqa: E402
 
 
 def cfg(**overrides):
-    return OmegaConf.merge(
-        OmegaConf.load(ROOT / "configs" / "train_batch_transfer_rxrx1.yaml"), overrides
-    )
+    """The script's config with `overrides`, in struct mode as Hydra hands it over."""
+    config = OmegaConf.load(ROOT / "configs" / "train_batch_transfer_rxrx1.yaml")
+    OmegaConf.set_struct(config, True)
+    return OmegaConf.merge(config, {"name": "test", "wandb_mode": "disabled"}, overrides)
 
 
 @pytest.fixture
@@ -100,3 +101,10 @@ def test_whitener_sees_training_negative_controls_only(tiny_rxrx1, monkeypatch):
         assert "tvn" in set(scores["model"])
         assert not batches & set(scores["batch"])
         assert n_crops == 2 * 30
+
+
+def test_cross_validate_fits_the_neural_bridge(tiny_rxrx1):
+    neural = {"device": "cpu", "n_steps": 2, "n_features": 2, "n_features_w": 2}
+    huvec = mod.select_cell_type(tiny_rxrx1, "HUVEC")
+    scores = pd.concat(mod.cross_validate(huvec, cfg(n_folds=3, bridges=["neural"], neural=neural)))
+    assert "neural bridge" in set(scores["model"])

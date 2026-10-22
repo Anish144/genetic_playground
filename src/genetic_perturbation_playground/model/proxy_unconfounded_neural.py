@@ -25,6 +25,7 @@ from typing import NamedTuple
 
 import numpy as np
 import torch
+import wandb
 from torch import nn
 from tqdm import trange
 
@@ -97,6 +98,7 @@ class NeuralMarginalEmbeddingBridge:
                 for every fold. The final A is still solved on all environments.
     device      torch device to train and predict on, e.g. "cpu" or "cuda" (not "mps": the model
                 is float64, which the Apple backend does not support)
+    log_key     if a W&B run is open, each step logs <log_key>/loss and <log_key>/step to it
 
     After ``fit``: ``phi_``, ``psi_`` (the MLPs) and ``A_``, A flattened to shape (p q,).
     """
@@ -112,6 +114,7 @@ class NeuralMarginalEmbeddingBridge:
     cross_fit_folds: int = 0
     seed: int = 0
     device: str = "cpu"
+    log_key: str = "neural bridge"
 
     def fit(
         self,
@@ -175,6 +178,8 @@ class NeuralMarginalEmbeddingBridge:
             loss.backward()
             optimizer.step()
             progress.set_postfix(loss=f"{loss.item():.4f}")
+            if wandb.run is not None:  # the caller's run, if it opened one
+                wandb.log({f"{self.log_key}/loss": loss.item(), f"{self.log_key}/step": step})
             if step + 1 in checkpoints:
                 self._solve_A(data)
                 on_checkpoint(step + 1)
