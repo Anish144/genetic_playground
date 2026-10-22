@@ -30,10 +30,34 @@ from torch import nn
 from tqdm import trange
 
 
+class _SwiGLU(nn.Module):
+    """Layer h -> silu(h W_gate + b_gate) * (h W_value + b_value), from d_in to d_out units."""
+
+    def __init__(self, d_in: int, d_out: int):
+        super().__init__()
+        self.gate = nn.Linear(d_in, d_out)
+        self.value = nn.Linear(d_in, d_out)
+
+    def forward(self, h: torch.Tensor) -> torch.Tensor:
+        return nn.functional.silu(self.gate(h)) * self.value(h)
+
+
+class _Residual(nn.Module):
+    """h -> h + layer(h)."""
+
+    def __init__(self, layer: nn.Module):
+        super().__init__()
+        self.layer = layer
+
+    def forward(self, h: torch.Tensor) -> torch.Tensor:
+        return h + self.layer(h)
+
+
 def _mlp(d_in: int, width: int, depth: int, d_out: int) -> nn.Sequential:
-    """ReLU MLP with `depth` hidden layers of `width` units, in float64."""
+    """MLP with `depth` SwiGLU hidden layers of `width` units and a linear output, in float64.
+    Hidden layers whose input has `width` units too (all but the first) are residual."""
     dims = [d_in] + [width] * depth
-    hidden = [layer for a, b in pairwise(dims) for layer in (nn.Linear(a, b), nn.ReLU())]
+    hidden = [_Residual(_SwiGLU(a, b)) if a == b else _SwiGLU(a, b) for a, b in pairwise(dims)]
     return nn.Sequential(*hidden, nn.Linear(dims[-1], d_out)).double()
 
 

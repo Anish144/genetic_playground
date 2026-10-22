@@ -17,6 +17,7 @@ from genetic_perturbation_playground.model.proxy_unconfounded import MarginalEmb
 from genetic_perturbation_playground.model.proxy_unconfounded_neural import (
     NeuralMarginalEmbeddingBridge,
     _features,
+    _mlp,
     _weighted_ridge,
     _weighted_sse,
 )
@@ -211,7 +212,21 @@ def test_neural_bridge_sizes_phi_and_psi_separately():
     ).fit(xs, ys, ws)
 
     def last_two_sizes(mlp):
-        return [layer.out_features for layer in mlp if isinstance(layer, torch.nn.Linear)][-2:]
+        return [m.out_features for m in mlp.modules() if isinstance(m, torch.nn.Linear)][-2:]
 
     assert last_two_sizes(bridge.phi_) == [3, 4]  # hidden width, output dimension
     assert last_two_sizes(bridge.psi_) == [5, 6]
+
+
+def test_mlp_hidden_layers_are_swiglu_with_residual_connections_where_sizes_match():
+    torch.manual_seed(0)
+    mlp = _mlp(d_in=3, width=4, depth=2, d_out=5)
+    first, second, out = mlp
+    x = torch.randn(6, 3, dtype=torch.float64)
+
+    def swiglu(layer, h):
+        return torch.nn.functional.silu(layer.gate(h)) * layer.value(h)
+
+    h1 = swiglu(first, x)  # 3 -> 4 units: no residual
+    h2 = h1 + swiglu(second.layer, h1)  # 4 -> 4 units: residual
+    torch.testing.assert_close(mlp(x), out(h2))

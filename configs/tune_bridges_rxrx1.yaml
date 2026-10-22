@@ -2,7 +2,7 @@ defaults:  # cell type, folds, proxies, scoring and neural settings as in train_
   - train_batch_transfer_rxrx1
   - _self_
 
-inner_val_frac: 0.2  # share of each outer fold's training experiments used for inner validation
+inner_folds: 3       # K-fold over each outer fold's training experiments; settings picked by mean mse
 n_configs: 20        # per bridge, drawn at random from its grid (the same draw in every outer fold)
 # Grids for standardised embeddings (standardise_bridges): the bridges' ridge solutions are linear
 # in Y, and Adam with decoupled weight decay ignores the loss scale, so Y's scale moves no optimum;
@@ -15,4 +15,4 @@ neural_grid:         # 576 configurations; the rest (depth, lr, cross_fit_folds,
   weight_decay: [0.0, 1.0e-3, 1.0e-2, 1.0e-1]
   phi_size: [8, 16, 32, 64, 128, 256]  # phi's hidden width and output dimension p
   psi_size: [4, 8, 16, 32]           # psi's hidden width and output dimension q
-neural_checkpoints: [10, 25, 50, 100, 200, 300, 500, 750, 1000]  # steps scored in one training run
+neural_checkpoints: [10, 25, 50, 100, 200, 300, 500, 750]  # steps scored in one training run

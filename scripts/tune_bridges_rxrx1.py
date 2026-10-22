@@ -1,17 +1,19 @@
 """Nested cross-validation tuning of the kernel and neural bridges on RxRx1, one cell type.
 
 Outer folds, proxies and scores are those of train_batch_transfer_rxrx1 (same seed, same folds).
-In each outer fold a share (inner_val_frac) of the training experiments is held out for inner
-validation. n_configs configurations per bridge, drawn at random from its grid (the same draw in
-every outer fold), are fit on the other training experiments and scored on the validation ones;
-each neural configuration is trained once to the last of neural_checkpoints and scored at each.
-The configuration with the lowest validation mse is refit on all training experiments and scored
-on the outer fold, next to the linear models and TVN. Each score's whitener comes from the
-experiments its models were fit on.
+In each outer fold the training experiments are split into inner_folds folds; each inner fold is
+held out for validation once. n_configs configurations per bridge, drawn at random from its grid
+(the same draw in every outer fold), are fit on the other inner folds and scored on the held-out
+one; each neural configuration is trained once per inner fold to the last of neural_checkpoints
+and scored at each. The configuration with the lowest validation mse averaged over the inner
+folds is refit on all training experiments and scored on the outer fold, next to the linear
+models and TVN. shift (b=1) is scored on the inner folds too, as a reference only. Each score's
+whitener comes from the experiments its models were fit on.
 
 W&B: one run per job, named name. Per outer fold k: the selected settings (fold k/selected/...),
-the training loss of the refit neural bridge (fold k/neural bridge/loss, against its step) and
-every model's outer scores (fold k/<model>/<metric>); at the end, the means over all folds
+their mean validation scores and shift's (fold k/validation/<bridge>/<metric>), the training
+loss of the refit neural bridge (fold k/neural bridge/loss, against its step) and every model's
+outer scores (fold k/<model>/<metric>); at the end, the means over all folds
 (all folds/<model>/<metric>). The tuning fits are not logged; inner_scores.csv holds them.
 
 Config: configs/tune_bridges_rxrx1.yaml. Usage:
@@ -19,8 +21,9 @@ Config: configs/tune_bridges_rxrx1.yaml. Usage:
     sbatch -J tune_huvec --time=24:00:00 hpc/run.sbatch scripts/tune_bridges_rxrx1.py \
         name=tune_huvec positive_controls_as_proxies=true
 
-Writes inner_scores.csv (every configuration), selected.csv (winner per fold and bridge) and
-scores.csv (outer scores) after every fold, and summary.csv at the end, to the Hydra run dir.
+Writes inner_scores.csv (every configuration on every inner fold), selected.csv (winner per fold
+and bridge) and scores.csv (outer scores) after every fold, and summary.csv at the end, to the
+Hydra run dir.
 """
 
 from collections.abc import Iterator
@@ -45,14 +48,13 @@ from train_batch_transfer_rxrx1 import (
 )
 from tune_bridges import (
     _best,
-    _inner_validation_batches,
     _make_kernel,
     _make_neural,
     _sample_configs,
 )
 
 from genetic_perturbation_playground.data.rxrx1 import load_rxrx1
-from genetic_perturbation_playground.model.batch_transfer import batch_labels
+from genetic_perturbation_playground.model.batch_transfer import BatchTransferModel, batch_labels
 from genetic_perturbation_playground.model.tvn import TVNTransferModel
 
 
@@ -62,9 +64,15 @@ def validation_scores(model, val: sc.AnnData, whiten) -> dict:
     return summary(scores).loc["bridge"].to_dict()
 
 
-def tune_kernel(train: sc.AnnData, val: sc.AnnData, cfg: DictConfig) -> list[dict]:
+def shift_reference(train: sc.AnnData, val: sc.AnnData, whiten) -> list[dict]:
+    """Validation scores of shift (b=1), the reference the bridges are compared with."""
+    scores = validation_scores(BatchTransferModel(1.0).fit(train), val, whiten)
+    print(f"  shift (b=1): mse {scores['mse']:.4g}", flush=True)
+    return [{"bridge": "shift (b=1)", **scores}]
+
+
+def tune_kernel(train: sc.AnnData, val: sc.AnnData, whiten, cfg: DictConfig) -> list[dict]:
     """Validation scores of each sampled kernel configuration."""
-    whiten = negative_control_whitener(train, cfg.whiten_eps)
     rows = []
     for config in _sample_configs(cfg.kernel_grid, cfg.n_configs, cfg.seed):
         kernel = with_standardisation(_make_kernel(config, cfg), cfg)
@@ -74,9 +82,8 @@ def tune_kernel(train: sc.AnnData, val: sc.AnnData, cfg: DictConfig) -> list[dic
     return rows
 
 
-def tune_neural(train: sc.AnnData, val: sc.AnnData, cfg: DictConfig) -> list[dict]:
+def tune_neural(train: sc.AnnData, val: sc.AnnData, whiten, cfg: DictConfig) -> list[dict]:
     """Validation scores of each sampled neural configuration at every checkpoint."""
-    whiten = negative_control_whitener(train, cfg.whiten_eps)
     checkpoints = list(cfg.neural_checkpoints)
     rows = []
     for config in _sample_configs(cfg.neural_grid, cfg.n_configs, cfg.seed):
@@ -90,6 +97,32 @@ def tune_neural(train: sc.AnnData, val: sc.AnnData, cfg: DictConfig) -> list[dic
 
         model.fit(train, checkpoints, record)
     return rows
+
+
+def inner_scores(
+    adata: sc.AnnData, train_batches: np.ndarray, cfg: DictConfig, seed
+) -> pd.DataFrame:
+    """Validation scores of shift and every bridge configuration on each of cfg.inner_folds folds
+    of `train_batches`, fit on the others."""
+    batch = batch_labels(adata)
+    folds = _batch_folds(train_batches, cfg.inner_folds, np.random.default_rng(seed))
+    tables = []
+    for j, val_batches in enumerate(folds):
+        print(f"  inner fold {j + 1}/{cfg.inner_folds}", flush=True)
+        train = adata[np.isin(batch, np.setdiff1d(train_batches, val_batches))]
+        val = adata[np.isin(batch, val_batches)]
+        whiten = negative_control_whitener(train, cfg.whiten_eps)
+        rows = shift_reference(train, val, whiten)
+        rows += tune_kernel(train, val, whiten, cfg) + tune_neural(train, val, whiten, cfg)
+        tables.append(pd.DataFrame(rows).assign(inner_fold=j))
+    return pd.concat(tables, ignore_index=True)
+
+
+def mean_over_inner_folds(inner: pd.DataFrame) -> pd.DataFrame:
+    """Each configuration's (and shift's) validation scores averaged over the inner folds."""
+    metrics = ["mse", "mse_raw"]
+    settings = [c for c in inner.columns if c not in [*metrics, "inner_fold"]]
+    return inner.groupby(settings, dropna=False)[metrics].mean().reset_index()
 
 
 def network_sizes(config: dict) -> dict:
@@ -129,15 +162,15 @@ def nested_cv(adata: sc.AnnData, cfg: DictConfig) -> Iterator[tuple]:
     for i, held_out in enumerate(folds):
         print(f"fold {i + 1}/{cfg.n_folds}: tuning", flush=True)
         train_batches = np.setdiff1d(np.unique(batch), held_out)
-        val_batches = _inner_validation_batches(train_batches, cfg.inner_val_frac, [cfg.seed, i])
-        inner_train = adata[np.isin(batch, np.setdiff1d(train_batches, val_batches))]
-        val = adata[np.isin(batch, val_batches)]
-        inner = pd.DataFrame(
-            tune_kernel(inner_train, val, cfg) + tune_neural(inner_train, val, cfg)
-        )
-        selected = {bridge: _best(inner, bridge) for bridge in ["kernel", "neural"]}
+        inner = inner_scores(adata, train_batches, cfg, [cfg.seed, i])
+        averaged = mean_over_inner_folds(inner)
+        selected = {bridge: _best(averaged, bridge) for bridge in ["kernel", "neural"]}
+        winners = averaged.loc[averaged.groupby("bridge")["mse"].idxmin()]
+        winners = winners.set_index("bridge")[["mse", "mse_raw"]]
         print(f"fold {i + 1}/{cfg.n_folds}: selected {selected}", flush=True)
+        print(winners.to_string(float_format="%.4g"), flush=True)
         log_selected(i + 1, selected)
+        log_summary(f"fold {i + 1}/validation", winners)
         train = adata[np.isin(batch, train_batches)]
         models = fit_tuned(train, selected, cfg, f"fold {i + 1}/neural bridge")
         whiten = negative_control_whitener(train, cfg.whiten_eps)

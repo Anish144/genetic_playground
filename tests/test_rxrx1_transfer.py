@@ -119,6 +119,7 @@ def test_nested_cv_tunes_on_inner_validation_and_scores_the_outer_folds(tiny_rxr
         config,
         {
             "n_folds": 3,
+            "inner_folds": 2,
             "n_configs": 2,
             "kernel_grid": {"reg": [1e-3, 1e-2], "lengthscale_scale": [1]},
             "neural_grid": {"reg": [1e-3], "weight_decay": [0.0], "phi_size": [2], "psi_size": [3]},
@@ -130,12 +131,32 @@ def test_nested_cv_tunes_on_inner_validation_and_scores_the_outer_folds(tiny_rxr
     folds = list(tune.nested_cv(huvec, config))
     assert len(folds) == 3
     for inner, selected, scores in folds:
-        assert len(inner) == 2 + 2  # 2 kernel configurations, 1 neural at 2 checkpoints
+        # per inner fold: 2 kernel configurations, 1 neural at 2 checkpoints, the shift reference
+        assert inner.groupby("inner_fold").size().tolist() == [2 + 2 + 1] * 2
+        assert (inner["bridge"] == "shift (b=1)").sum() == 2
         neural = selected.set_index("bridge").loc["neural"]
         assert neural["n_steps"] in {1, 2}
         assert (neural["phi_size"], neural["psi_size"]) == (2, 3)
         models = set(scores["model"])
         assert {"kernel bridge (tuned)", "neural bridge (tuned)", "tvn", "shift (b=1)"} <= models
+
+
+def test_selection_ranks_configurations_by_their_mean_over_inner_folds():
+    inner = pd.DataFrame(
+        {
+            "bridge": ["kernel"] * 4 + ["shift (b=1)"] * 2,
+            "reg": [1.0, 1.0, 2.0, 2.0, None, None],
+            "inner_fold": [0, 1, 0, 1, 0, 1],
+            "mse": [0.1, 0.9, 0.4, 0.4, 0.5, 0.7],  # reg 1 wins fold 0, reg 2 wins on average
+            "mse_raw": [1.0, 3.0, 2.0, 2.0, 5.0, 7.0],
+        }
+    )
+    averaged = tune.mean_over_inner_folds(inner)
+    kernel = averaged[averaged["bridge"] == "kernel"].set_index("reg")
+    assert kernel.loc[2.0, "mse"] == pytest.approx(0.4)
+    assert kernel.loc[1.0, "mse"] == pytest.approx(0.5)
+    shift = averaged[averaged["bridge"] == "shift (b=1)"].iloc[0]
+    assert (shift["mse"], shift["mse_raw"]) == pytest.approx((0.6, 6.0))
 
 
 def test_log_summary_writes_every_model_and_metric(monkeypatch):
