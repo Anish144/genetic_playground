@@ -45,7 +45,7 @@ from genetic_perturbation_playground.model.batch_transfer import (
     is_control,
 )
 
-INT_SETTINGS = ("n_features", "n_features_w", "n_steps", "cross_fit_folds")
+INT_SETTINGS = ("n_features", "n_features_w", "width", "depth", "n_steps", "cross_fit_folds")
 
 
 class Split(NamedTuple):
@@ -127,10 +127,11 @@ def _tune_neural(split: Split, cfg: DictConfig) -> list[dict]:
 
 
 def _best(inner: pd.DataFrame, bridge: str) -> dict:
-    """The configuration of `bridge` with the lowest validation MSE."""
+    """The configuration of `bridge` with the lowest validation MSE (metric columns dropped)."""
     rows = inner[inner["bridge"] == bridge]
     best = rows.loc[rows["mse"].idxmin()]
-    config = best.drop(["bridge", "mse", "pearson", "pearson_top20"]).dropna().to_dict()
+    metrics = ["bridge", "mse", "mse_raw", "pearson", "pearson_top20"]  # of either data set
+    config = best.drop(metrics, errors="ignore").dropna().to_dict()
     return {key: int(v) if key in INT_SETTINGS else v for key, v in config.items()}
 
 

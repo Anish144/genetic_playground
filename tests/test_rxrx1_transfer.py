@@ -5,6 +5,7 @@ import anndata as ad
 import numpy as np
 import pandas as pd
 import pytest
+from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 
 from genetic_perturbation_playground.utils.metrics import control_whitener
@@ -12,6 +13,7 @@ from genetic_perturbation_playground.utils.metrics import control_whitener
 ROOT = Path(__file__).parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 import train_batch_transfer_rxrx1 as mod  # noqa: E402
+import tune_bridges_rxrx1 as tune  # noqa: E402
 
 
 def cfg(**overrides):
@@ -108,3 +110,49 @@ def test_cross_validate_fits_the_neural_bridge(tiny_rxrx1):
     huvec = mod.select_cell_type(tiny_rxrx1, "HUVEC")
     scores = pd.concat(mod.cross_validate(huvec, cfg(n_folds=3, bridges=["neural"], neural=neural)))
     assert "neural bridge" in set(scores["model"])
+
+
+def test_nested_cv_tunes_on_inner_validation_and_scores_the_outer_folds(tiny_rxrx1):
+    with initialize_config_dir(str(ROOT / "configs"), version_base=None):
+        config = compose("tune_bridges_rxrx1", ["name=test", "wandb_mode=disabled"])
+    config = OmegaConf.merge(
+        config,
+        {
+            "n_folds": 3,
+            "n_configs": 2,
+            "kernel_grid": {"reg": [1e-3, 1e-2], "lengthscale_scale": [1]},
+            "neural_grid": {"reg": [1e-3], "weight_decay": [0.0], "n_features": [2], "width": [4]},
+            "neural_checkpoints": [1, 2],
+            "neural": {"device": "cpu", "n_features_w": 2, "cross_fit_folds": 0},
+        },
+    )
+    huvec = mod.select_cell_type(tiny_rxrx1, "HUVEC")
+    folds = list(tune.nested_cv(huvec, config))
+    assert len(folds) == 3
+    for inner, selected, scores in folds:
+        assert len(inner) == 2 + 2  # 2 kernel configurations, 1 neural at 2 checkpoints
+        assert set(selected.set_index("bridge")["n_steps"].dropna()) <= {1, 2}
+        models = set(scores["model"])
+        assert {"kernel bridge (tuned)", "neural bridge (tuned)", "tvn", "shift (b=1)"} <= models
+
+
+def test_log_summary_writes_every_model_and_metric(monkeypatch):
+    logged = {}
+    monkeypatch.setattr(mod.wandb, "run", object())
+    monkeypatch.setattr(mod.wandb, "summary", logged)
+    scores = pd.DataFrame(
+        {
+            "perturbation": ["s1", "s1", "s1", "s1"],
+            "metric": ["mse", "mse_raw", "mse", "mse_raw"],
+            "model": ["shift", "shift", "tvn", "tvn"],
+            "value": [1.0, 2.0, 3.0, 4.0],
+            "batch": "e1",
+        }
+    )
+    mod.log_summary("fold 2", mod.summary(scores))
+    assert logged == {
+        "fold 2/shift/mse": 1.0,
+        "fold 2/shift/mse_raw": 2.0,
+        "fold 2/tvn/mse": 3.0,
+        "fold 2/tvn/mse_raw": 4.0,
+    }

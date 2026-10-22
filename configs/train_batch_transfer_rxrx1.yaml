@@ -21,4 +21,4 @@ neural:               # NeuralBridgeTransfer settings; see model/proxy_unconfoun
   n_steps: 200        # full-batch AdamW steps per fold
   cross_fit_folds: 5  # phi, psi trained on a 5-fold cross-fitted loss over batches; 0 = in-sample
   device: cuda        # cpu works but is slow at this size; not mps (float64)
-  log_key: neural bridge  # W&B key prefix of the loss; the script sets it to "fold <k>/neural bridge"
+  log_key: null       # W&B key prefix of the loss, null = not logged; scripts set "fold <k>/neural bridge"

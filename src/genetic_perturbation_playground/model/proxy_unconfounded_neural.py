@@ -98,7 +98,7 @@ class NeuralMarginalEmbeddingBridge:
                 for every fold. The final A is still solved on all environments.
     device      torch device to train and predict on, e.g. "cpu" or "cuda" (not "mps": the model
                 is float64, which the Apple backend does not support)
-    log_key     if a W&B run is open, each step logs <log_key>/loss and <log_key>/step to it
+    log_key     if set and a W&B run is open, each step logs <log_key>/loss and <log_key>/step
 
     After ``fit``: ``phi_``, ``psi_`` (the MLPs) and ``A_``, A flattened to shape (p q,).
     """
@@ -114,7 +114,7 @@ class NeuralMarginalEmbeddingBridge:
     cross_fit_folds: int = 0
     seed: int = 0
     device: str = "cpu"
-    log_key: str = "neural bridge"
+    log_key: str | None = None
 
     def fit(
         self,
@@ -171,6 +171,9 @@ class NeuralMarginalEmbeddingBridge:
         """Full-batch AdamW on phi and psi against the stage-2 loss."""
         params = [*self.phi_.parameters(), *self.psi_.parameters()]
         optimizer = torch.optim.AdamW(params, lr=self.lr, weight_decay=self.weight_decay)
+        logging = self.log_key and wandb.run is not None  # the caller's run, if it opened one
+        if logging:  # the loss against this fit's own step
+            wandb.define_metric(f"{self.log_key}/*", step_metric=f"{self.log_key}/step")
         progress = trange(self.n_steps, desc="neural bridge", leave=False)
         for step in progress:
             optimizer.zero_grad()
@@ -178,7 +181,7 @@ class NeuralMarginalEmbeddingBridge:
             loss.backward()
             optimizer.step()
             progress.set_postfix(loss=f"{loss.item():.4f}")
-            if wandb.run is not None:  # the caller's run, if it opened one
+            if logging:
                 wandb.log({f"{self.log_key}/loss": loss.item(), f"{self.log_key}/step": step})
             if step + 1 in checkpoints:
                 self._solve_A(data)

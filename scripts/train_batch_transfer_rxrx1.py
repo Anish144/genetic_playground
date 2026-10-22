@@ -76,9 +76,24 @@ def score_batch(models: dict, test: sc.AnnData, whiten) -> pd.DataFrame:
     return pd.concat(rows, ignore_index=True)
 
 
+def score_batches(models: dict, adata: sc.AnnData, batches, whiten) -> pd.DataFrame:
+    """score_batch on each of `batches` of `adata`, tagged with its batch."""
+    batch = batch_labels(adata)
+    return pd.concat(
+        [score_batch(models, adata[batch == b], whiten).assign(batch=b) for b in batches],
+        ignore_index=True,
+    )
+
+
 def _wells(adata: sc.AnnData, well_type: str) -> np.ndarray:
     """Mask of the crops from wells of one type: treatment, negative_control or positive_control."""
     return (adata.obs["well_type"] == well_type).to_numpy()
+
+
+def negative_control_whitener(train: sc.AnnData, eps: float):
+    """The metric's whitener (utils/metrics.control_whitener) from the negative controls of `train`."""
+    negative = _wells(train, "negative_control")
+    return control_whitener(_dense(train.X[negative]), batch_labels(train)[negative], eps)
 
 
 def _long(perts: np.ndarray, model: str, metric: str, values: np.ndarray) -> pd.DataFrame:
@@ -93,31 +108,30 @@ def cross_validate(adata: sc.AnnData, cfg: DictConfig) -> Iterator[pd.DataFrame]
         adata = add_positive_controls_to_proxies(adata)
     print(f"proxy crops: {is_control(adata).sum():,} of {adata.n_obs:,}", flush=True)
     batch = batch_labels(adata)
-    negative = _wells(adata, "negative_control")
     folds = _batch_folds(batch, cfg.n_folds, np.random.default_rng(cfg.seed))
     for i, held_out in enumerate(folds):
         print(f"fold {i + 1}/{cfg.n_folds}: holding out {len(held_out)} experiments", flush=True)
-        is_test = np.isin(batch, held_out)
-        train_negative = ~is_test & negative
-        whiten = control_whitener(
-            _dense(adata.X[train_negative]), batch[train_negative], cfg.whiten_eps
-        )
-        train = adata[~is_test]
-        log_key = f"fold {i + 1}/neural bridge"
-        if wandb.run is not None:  # each fold's loss curve against its own step
-            wandb.define_metric(f"{log_key}/*", step_metric=f"{log_key}/step")
-        fold_cfg = OmegaConf.merge(cfg, {"neural": {"log_key": log_key}})
+        train = adata[~np.isin(batch, held_out)]
+        whiten = negative_control_whitener(train, cfg.whiten_eps)
+        fold_cfg = OmegaConf.merge(cfg, {"neural": {"log_key": f"fold {i + 1}/neural bridge"}})
         start = time.perf_counter()
         models = fit(train, fold_cfg) | {"tvn": TVNTransferModel().fit(train)}
         print(f"  fit {len(models)} models in {time.perf_counter() - start:.0f}s", flush=True)
-        scores = [score_batch(models, adata[batch == b], whiten).assign(batch=b) for b in held_out]
-        yield pd.concat(scores, ignore_index=True).assign(fold=i)
+        yield score_batches(models, adata, held_out, whiten).assign(fold=i)
 
 
 def summary(scores: pd.DataFrame) -> pd.DataFrame:
     """Mean per (model, metric): siRNAs averaged within each experiment, then experiments."""
     per_batch = scores.groupby(["metric", "model", "batch"])["value"].mean()
     return per_batch.groupby(["metric", "model"]).mean().unstack("metric")
+
+
+def log_summary(prefix: str, table: pd.DataFrame) -> None:
+    """Every value of a summary() table into the open W&B run's summary, as <prefix>/<model>/<metric>."""
+    if wandb.run is not None:
+        wandb.summary.update(
+            {f"{prefix}/{m}/{metric}": v for (m, metric), v in table.stack().items()}
+        )
 
 
 @hydra.main(config_path="../configs", config_name="train_batch_transfer_rxrx1", version_base=None)
@@ -131,9 +145,12 @@ def main(cfg: DictConfig):
     ):
         for fold_scores in cross_validate(adata, cfg):
             folds.append(fold_scores)
-            print(summary(fold_scores).to_string(float_format="%.4g"), flush=True)
+            fold_summary = summary(fold_scores)
+            print(fold_summary.to_string(float_format="%.4g"), flush=True)
+            log_summary(f"fold {len(folds)}", fold_summary)
             pd.concat(folds).to_csv(out_dir / "scores.csv", index=False)  # rewritten every fold
-    overall = summary(pd.concat(folds))
+        overall = summary(pd.concat(folds))
+        log_summary("all folds", overall)
     overall.to_csv(out_dir / "summary.csv")
     print(f"all folds:\n{overall.to_string(float_format='%.4g')}\nsaved to {out_dir}")
 
