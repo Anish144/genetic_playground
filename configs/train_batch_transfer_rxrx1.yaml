@@ -10,6 +10,7 @@ positive_controls_as_proxies: false  # proxy W = negative controls; true adds th
 bridge_reg: 1.0e-6  # ridge of both bridges, scaled by training crops N
 weight_by_cells: true  # bridges weight each (siRNA, experiment) mean by its crops; false = equal
 bridges: [kernel, neural]  # bridge models to fit next to the linear ones and TVN; neural wants a GPU
+standardise_bridges: true  # bridges fit on embeddings standardised by the training negative controls
 wandb_mode: online  # one W&B run per job, named name, with each fold's neural bridge loss; offline or disabled
 neural:               # NeuralBridgeTransfer settings; see model/proxy_unconfounded_neural.py
   n_features: 128      # p, output dimension of phi (perturbation side)

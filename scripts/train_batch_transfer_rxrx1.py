@@ -32,7 +32,7 @@ import scanpy as sc
 import wandb
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf
-from train_batch_transfer_expression import _batch_folds, fit
+from train_batch_transfer_expression import _batch_folds, _fit_linear, _make_bridge, _print_slope
 
 from genetic_perturbation_playground.data.rxrx1 import load_rxrx1
 from genetic_perturbation_playground.model.batch_transfer import (
@@ -42,7 +42,11 @@ from genetic_perturbation_playground.model.batch_transfer import (
     perturbation_labels,
 )
 from genetic_perturbation_playground.model.tvn import TVNTransferModel
-from genetic_perturbation_playground.utils.metrics import control_whitener, mse
+from genetic_perturbation_playground.utils.metrics import (
+    centre_within_batches,
+    control_whitener,
+    mse,
+)
 
 
 def select_cell_type(adata: sc.AnnData, cell_type: str) -> sc.AnnData:
@@ -59,6 +63,52 @@ def add_positive_controls_to_proxies(adata: sc.AnnData) -> sc.AnnData:
     adata = adata.copy()
     adata.obs["perturbation"] = np.where(positive, "control", perturbation_labels(adata))
     return adata
+
+
+class Standardised:
+    """`model` fit and predicting on embeddings standardised per dimension; predictions mapped back.
+
+    Standardises W (control crops) and Y (siRNA means) alike, so no few high-variance dimensions
+    dominate a bridge's squared-error loss. Mean: the training negative controls'; std: their
+    typical within-experiment variation (each experiment centred on its own mean), the diagonal of
+    the metric's whitener.
+    """
+
+    def __init__(self, model):
+        self.model = model
+
+    @property
+    def perturbations_(self) -> np.ndarray:
+        return self.model.perturbations_
+
+    def fit(self, adata: sc.AnnData, *args) -> "Standardised":
+        """Fit `model` on standardised `adata`; extra arguments go to its fit (checkpoints)."""
+        negative = _wells(adata, "negative_control")
+        controls = _dense(adata.X[negative])
+        self.mean_ = controls.mean(axis=0)
+        self.std_ = centre_within_batches(controls, batch_labels(adata)[negative]).std(axis=0)
+        self.model.fit(self._standardise(adata), *args)
+        return self
+
+    def predict(self, perturbations: list[str], test: sc.AnnData) -> np.ndarray:
+        """`model`'s prediction from standardised `test`, mapped back to embedding coordinates."""
+        return self.model.predict(perturbations, self._standardise(test)) * self.std_ + self.mean_
+
+    def _standardise(self, adata: sc.AnnData) -> sc.AnnData:
+        return sc.AnnData((_dense(adata.X) - self.mean_) / self.std_, obs=adata.obs)
+
+
+def with_standardisation(bridge, cfg: DictConfig):
+    """`bridge` (unfitted), wrapped in Standardised if cfg.standardise_bridges."""
+    return Standardised(bridge) if cfg.standardise_bridges else bridge
+
+
+def fit_models(train: sc.AnnData, cfg: DictConfig) -> dict:
+    """Linear models, TVN and the bridges of cfg.bridges, fit on `train`."""
+    models = _fit_linear(train) | {"tvn": TVNTransferModel().fit(train)}
+    _print_slope(models["transfer (fit b)"].slope_)
+    bridges = {f"{b} bridge": with_standardisation(_make_bridge(b, cfg), cfg) for b in cfg.bridges}
+    return models | {name: bridge.fit(train) for name, bridge in bridges.items()}
 
 
 def score_batch(models: dict, test: sc.AnnData, whiten) -> pd.DataFrame:
@@ -115,7 +165,7 @@ def cross_validate(adata: sc.AnnData, cfg: DictConfig) -> Iterator[pd.DataFrame]
         whiten = negative_control_whitener(train, cfg.whiten_eps)
         fold_cfg = OmegaConf.merge(cfg, {"neural": {"log_key": f"fold {i + 1}/neural bridge"}})
         start = time.perf_counter()
-        models = fit(train, fold_cfg) | {"tvn": TVNTransferModel().fit(train)}
+        models = fit_models(train, fold_cfg)
         print(f"  fit {len(models)} models in {time.perf_counter() - start:.0f}s", flush=True)
         yield score_batches(models, adata, held_out, whiten).assign(fold=i)
 

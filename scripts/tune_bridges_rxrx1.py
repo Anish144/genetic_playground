@@ -41,6 +41,7 @@ from train_batch_transfer_rxrx1 import (
     score_batches,
     select_cell_type,
     summary,
+    with_standardisation,
 )
 from tune_bridges import (
     _best,
@@ -66,7 +67,8 @@ def tune_kernel(train: sc.AnnData, val: sc.AnnData, cfg: DictConfig) -> list[dic
     whiten = negative_control_whitener(train, cfg.whiten_eps)
     rows = []
     for config in _sample_configs(cfg.kernel_grid, cfg.n_configs, cfg.seed):
-        scores = validation_scores(_make_kernel(config, cfg).fit(train), val, whiten)
+        kernel = with_standardisation(_make_kernel(config, cfg), cfg)
+        scores = validation_scores(kernel.fit(train), val, whiten)
         rows.append({"bridge": "kernel", **config, **scores})
         print(f"  kernel {config}: mse {scores['mse']:.4g}", flush=True)
     return rows
@@ -78,7 +80,8 @@ def tune_neural(train: sc.AnnData, val: sc.AnnData, cfg: DictConfig) -> list[dic
     checkpoints = list(cfg.neural_checkpoints)
     rows = []
     for config in _sample_configs(cfg.neural_grid, cfg.n_configs, cfg.seed):
-        model = _make_neural(network_sizes(config) | {"n_steps": max(checkpoints)}, cfg)
+        neural = _make_neural(network_sizes(config) | {"n_steps": max(checkpoints)}, cfg)
+        model = with_standardisation(neural, cfg)
 
         def record(step, model=model, config=config):
             scores = validation_scores(model, val, whiten)
@@ -101,10 +104,11 @@ def fit_tuned(train: sc.AnnData, selected: dict, cfg: DictConfig, log_key: str) 
     """Linear models, TVN and both bridges in their selected configurations, fit on `train`; the
     neural bridge logs its loss under `log_key`."""
     neural = _make_neural(network_sizes(selected["neural"]) | {"log_key": log_key}, cfg)
+    kernel = _make_kernel(selected["kernel"], cfg)
     return _fit_linear(train) | {
         "tvn": TVNTransferModel().fit(train),
-        "kernel bridge (tuned)": _make_kernel(selected["kernel"], cfg).fit(train),
-        "neural bridge (tuned)": neural.fit(train),
+        "kernel bridge (tuned)": with_standardisation(kernel, cfg).fit(train),
+        "neural bridge (tuned)": with_standardisation(neural, cfg).fit(train),
     }
 
 

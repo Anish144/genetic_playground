@@ -8,6 +8,7 @@ import pytest
 from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 
+from genetic_perturbation_playground.model.batch_transfer import BatchTransferModel
 from genetic_perturbation_playground.utils.metrics import control_whitener
 
 ROOT = Path(__file__).parents[1]
@@ -158,3 +159,33 @@ def test_log_summary_writes_every_model_and_metric(monkeypatch):
         "fold 2/tvn/mse": 3.0,
         "fold 2/tvn/mse_raw": 4.0,
     }
+
+
+def test_standardised_shift_predicts_as_shift(tiny_rxrx1):
+    """shift is unchanged by a per-dimension affine map, so standardising must be undone exactly."""
+    huvec = mod.select_cell_type(tiny_rxrx1, "HUVEC")
+    is_test = (huvec.obs["batch"] == "HUVEC-3").to_numpy()
+    train, test = huvec[~is_test], huvec[is_test]
+    plain = BatchTransferModel(slope=1.0).fit(train)
+    standardised = mod.Standardised(BatchTransferModel(slope=1.0)).fit(train)
+    perts = ["s1", "s2"]
+    np.testing.assert_allclose(standardised.predict(perts, test), plain.predict(perts, test))
+
+
+def test_standardised_uses_negative_control_statistics(tiny_rxrx1):
+    huvec = mod.select_cell_type(tiny_rxrx1, "HUVEC")
+    model = mod.Standardised(BatchTransferModel(slope=1.0)).fit(huvec)
+    negative = huvec[(huvec.obs["well_type"] == "negative_control").to_numpy()]
+    batch = negative.obs["batch"].to_numpy()
+    centred = negative.X - pd.DataFrame(negative.X).groupby(batch).transform("mean").to_numpy()
+    np.testing.assert_allclose(model.mean_, negative.X.mean(axis=0))
+    np.testing.assert_allclose(model.std_, centred.std(axis=0))
+
+
+def test_fit_models_standardises_only_the_bridges(tiny_rxrx1):
+    huvec = mod.select_cell_type(tiny_rxrx1, "HUVEC")
+    models = mod.fit_models(huvec, cfg(bridges=["kernel"], standardise_bridges=True))
+    assert isinstance(models["kernel bridge"], mod.Standardised)
+    assert not isinstance(models["shift (b=1)"], mod.Standardised)
+    plain = mod.fit_models(huvec, cfg(bridges=["kernel"], standardise_bridges=False))
+    assert not isinstance(plain["kernel bridge"], mod.Standardised)
