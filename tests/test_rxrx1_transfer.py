@@ -8,7 +8,6 @@ import pytest
 from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 
-from genetic_perturbation_playground.model.batch_transfer import BatchTransferModel
 from genetic_perturbation_playground.utils.metrics import control_whitener
 
 ROOT = Path(__file__).parents[1]
@@ -161,25 +160,37 @@ def test_log_summary_writes_every_model_and_metric(monkeypatch):
     }
 
 
-def test_standardised_shift_predicts_as_shift(tiny_rxrx1):
-    """shift is unchanged by a per-dimension affine map, so standardising must be undone exactly."""
-    huvec = mod.select_cell_type(tiny_rxrx1, "HUVEC")
-    is_test = (huvec.obs["batch"] == "HUVEC-3").to_numpy()
-    train, test = huvec[~is_test], huvec[is_test]
-    plain = BatchTransferModel(slope=1.0).fit(train)
-    standardised = mod.Standardised(BatchTransferModel(slope=1.0)).fit(train)
-    perts = ["s1", "s2"]
-    np.testing.assert_allclose(standardised.predict(perts, test), plain.predict(perts, test))
+class Spy:
+    """Records the data it is fit on; predicts ones."""
+
+    perturbations_ = np.array(["s1", "s2"])
+
+    def fit(self, adata, *args):
+        self.adata = adata
+        return self
+
+    def predict(self, perts, test):
+        return np.ones((len(perts), test.n_vars))
 
 
-def test_standardised_uses_negative_control_statistics(tiny_rxrx1):
+def test_standardised_bridge_sees_unit_scale_proxies_and_targets(tiny_rxrx1):
     huvec = mod.select_cell_type(tiny_rxrx1, "HUVEC")
-    model = mod.Standardised(BatchTransferModel(slope=1.0)).fit(huvec)
-    negative = huvec[(huvec.obs["well_type"] == "negative_control").to_numpy()]
-    batch = negative.obs["batch"].to_numpy()
-    centred = negative.X - pd.DataFrame(negative.X).groupby(batch).transform("mean").to_numpy()
-    np.testing.assert_allclose(model.mean_, negative.X.mean(axis=0))
-    np.testing.assert_allclose(model.std_, centred.std(axis=0))
+    seen = mod.Standardised(Spy()).fit(huvec).model.adata
+    ctrl = (seen.obs["perturbation"] == "control").to_numpy()
+    np.testing.assert_allclose(seen.X[ctrl].mean(axis=0), 0, atol=1e-12)
+    np.testing.assert_allclose(seen.X[ctrl].std(axis=0), 1)
+    pairs = pd.DataFrame(seen.X[~ctrl]).groupby(
+        [seen.obs["perturbation"][~ctrl].to_numpy(), seen.obs["batch"][~ctrl].to_numpy()]
+    )
+    np.testing.assert_allclose(pairs.mean().mean(), 0, atol=1e-12)
+    np.testing.assert_allclose(pairs.mean().std(ddof=0), 1)
+
+
+def test_standardised_maps_predictions_back_to_embedding_coordinates(tiny_rxrx1):
+    huvec = mod.select_cell_type(tiny_rxrx1, "HUVEC")
+    model = mod.Standardised(Spy()).fit(huvec)
+    pred = model.predict(["s1", "s2"], huvec)
+    np.testing.assert_allclose(pred, np.tile(model.y_mean_ + model.y_std_, (2, 1)))
 
 
 def test_fit_models_standardises_only_the_bridges(tiny_rxrx1):

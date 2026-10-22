@@ -43,7 +43,6 @@ from genetic_perturbation_playground.model.batch_transfer import (
 )
 from genetic_perturbation_playground.model.tvn import TVNTransferModel
 from genetic_perturbation_playground.utils.metrics import (
-    centre_within_batches,
     control_whitener,
     mse,
 )
@@ -66,12 +65,11 @@ def add_positive_controls_to_proxies(adata: sc.AnnData) -> sc.AnnData:
 
 
 class Standardised:
-    """`model` fit and predicting on embeddings standardised per dimension; predictions mapped back.
+    """`model` fit and predicting on standardised embeddings; predictions mapped back.
 
-    Standardises W (control crops) and Y (siRNA means) alike, so no few high-variance dimensions
-    dominate a bridge's squared-error loss. Mean: the training negative controls'; std: their
-    typical within-experiment variation (each experiment centred on its own mean), the diagonal of
-    the metric's whitener.
+    The networks see mean 0, variance 1 in every dimension: W (the proxy crops) is standardised by
+    the training proxy crops' pooled mean and std, Y (the treatment crops) by the mean and std of
+    the training targets, the per-(siRNA, experiment) means. Predictions undo Y's map.
     """
 
     def __init__(self, model):
@@ -83,19 +81,28 @@ class Standardised:
 
     def fit(self, adata: sc.AnnData, *args) -> "Standardised":
         """Fit `model` on standardised `adata`; extra arguments go to its fit (checkpoints)."""
-        negative = _wells(adata, "negative_control")
-        controls = _dense(adata.X[negative])
-        self.mean_ = controls.mean(axis=0)
-        self.std_ = centre_within_batches(controls, batch_labels(adata)[negative]).std(axis=0)
+        X = _dense(adata.X)
+        ctrl = is_control(adata)
+        self.w_mean_, self.w_std_ = X[ctrl].mean(axis=0), X[ctrl].std(axis=0)
+        pairs = [perturbation_labels(adata)[~ctrl], batch_labels(adata)[~ctrl]]
+        targets = pd.DataFrame(X[~ctrl]).groupby(pairs).mean().to_numpy()
+        self.y_mean_, self.y_std_ = targets.mean(axis=0), targets.std(axis=0)
         self.model.fit(self._standardise(adata), *args)
         return self
 
     def predict(self, perturbations: list[str], test: sc.AnnData) -> np.ndarray:
         """`model`'s prediction from standardised `test`, mapped back to embedding coordinates."""
-        return self.model.predict(perturbations, self._standardise(test)) * self.std_ + self.mean_
+        return (
+            self.model.predict(perturbations, self._standardise(test)) * self.y_std_ + self.y_mean_
+        )
 
     def _standardise(self, adata: sc.AnnData) -> sc.AnnData:
-        return sc.AnnData((_dense(adata.X) - self.mean_) / self.std_, obs=adata.obs)
+        """`adata` with proxy crops in W's standard units and the rest in Y's."""
+        X = _dense(adata.X).astype(float)
+        ctrl = is_control(adata)
+        X[ctrl] = (X[ctrl] - self.w_mean_) / self.w_std_
+        X[~ctrl] = (X[~ctrl] - self.y_mean_) / self.y_std_
+        return sc.AnnData(X, obs=adata.obs)
 
 
 def with_standardisation(bridge, cfg: DictConfig):

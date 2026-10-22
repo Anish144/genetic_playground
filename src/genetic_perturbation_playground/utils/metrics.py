@@ -19,15 +19,10 @@ def control_whitener(
     pooled covariance V diag(vals) V^T gives z -> (z V) / sqrt(vals + eps * mean(vals)); eps floors
     near-flat directions. Squared distance after the map is the Mahalanobis distance.
     """
-    centred = centre_within_batches(X, batch)
+    centred = X - pd.DataFrame(X).groupby(batch).transform("mean").to_numpy()
     vals, vecs = np.linalg.eigh(centred.T @ centred / len(X))
     scale = 1 / np.sqrt(vals + eps * vals.mean())
     return lambda z: (z @ vecs) * scale
-
-
-def centre_within_batches(X: np.ndarray, batch: np.ndarray) -> np.ndarray:
-    """X with each batch's rows centred on that batch's mean."""
-    return X - pd.DataFrame(X).groupby(batch).transform("mean").to_numpy()
 
 
 def pearson_per_row(pred: np.ndarray, true: np.ndarray) -> np.ndarray:
