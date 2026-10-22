@@ -79,11 +79,6 @@ def _weighted_sse(pred: torch.Tensor, y: torch.Tensor, c: torch.Tensor) -> torch
     return (c * sq_err).sum()
 
 
-def _weighted_mse(pred: torch.Tensor, y: torch.Tensor, c: torch.Tensor) -> torch.Tensor:
-    """Count-weighted mean over pairs of the squared error averaged over outputs."""
-    return _weighted_sse(pred, y, c) / c.sum()
-
-
 @dataclass
 class NeuralMarginalEmbeddingBridge:
     """Bridge h(x, w) = phi(x)^T A psi(w) learned from D source environments.
@@ -232,7 +227,7 @@ class NeuralMarginalEmbeddingBridge:
         mu = self._embed(data.w_envs)  # (D, q), stage 1
         feats = _features(self.phi_(data.x), mu[data.env])  # (N, p q)
         A = _weighted_ridge(feats, data.y, data.c, self.reg)
-        return _weighted_mse(feats @ A, data.y, data.c), A
+        return _weighted_sse(feats @ A, data.y, data.c) / data.c.sum(), A
 
     def _embed(self, w_envs: list[torch.Tensor]) -> torch.Tensor:
         """Mean psi features of each environment's proxies, shape (D, q)."""
