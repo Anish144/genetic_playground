@@ -8,6 +8,7 @@ import pytest
 from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 
+from genetic_perturbation_playground.model.batch_transfer import Standardised
 from genetic_perturbation_playground.utils.metrics import control_whitener
 
 ROOT = Path(__file__).parents[1]
@@ -141,24 +142,6 @@ def test_nested_cv_tunes_on_inner_validation_and_scores_the_outer_folds(tiny_rxr
         assert {"kernel bridge (tuned)", "neural bridge (tuned)", "tvn", "shift (b=1)"} <= models
 
 
-def test_selection_ranks_configurations_by_their_mean_over_inner_folds():
-    inner = pd.DataFrame(
-        {
-            "bridge": ["kernel"] * 4 + ["shift (b=1)"] * 2,
-            "reg": [1.0, 1.0, 2.0, 2.0, None, None],
-            "inner_fold": [0, 1, 0, 1, 0, 1],
-            "mse": [0.1, 0.9, 0.4, 0.4, 0.5, 0.7],  # reg 1 wins fold 0, reg 2 wins on average
-            "mse_raw": [1.0, 3.0, 2.0, 2.0, 5.0, 7.0],
-        }
-    )
-    averaged = tune.mean_over_inner_folds(inner)
-    kernel = averaged[averaged["bridge"] == "kernel"].set_index("reg")
-    assert kernel.loc[2.0, "mse"] == pytest.approx(0.4)
-    assert kernel.loc[1.0, "mse"] == pytest.approx(0.5)
-    shift = averaged[averaged["bridge"] == "shift (b=1)"].iloc[0]
-    assert (shift["mse"], shift["mse_raw"]) == pytest.approx((0.6, 6.0))
-
-
 def test_log_summary_writes_every_model_and_metric(monkeypatch):
     logged = {}
     monkeypatch.setattr(mod.wandb, "run", object())
@@ -196,7 +179,7 @@ class Spy:
 
 def test_standardised_bridge_sees_unit_scale_proxies_and_targets(tiny_rxrx1):
     huvec = mod.select_cell_type(tiny_rxrx1, "HUVEC")
-    seen = mod.Standardised(Spy()).fit(huvec).model.adata
+    seen = Standardised(Spy()).fit(huvec).model.adata
     ctrl = (seen.obs["perturbation"] == "control").to_numpy()
     np.testing.assert_allclose(seen.X[ctrl].mean(axis=0), 0, atol=1e-12)
     np.testing.assert_allclose(seen.X[ctrl].std(axis=0), 1)
@@ -209,7 +192,7 @@ def test_standardised_bridge_sees_unit_scale_proxies_and_targets(tiny_rxrx1):
 
 def test_standardised_maps_predictions_back_to_embedding_coordinates(tiny_rxrx1):
     huvec = mod.select_cell_type(tiny_rxrx1, "HUVEC")
-    model = mod.Standardised(Spy()).fit(huvec)
+    model = Standardised(Spy()).fit(huvec)
     pred = model.predict(["s1", "s2"], huvec)
     np.testing.assert_allclose(pred, np.tile(model.y_mean_ + model.y_std_, (2, 1)))
 
@@ -217,7 +200,7 @@ def test_standardised_maps_predictions_back_to_embedding_coordinates(tiny_rxrx1)
 def test_fit_models_standardises_only_the_bridges(tiny_rxrx1):
     huvec = mod.select_cell_type(tiny_rxrx1, "HUVEC")
     models = mod.fit_models(huvec, cfg(bridges=["kernel"], standardise_bridges=True))
-    assert isinstance(models["kernel bridge"], mod.Standardised)
-    assert not isinstance(models["shift (b=1)"], mod.Standardised)
+    assert isinstance(models["kernel bridge"], Standardised)
+    assert not isinstance(models["shift (b=1)"], Standardised)
     plain = mod.fit_models(huvec, cfg(bridges=["kernel"], standardise_bridges=False))
-    assert not isinstance(plain["kernel bridge"], mod.Standardised)
+    assert not isinstance(plain["kernel bridge"], Standardised)

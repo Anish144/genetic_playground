@@ -32,7 +32,7 @@ import scanpy as sc
 import wandb
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf
-from train_batch_transfer_expression import _batch_folds, _fit_linear, _make_bridge, _print_slope
+from train_batch_transfer_expression import _fit_bridges, _fit_linear, _print_slope
 
 from genetic_perturbation_playground.data.rxrx1 import load_rxrx1
 from genetic_perturbation_playground.model.batch_transfer import (
@@ -42,6 +42,7 @@ from genetic_perturbation_playground.model.batch_transfer import (
     perturbation_labels,
 )
 from genetic_perturbation_playground.model.tvn import TVNTransferModel
+from genetic_perturbation_playground.tuning import batch_folds
 from genetic_perturbation_playground.utils.metrics import (
     control_whitener,
     mse,
@@ -64,58 +65,11 @@ def add_positive_controls_to_proxies(adata: sc.AnnData) -> sc.AnnData:
     return adata
 
 
-class Standardised:
-    """`model` fit and predicting on standardised embeddings; predictions mapped back.
-
-    The networks see mean 0, variance 1 in every dimension: W (the proxy crops) is standardised by
-    the training proxy crops' pooled mean and std, Y (the treatment crops) by the mean and std of
-    the training targets, the per-(siRNA, experiment) means. Predictions undo Y's map.
-    """
-
-    def __init__(self, model):
-        self.model = model
-
-    @property
-    def perturbations_(self) -> np.ndarray:
-        return self.model.perturbations_
-
-    def fit(self, adata: sc.AnnData, *args) -> "Standardised":
-        """Fit `model` on standardised `adata`; extra arguments go to its fit (checkpoints)."""
-        X = _dense(adata.X)
-        ctrl = is_control(adata)
-        self.w_mean_, self.w_std_ = X[ctrl].mean(axis=0), X[ctrl].std(axis=0)
-        pairs = [perturbation_labels(adata)[~ctrl], batch_labels(adata)[~ctrl]]
-        targets = pd.DataFrame(X[~ctrl]).groupby(pairs).mean().to_numpy()
-        self.y_mean_, self.y_std_ = targets.mean(axis=0), targets.std(axis=0)
-        self.model.fit(self._standardise(adata), *args)
-        return self
-
-    def predict(self, perturbations: list[str], test: sc.AnnData) -> np.ndarray:
-        """`model`'s prediction from standardised `test`, mapped back to embedding coordinates."""
-        return (
-            self.model.predict(perturbations, self._standardise(test)) * self.y_std_ + self.y_mean_
-        )
-
-    def _standardise(self, adata: sc.AnnData) -> sc.AnnData:
-        """`adata` with proxy crops in W's standard units and the rest in Y's."""
-        X = _dense(adata.X).astype(float)
-        ctrl = is_control(adata)
-        X[ctrl] = (X[ctrl] - self.w_mean_) / self.w_std_
-        X[~ctrl] = (X[~ctrl] - self.y_mean_) / self.y_std_
-        return sc.AnnData(X, obs=adata.obs)
-
-
-def with_standardisation(bridge, cfg: DictConfig):
-    """`bridge` (unfitted), wrapped in Standardised if cfg.standardise_bridges."""
-    return Standardised(bridge) if cfg.standardise_bridges else bridge
-
-
 def fit_models(train: sc.AnnData, cfg: DictConfig) -> dict:
     """Linear models, TVN and the bridges of cfg.bridges, fit on `train`."""
     models = _fit_linear(train) | {"tvn": TVNTransferModel().fit(train)}
     _print_slope(models["transfer (fit b)"].slope_)
-    bridges = {f"{b} bridge": with_standardisation(_make_bridge(b, cfg), cfg) for b in cfg.bridges}
-    return models | {name: bridge.fit(train) for name, bridge in bridges.items()}
+    return models | _fit_bridges(train, cfg)
 
 
 def score_batch(models: dict, test: sc.AnnData, whiten) -> pd.DataFrame:
@@ -165,7 +119,7 @@ def cross_validate(adata: sc.AnnData, cfg: DictConfig) -> Iterator[pd.DataFrame]
         adata = add_positive_controls_to_proxies(adata)
     print(f"proxy crops: {is_control(adata).sum():,} of {adata.n_obs:,}", flush=True)
     batch = batch_labels(adata)
-    folds = _batch_folds(batch, cfg.n_folds, np.random.default_rng(cfg.seed))
+    folds = batch_folds(batch, cfg.n_folds, np.random.default_rng(cfg.seed))
     for i, held_out in enumerate(folds):
         print(f"fold {i + 1}/{cfg.n_folds}: holding out {len(held_out)} experiments", flush=True)
         train = adata[~np.isin(batch, held_out)]

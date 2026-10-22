@@ -2,15 +2,16 @@ defaults:  # folds, control split, scoring and neural settings as in train_batch
   - train_batch_transfer_expression
   - _self_
 
-inner_val_frac: 0.2  # share of each outer fold's training batches used for inner validation
-# random search: each bridge fits a fixed number of configurations drawn from its grid
-n_kernel_configs: 10   # of 21
-n_neural_configs: 10   # of 30; each also scored at every neural_checkpoints step
-kernel_grid:
-  reg: [1.0e-8, 3.0e-8, 1.0e-7, 3.0e-7, 1.0e-6, 3.0e-6, 1.0e-5]
-  lengthscale_scale: [1, 2, 4]  # multiples of the median-heuristic lengthscale
-neural_grid:  # the rest (n_features_w, cross_fit_folds, ...) from train_batch_transfer_expression.yaml
-  reg: [1.0e-7, 1.0e-6, 1.0e-5, 1.0e-4, 1.0e-3]  # 1e-5 won every fold of the full grid: extended
-  weight_decay: [0.0, 1.0e-2, 1.0e-1]
-  n_features: [32, 64]
-neural_checkpoints: [50, 100, 200, 300, 400]  # steps scored in one training run
+inner_folds: 3       # K-fold over each outer fold's training batches; settings picked by mean mse
+n_configs: 20        # per bridge, drawn at random from its grid (the same draw in every fold)
+# Grids for standardised expression (standardise_bridges): the bridges' ridge solutions are linear
+# in Y, and Adam with decoupled weight decay ignores the loss scale, so Y's scale moves no optimum.
+kernel_grid:         # 36 configurations
+  reg: [1.0e-9, 1.0e-8, 1.0e-7, 1.0e-6, 1.0e-5, 1.0e-4]
+  lengthscale_scale: [0.25, 0.5, 1, 2, 4, 8]  # multiples of the median-heuristic lengthscale
+neural_grid:         # 480 configurations; the rest (depth, lr, cross_fit_folds, ...) from neural
+  reg: [1.0e-8, 1.0e-7, 1.0e-6, 1.0e-5, 1.0e-4, 1.0e-3]
+  weight_decay: [0.0, 1.0e-3, 1.0e-2, 1.0e-1]
+  phi_size: [8, 16, 32, 64, 128]  # phi's hidden width and output dimension p
+  psi_size: [4, 8, 16, 32]        # psi's hidden width and output dimension q
+neural_checkpoints: [25, 50, 100, 200, 400]  # steps scored in one training run

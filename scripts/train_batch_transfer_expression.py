@@ -37,6 +37,7 @@ from genetic_perturbation_playground.model.batch_transfer import (
     is_control,
     summary_stats,
 )
+from genetic_perturbation_playground.tuning import batch_folds, with_standardisation
 from genetic_perturbation_playground.utils import metrics
 from genetic_perturbation_playground.utils.plotting import report
 
@@ -61,12 +62,15 @@ def _fit_bridges(train: sc.AnnData, cfg: DictConfig) -> dict:
 
 
 def _make_bridge(kind: str, cfg: DictConfig):
-    """An unfitted kernel or neural bridge with the config's settings."""
+    """An unfitted kernel or neural bridge with the config's settings, standardised if
+    cfg.standardise_bridges."""
     if kind == "kernel":
-        return KernelBridgeTransfer(cfg.bridge_reg, cfg.weight_by_cells)
-    return NeuralBridgeTransfer(
-        cfg.weight_by_cells, reg=cfg.bridge_reg, seed=cfg.seed, **cfg.neural
-    )
+        bridge = KernelBridgeTransfer(cfg.bridge_reg, cfg.weight_by_cells)
+    else:
+        bridge = NeuralBridgeTransfer(
+            cfg.weight_by_cells, reg=cfg.bridge_reg, seed=cfg.seed, **cfg.neural
+        )
+    return with_standardisation(bridge, cfg)
 
 
 def _print_slope(slope: np.ndarray) -> None:
@@ -110,7 +114,7 @@ def cross_validate(adata: sc.AnnData, cfg: DictConfig) -> tuple:
     """
     batch = batch_labels(adata)
     rng = np.random.default_rng(cfg.seed)
-    folds = _batch_folds(batch, cfg.n_folds, rng)
+    folds = batch_folds(batch, cfg.n_folds, rng)
     seen = _seen_controls(adata, batch, rng)
     train_cells = ~is_control(adata) | seen
 
@@ -124,11 +128,6 @@ def cross_validate(adata: sc.AnnData, cfg: DictConfig) -> tuple:
         _print_fold_means(pert_scores[-1])
         batch_scores += _score_batches(models, test, seen[is_test], held_out, batch, cfg.top_k)
     return _average_per_perturbation(pert_scores), _average_per_batch(batch_scores)
-
-
-def _batch_folds(batch: np.ndarray, n_folds: int, rng: np.random.Generator) -> list:
-    """The batches, shuffled and split into n_folds groups."""
-    return np.array_split(rng.permutation(np.unique(batch)), n_folds)
 
 
 def _seen_controls(adata: sc.AnnData, batch: np.ndarray, rng: np.random.Generator) -> np.ndarray:

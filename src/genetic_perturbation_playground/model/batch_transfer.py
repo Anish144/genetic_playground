@@ -1,6 +1,7 @@
 from typing import NamedTuple
 
 import numpy as np
+import pandas as pd
 import scanpy as sc
 from scipy import sparse
 
@@ -274,3 +275,50 @@ class NeuralBridgeTransfer:
     def _onehot(self, idx: np.ndarray) -> np.ndarray:
         """One-hot rows for perturbation indices `idx`."""
         return np.eye(len(self.perturbations_))[idx]
+
+
+class Standardised:
+    """`model` fit and predicting on standardised data; predictions mapped back.
+
+    The model sees mean 0, variance 1 in every dimension: the proxy (control) cells are
+    standardised by the training controls' pooled mean and std, the other cells by the mean and std
+    of the training targets, the per-(perturbation, batch) means. Predictions undo the latter map.
+    Constant dimensions keep std 1.
+    """
+
+    def __init__(self, model):
+        self.model = model
+
+    @property
+    def perturbations_(self) -> np.ndarray:
+        return self.model.perturbations_
+
+    def fit(self, adata: sc.AnnData, *args) -> "Standardised":
+        """Fit `model` on standardised `adata`; extra arguments go to its fit (checkpoints)."""
+        X = _dense(adata.X)
+        ctrl = is_control(adata)
+        self.w_mean_, self.w_std_ = _mean_and_std(X[ctrl])
+        pairs = [perturbation_labels(adata)[~ctrl], batch_labels(adata)[~ctrl]]
+        self.y_mean_, self.y_std_ = _mean_and_std(pd.DataFrame(X[~ctrl]).groupby(pairs).mean())
+        self.model.fit(self._standardise(adata), *args)
+        return self
+
+    def predict(self, perturbations: list[str], test: sc.AnnData) -> np.ndarray:
+        """`model`'s prediction from standardised `test`, mapped back to the data's coordinates."""
+        pred = self.model.predict(perturbations, self._standardise(test))
+        return pred * self.y_std_ + self.y_mean_
+
+    def _standardise(self, adata: sc.AnnData) -> sc.AnnData:
+        """`adata` with control cells in the proxy's standard units and the rest in the targets'."""
+        X = _dense(adata.X).astype(float)
+        ctrl = is_control(adata)
+        X[ctrl] = (X[ctrl] - self.w_mean_) / self.w_std_
+        X[~ctrl] = (X[~ctrl] - self.y_mean_) / self.y_std_
+        return sc.AnnData(X, obs=adata.obs)
+
+
+def _mean_and_std(X) -> tuple[np.ndarray, np.ndarray]:
+    """Mean and std of each column of X, with std 1 where a column is constant."""
+    X = np.asarray(X)
+    std = X.std(axis=0)
+    return X.mean(axis=0), np.where(std > 0, std, 1.0)
