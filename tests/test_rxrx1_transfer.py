@@ -191,6 +191,21 @@ def test_standardised_bridge_sees_unit_scale_proxies_and_targets(tiny_rxrx1):
     np.testing.assert_allclose(pairs.mean().std(ddof=0), 1)
 
 
+def test_standardised_can_leave_the_targets_raw(tiny_rxrx1):
+    huvec = mod.select_cell_type(tiny_rxrx1, "HUVEC")
+    seen = Standardised(Spy(), y=False).fit(huvec).model.adata
+    ctrl = (seen.obs["perturbation"] == "control").to_numpy()
+    np.testing.assert_allclose(seen.X[ctrl].std(axis=0), 1)
+    np.testing.assert_array_equal(seen.X[~ctrl], huvec.X[~ctrl])
+
+
+def test_standardised_can_leave_the_proxies_raw(tiny_rxrx1):
+    huvec = mod.select_cell_type(tiny_rxrx1, "HUVEC")
+    seen = Standardised(Spy(), w=False).fit(huvec).model.adata
+    ctrl = (seen.obs["perturbation"] == "control").to_numpy()
+    np.testing.assert_array_equal(seen.X[ctrl], huvec.X[ctrl])
+
+
 def test_standardised_maps_predictions_back_to_embedding_coordinates(tiny_rxrx1):
     huvec = mod.select_cell_type(tiny_rxrx1, "HUVEC")
     model = Standardised(Spy()).fit(huvec)
@@ -200,8 +215,9 @@ def test_standardised_maps_predictions_back_to_embedding_coordinates(tiny_rxrx1)
 
 def test_fit_models_standardises_only_the_bridges(tiny_rxrx1):
     huvec = mod.select_cell_type(tiny_rxrx1, "HUVEC")
-    models = mod.fit_models(huvec, cfg(bridges=["kernel"], standardise_bridges=True))
+    models = mod.fit_models(huvec, cfg(bridges=["kernel"], standardise_w=True, standardise_y=False))
     assert isinstance(models["kernel bridge"], Standardised)
+    assert (models["kernel bridge"].w, models["kernel bridge"].y) == (True, False)
     assert not isinstance(models["shift (b=1)"], Standardised)
-    plain = mod.fit_models(huvec, cfg(bridges=["kernel"], standardise_bridges=False))
+    plain = mod.fit_models(huvec, cfg(bridges=["kernel"], standardise_w=False, standardise_y=False))
     assert not isinstance(plain["kernel bridge"], Standardised)

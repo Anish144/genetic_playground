@@ -62,8 +62,8 @@ def _fit_bridges(train: sc.AnnData, cfg: DictConfig) -> dict:
 
 
 def _make_bridge(kind: str, cfg: DictConfig):
-    """An unfitted kernel or neural bridge with the config's settings, standardised if
-    cfg.standardise_bridges."""
+    """An unfitted kernel or neural bridge with the config's settings, standardised per
+    cfg.standardise_w and cfg.standardise_y."""
     if kind == "kernel":
         bridge = KernelBridgeTransfer(cfg.bridge_reg, cfg.weight_by_cells)
     else:

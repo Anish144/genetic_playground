@@ -283,11 +283,11 @@ class Standardised:
     The model sees mean 0, variance 1 in every dimension: the proxy (control) cells are
     standardised by the training controls' pooled mean and std, the other cells by the mean and std
     of the training targets, the per-(perturbation, batch) means. Predictions undo the latter map.
-    Constant dimensions keep std 1.
+    Constant dimensions keep std 1. w=False or y=False leaves the proxies or the targets as they are.
     """
 
-    def __init__(self, model):
-        self.model = model
+    def __init__(self, model, w: bool = True, y: bool = True):
+        self.model, self.w, self.y = model, w, y
 
     @property
     def perturbations_(self) -> np.ndarray:
@@ -297,9 +297,10 @@ class Standardised:
         """Fit `model` on standardised `adata`; extra arguments go to its fit (checkpoints)."""
         X = _dense(adata.X)
         ctrl = is_control(adata)
-        self.w_mean_, self.w_std_ = _mean_and_std(X[ctrl])
+        self.w_mean_, self.w_std_ = _mean_and_std(X[ctrl]) if self.w else (0.0, 1.0)
         pairs = [perturbation_labels(adata)[~ctrl], batch_labels(adata)[~ctrl]]
-        self.y_mean_, self.y_std_ = _mean_and_std(pd.DataFrame(X[~ctrl]).groupby(pairs).mean())
+        means = pd.DataFrame(X[~ctrl]).groupby(pairs).mean()
+        self.y_mean_, self.y_std_ = _mean_and_std(means) if self.y else (0.0, 1.0)
         self.model.fit(self._standardise(adata), *args)
         return self
 

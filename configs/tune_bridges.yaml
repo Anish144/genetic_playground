@@ -4,7 +4,7 @@ defaults:  # folds, control split, scoring and neural settings as in train_batch
 
 inner_folds: 3       # K-fold over each outer fold's training batches; settings picked by mean mse
 n_configs: 20        # per bridge, drawn at random from its grid (the same draw in every fold)
-# Grids for standardised expression (standardise_bridges): the bridges' ridge solutions are linear
+# Grids for standardised expression (standardise_w, standardise_y): the bridges' ridge solutions are linear
 # in Y, and Adam with decoupled weight decay ignores the loss scale, so Y's scale moves no optimum.
 kernel_grid:         # 36 configurations
   reg: [1.0e-9, 1.0e-8, 1.0e-7, 1.0e-6, 1.0e-5, 1.0e-4]

@@ -40,8 +40,9 @@ def sample_configs(grid: DictConfig, n: int, seed: int) -> list[dict]:
 
 
 def with_standardisation(bridge, cfg: DictConfig):
-    """`bridge` (unfitted), wrapped in Standardised if cfg.standardise_bridges."""
-    return Standardised(bridge) if cfg.standardise_bridges else bridge
+    """`bridge` (unfitted), wrapped in Standardised of W and/or Y per cfg.standardise_w/_y."""
+    w, y = cfg.standardise_w, cfg.standardise_y
+    return Standardised(bridge, w, y) if w or y else bridge
 
 
 def make_kernel(config: dict, cfg: DictConfig):
