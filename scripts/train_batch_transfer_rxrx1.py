@@ -1,4 +1,4 @@
-"""Out-of-batch prediction of siRNA mean Phenom embeddings on RxRx1, one cell type at a time.
+"""Out-of-batch prediction of siRNA mean Phenom embeddings on RxRx1, of one cell type or all.
 
 - Data: data/rxrx1_phenom_4x4.h5ad (scripts/embed_rxrx1.py), crops of cfg.cell_type only.
 - Batch = experiment; treatment = siRNA; proxy W = the experiment's negative-control crops, plus
@@ -49,12 +49,29 @@ from genetic_perturbation_playground.utils.metrics import (
 )
 
 
-def select_cell_type(adata: sc.AnnData, cell_type: str) -> sc.AnnData:
-    """The crops of one cell type."""
+def select_cell_type(adata: sc.AnnData, cell_type: str | None) -> sc.AnnData:
+    """The crops of one cell type; with None, of all of them, each (cell type, siRNA) a perturbation
+    of its own ("<cell type>|<siRNA>"), since each experiment holds one cell type."""
+    if cell_type is None:
+        adata, labels = adata.copy(), perturbation_labels(adata)
+        cell_types = adata.obs["cell_type"].astype(str).to_numpy()
+        adata.obs["perturbation"] = np.where(
+            labels == "control", "control", np.char.add(cell_types + "|", labels)
+        )
+        return adata
     keep = (adata.obs["cell_type"] == cell_type).to_numpy()
     if not keep.any():
         raise ValueError(f"no {cell_type} crops in the RxRx1 embeddings")
     return adata[keep]
+
+
+def experiment_folds(batches: np.ndarray, n_folds: int, rng, cell_type: str | None) -> list:
+    """tuning.batch_folds over experiments. Over all cell types (cell_type None), each cell type's
+    experiments, named <cell type>-<nn>, are dealt round the folds so every fold trains on each."""
+    if cell_type is not None:
+        return batch_folds(batches, n_folds, rng)
+    dealt = sorted(rng.permutation(np.unique(batches)), key=lambda b: b.split("-")[0])
+    return [np.array(dealt[k::n_folds]) for k in range(n_folds)]
 
 
 def add_positive_controls_to_proxies(adata: sc.AnnData) -> sc.AnnData:
@@ -119,7 +136,7 @@ def cross_validate(adata: sc.AnnData, cfg: DictConfig) -> Iterator[pd.DataFrame]
         adata = add_positive_controls_to_proxies(adata)
     print(f"proxy crops: {is_control(adata).sum():,} of {adata.n_obs:,}", flush=True)
     batch = batch_labels(adata)
-    folds = batch_folds(batch, cfg.n_folds, np.random.default_rng(cfg.seed))
+    folds = experiment_folds(batch, cfg.n_folds, np.random.default_rng(cfg.seed), cfg.cell_type)
     for i, held_out in enumerate(folds):
         print(f"fold {i + 1}/{cfg.n_folds}: holding out {len(held_out)} experiments", flush=True)
         train = adata[~np.isin(batch, held_out)]

@@ -40,6 +40,7 @@ from omegaconf import DictConfig, OmegaConf
 from train_batch_transfer_expression import _fit_linear
 from train_batch_transfer_rxrx1 import (
     add_positive_controls_to_proxies,
+    experiment_folds,
     log_summary,
     negative_control_whitener,
     score_batches,
@@ -63,9 +64,8 @@ def inner_folds(adata: sc.AnnData, train_batches: np.ndarray, cfg: DictConfig, s
     """(training data, Evaluate) of each of cfg.inner_folds folds of `train_batches`, fit on the
     other folds; the whitener comes from those."""
     batch = batch_labels(adata)
-    for val_batches in tuning.batch_folds(
-        train_batches, cfg.inner_folds, np.random.default_rng(seed)
-    ):
+    rng = np.random.default_rng(seed)
+    for val_batches in experiment_folds(train_batches, cfg.inner_folds, rng, cfg.cell_type):
         train = adata[np.isin(batch, np.setdiff1d(train_batches, val_batches))]
         whiten = negative_control_whitener(train, cfg.whiten_eps)
         yield (
@@ -87,7 +87,7 @@ def nested_cv(adata: sc.AnnData, cfg: DictConfig) -> Iterator[tuple]:
     if cfg.positive_controls_as_proxies:
         adata = add_positive_controls_to_proxies(adata)
     batch = batch_labels(adata)
-    folds = tuning.batch_folds(batch, cfg.n_folds, np.random.default_rng(cfg.seed))
+    folds = experiment_folds(batch, cfg.n_folds, np.random.default_rng(cfg.seed), cfg.cell_type)
     for i, held_out in enumerate(folds):
         print(f"fold {i + 1}/{cfg.n_folds}: tuning", flush=True)
         train_batches = np.setdiff1d(np.unique(batch), held_out)

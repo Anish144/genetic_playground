@@ -48,6 +48,19 @@ def test_select_cell_type(tiny_rxrx1):
         mod.select_cell_type(tiny_rxrx1, "HUVCE")
 
 
+def test_all_cell_types_make_each_cell_type_and_sirna_one_perturbation(tiny_rxrx1):
+    labels = set(mod.select_cell_type(tiny_rxrx1, None).obs["perturbation"])
+    assert labels == {"control"} | {
+        f"{c}|{s}" for c in ["HUVEC", "HEPG2"] for s in ["p1", "s1", "s2"]
+    }
+
+
+def test_folds_over_all_cell_types_keep_every_cell_type_in_training():
+    batches = [f"{c}-{i}" for c, n in [("HUVEC", 6), ("U2OS", 2)] for i in range(n)]
+    folds = mod.experiment_folds(np.array(batches), 2, np.random.default_rng(0), cell_type=None)
+    assert [sorted(b.split("-")[0] for b in f) for f in folds] == [["HUVEC"] * 3 + ["U2OS"]] * 2
+
+
 def test_whitened_mse_of_perfect_prediction_is_zero(tiny_rxrx1):
     test = tiny_rxrx1[tiny_rxrx1.obs["batch"] == "HUVEC-1"]
     obs_means = {

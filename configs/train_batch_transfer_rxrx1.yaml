@@ -6,7 +6,7 @@ embeddings:         # which embed_rxrx1 output to load: its settings, see config
   grid: 4
   standardise_sites: false
   min_nuclei_fraction: 0.0
-cell_type: HUVEC    # one cell type per run; HUVEC has the most experiments (24)
+cell_type: HUVEC    # one cell type per run (HUVEC has the most experiments, 24); null = all 51, pooled
 n_folds: 5          # K-fold over experiments; each experiment is held out exactly once
 seed: 0             # shuffles experiments into folds
 whiten_eps: 1.0e-3  # eigenvalue floor of the metric's whitening, relative to the mean eigenvalue
