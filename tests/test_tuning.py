@@ -34,7 +34,7 @@ def test_selection_ranks_configurations_by_their_mean_over_inner_folds():
             "phi_size": [None] * 4 + [8.0, 8.0, None, None],
             "inner_fold": [0, 1, 0, 1, 0, 1, 0, 1],
             "mse": [0.1, 0.9, 0.4, 0.4, 0.3, 0.3, 0.5, 0.7],  # reg 1 wins fold 0, reg 2 on average
-            "mse_raw": [1.0, 3.0, 2.0, 2.0, 1.0, 1.0, 5.0, 7.0],
+            "pearson": [1.0, 3.0, 2.0, 2.0, 1.0, 1.0, 5.0, 7.0],
         }
     )
     averaged = tuning.mean_over_inner_folds(inner)
@@ -44,7 +44,7 @@ def test_selection_ranks_configurations_by_their_mean_over_inner_folds():
     }
     assert isinstance(tuning.select(averaged)["neural"]["phi_size"], int)
     shift = averaged[averaged["bridge"] == "shift (b=1)"].iloc[0]
-    assert (shift["mse"], shift["mse_raw"]) == pytest.approx((0.6, 6.0))
+    assert (shift["mse"], shift["pearson"]) == pytest.approx((0.6, 6.0))
 
 
 class Spy:

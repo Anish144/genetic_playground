@@ -22,7 +22,7 @@ from genetic_perturbation_playground.model.batch_transfer import (
     Standardised,
 )
 
-METRICS = ["mse", "mse_raw", "pearson", "pearson_top20"]  # of either data set
+METRICS = ["mse", "pearson", "pearson_top20"]  # of either data set
 INT_SETTINGS = ["phi_size", "psi_size", "n_steps", "depth", "cross_fit_folds"]
 Evaluate = Callable[[object], dict]  # fitted model -> its validation scores, {metric: value}
 

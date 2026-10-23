@@ -6,10 +6,7 @@
 - Models: the linear ones and the bridges of train_batch_transfer_expression, plus TVN
   (model/tvn.py); a held-out experiment is predicted from its proxy crops alone.
 - Folds: K-fold over experiments. Scores per (treatment siRNA, held-out experiment), on means:
-  mse      squared error after whitening by the training experiments' within-experiment
-           negative-control covariance (utils/metrics.control_whitener): errors in units of typical
-           control variation, the same yardstick whichever proxies the models see
-  mse_raw  squared error in Phenom coordinates, to check the ranking does not hinge on whitening
+  mse      squared error in Phenom coordinates
 
 Config: configs/train_batch_transfer_rxrx1.yaml. Usage:
 
@@ -43,10 +40,7 @@ from genetic_perturbation_playground.model.batch_transfer import (
 )
 from genetic_perturbation_playground.model.tvn import TVNTransferModel
 from genetic_perturbation_playground.tuning import batch_folds
-from genetic_perturbation_playground.utils.metrics import (
-    control_whitener,
-    mse,
-)
+from genetic_perturbation_playground.utils.metrics import mse
 
 
 def select_cell_type(adata: sc.AnnData, cell_type: str | None) -> sc.AnnData:
@@ -89,26 +83,24 @@ def fit_models(train: sc.AnnData, cfg: DictConfig) -> dict:
     return models | _fit_bridges(train, cfg)
 
 
-def score_batch(models: dict, test: sc.AnnData, whiten) -> pd.DataFrame:
+def score_batch(models: dict, test: sc.AnnData) -> pd.DataFrame:
     """Scores of each model on one held-out experiment: (perturbation, metric, model, value)."""
     labels = perturbation_labels(test)
     present = np.unique(labels[_wells(test, "treatment")])
     perts = np.intersect1d(present, next(iter(models.values())).perturbations_)
     X = _dense(test.X)
     obs = np.stack([X[labels == p].mean(axis=0) for p in perts])
-    rows = []
-    for name, model in models.items():
-        pred = model.predict(perts, test)
-        rows.append(_long(perts, name, "mse", mse(whiten(pred), whiten(obs))))
-        rows.append(_long(perts, name, "mse_raw", mse(pred, obs)))
+    rows = [
+        _long(perts, name, "mse", mse(m.predict(perts, test), obs)) for name, m in models.items()
+    ]
     return pd.concat(rows, ignore_index=True)
 
 
-def score_batches(models: dict, adata: sc.AnnData, batches, whiten) -> pd.DataFrame:
+def score_batches(models: dict, adata: sc.AnnData, batches) -> pd.DataFrame:
     """score_batch on each of `batches` of `adata`, tagged with its batch."""
     batch = batch_labels(adata)
     return pd.concat(
-        [score_batch(models, adata[batch == b], whiten).assign(batch=b) for b in batches],
+        [score_batch(models, adata[batch == b]).assign(batch=b) for b in batches],
         ignore_index=True,
     )
 
@@ -118,20 +110,14 @@ def _wells(adata: sc.AnnData, well_type: str) -> np.ndarray:
     return (adata.obs["well_type"] == well_type).to_numpy()
 
 
-def negative_control_whitener(train: sc.AnnData, eps: float):
-    """The metric's whitener (utils/metrics.control_whitener) from the negative controls of `train`."""
-    negative = _wells(train, "negative_control")
-    return control_whitener(_dense(train.X[negative]), batch_labels(train)[negative], eps)
-
-
 def _long(perts: np.ndarray, model: str, metric: str, values: np.ndarray) -> pd.DataFrame:
     """One model's per-perturbation values of one metric as long-table rows."""
     return pd.DataFrame({"perturbation": perts, "metric": metric, "model": model, "value": values})
 
 
 def cross_validate(adata: sc.AnnData, cfg: DictConfig) -> Iterator[pd.DataFrame]:
-    """K-fold over experiments, yielding each fold's scores as soon as it is done. Models and the
-    metric's whitener are fit on the training experiments."""
+    """K-fold over experiments, yielding each fold's scores as soon as it is done. Models are fit
+    on the training experiments."""
     if cfg.positive_controls_as_proxies:
         adata = add_positive_controls_to_proxies(adata)
     print(f"proxy crops: {is_control(adata).sum():,} of {adata.n_obs:,}", flush=True)
@@ -140,12 +126,11 @@ def cross_validate(adata: sc.AnnData, cfg: DictConfig) -> Iterator[pd.DataFrame]
     for i, held_out in enumerate(folds):
         print(f"fold {i + 1}/{cfg.n_folds}: holding out {len(held_out)} experiments", flush=True)
         train = adata[~np.isin(batch, held_out)]
-        whiten = negative_control_whitener(train, cfg.whiten_eps)
         fold_cfg = OmegaConf.merge(cfg, {"neural": {"log_key": f"fold {i + 1}/neural bridge"}})
         start = time.perf_counter()
         models = fit_models(train, fold_cfg)
         print(f"  fit {len(models)} models in {time.perf_counter() - start:.0f}s", flush=True)
-        yield score_batches(models, adata, held_out, whiten).assign(fold=i)
+        yield score_batches(models, adata, held_out).assign(fold=i)
 
 
 def summary(scores: pd.DataFrame) -> pd.DataFrame:

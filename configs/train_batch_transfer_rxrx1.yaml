@@ -9,7 +9,6 @@ embeddings:         # which embed_rxrx1 output to load: its settings, see config
 cell_type: HUVEC    # one cell type per run (HUVEC has the most experiments, 24); null = all 51, pooled
 n_folds: 5          # K-fold over experiments; each experiment is held out exactly once
 seed: 0             # shuffles experiments into folds
-whiten_eps: 1.0e-3  # eigenvalue floor of the metric's whitening, relative to the mean eigenvalue
 positive_controls_as_proxies: false  # proxy W = negative controls; true adds the positive controls
 bridge_reg: 1.0e-6  # ridge of both bridges, scaled by training crops N
 weight_by_cells: true  # bridges weight each (siRNA, experiment) mean by its crops; false = equal

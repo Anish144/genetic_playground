@@ -9,7 +9,6 @@ from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 
 from genetic_perturbation_playground.model.batch_transfer import Standardised
-from genetic_perturbation_playground.utils.metrics import control_whitener
 
 ROOT = Path(__file__).parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -61,7 +60,7 @@ def test_folds_over_all_cell_types_keep_every_cell_type_in_training():
     assert [sorted(b.split("-")[0] for b in f) for f in folds] == [["HUVEC"] * 3 + ["U2OS"]] * 2
 
 
-def test_whitened_mse_of_perfect_prediction_is_zero(tiny_rxrx1):
+def test_mse_of_perfect_prediction_is_zero(tiny_rxrx1):
     test = tiny_rxrx1[tiny_rxrx1.obs["batch"] == "HUVEC-1"]
     obs_means = {
         p: test.X[(test.obs["perturbation"] == p).to_numpy()].mean(0) for p in ["s1", "s2"]
@@ -73,9 +72,9 @@ def test_whitened_mse_of_perfect_prediction_is_zero(tiny_rxrx1):
         def predict(self, perts, test):
             return np.stack([obs_means[p] for p in perts])
 
-    scores = mod.score_batch({"oracle": Oracle()}, test, lambda z: 2 * z)
+    scores = mod.score_batch({"oracle": Oracle()}, test)
     np.testing.assert_allclose(scores["value"], 0.0, atol=1e-12)
-    assert set(scores["metric"]) == {"mse", "mse_raw"}
+    assert set(scores["metric"]) == {"mse"}
 
 
 def test_positive_controls_are_never_scored(tiny_rxrx1):
@@ -87,7 +86,7 @@ def test_positive_controls_are_never_scored(tiny_rxrx1):
         def predict(self, perts, test):
             return np.zeros((len(perts), test.n_vars))
 
-    scores = mod.score_batch({"zero": Zero()}, test, lambda z: z)
+    scores = mod.score_batch({"zero": Zero()}, test)
     assert set(scores["perturbation"]) == {"s1", "s2"}
 
 
@@ -99,24 +98,18 @@ def test_positive_controls_join_the_proxies(tiny_rxrx1):
     assert set(adata.obs.loc[adata.obs["well_type"] == "treatment", "perturbation"]) == {"s1", "s2"}
 
 
-def test_whitener_sees_training_negative_controls_only(tiny_rxrx1, monkeypatch):
-    seen = []
-
-    def recording_whitener(X, batch, eps):
-        seen.append((set(batch), len(X)))
-        return control_whitener(X, batch, eps)
-
-    monkeypatch.setattr(mod, "control_whitener", recording_whitener)
+def test_cross_validate_holds_out_each_experiment_once(tiny_rxrx1):
     huvec = mod.select_cell_type(tiny_rxrx1, "HUVEC")
     folds = list(
         mod.cross_validate(huvec, cfg(n_folds=3, bridges=[], positive_controls_as_proxies=True))
     )
-    assert len(folds) == 3
-    for fold, (scores, (batches, n_crops)) in enumerate(zip(folds, seen, strict=True)):
-        assert set(scores["fold"]) == {fold}
-        assert "tvn" in set(scores["model"])
-        assert not batches & set(scores["batch"])
-        assert n_crops == 2 * 30
+    assert [set(scores["fold"]) for scores in folds] == [{0}, {1}, {2}]
+    assert sorted(b for scores in folds for b in set(scores["batch"])) == [
+        "HUVEC-1",
+        "HUVEC-2",
+        "HUVEC-3",
+    ]
+    assert all("tvn" in set(scores["model"]) for scores in folds)
 
 
 def test_cross_validate_fits_the_neural_bridge(tiny_rxrx1):
@@ -161,20 +154,15 @@ def test_log_summary_writes_every_model_and_metric(monkeypatch):
     monkeypatch.setattr(mod.wandb, "summary", logged)
     scores = pd.DataFrame(
         {
-            "perturbation": ["s1", "s1", "s1", "s1"],
-            "metric": ["mse", "mse_raw", "mse", "mse_raw"],
-            "model": ["shift", "shift", "tvn", "tvn"],
-            "value": [1.0, 2.0, 3.0, 4.0],
+            "perturbation": ["s1", "s1"],
+            "metric": ["mse", "mse"],
+            "model": ["shift", "tvn"],
+            "value": [1.0, 3.0],
             "batch": "e1",
         }
     )
     mod.log_summary("fold 2", mod.summary(scores))
-    assert logged == {
-        "fold 2/shift/mse": 1.0,
-        "fold 2/shift/mse_raw": 2.0,
-        "fold 2/tvn/mse": 3.0,
-        "fold 2/tvn/mse_raw": 4.0,
-    }
+    assert logged == {"fold 2/shift/mse": 1.0, "fold 2/tvn/mse": 3.0}
 
 
 class Spy:

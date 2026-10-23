@@ -7,9 +7,7 @@ held out for validation once. n_configs configurations per bridge, drawn at rand
 one; each neural configuration is trained once per inner fold to the last of neural_checkpoints
 and scored at each. The configuration with the lowest validation mse averaged over the inner
 folds is refit on all training experiments and scored on the outer fold, next to the linear
-models and TVN. shift (b=1) is scored on the inner folds too, as a reference only. Each score's
-whitener comes from the experiments its models were fit on.
-
+models and TVN. shift (b=1) is scored on the inner folds too, as a reference only.
 W&B: one run per job, named name. Per outer fold k: the selected settings (fold k/selected/...),
 their mean validation scores and shift's (fold k/validation/<bridge>/<metric>), the training
 loss of the refit neural bridge (fold k/neural bridge/loss, against its step) and every model's
@@ -42,7 +40,6 @@ from train_batch_transfer_rxrx1 import (
     add_positive_controls_to_proxies,
     experiment_folds,
     log_summary,
-    negative_control_whitener,
     score_batches,
     select_cell_type,
     summary,
@@ -54,24 +51,20 @@ from genetic_perturbation_playground.model.batch_transfer import batch_labels
 from genetic_perturbation_playground.model.tvn import TVNTransferModel
 
 
-def validation_scores(model, val: sc.AnnData, whiten) -> dict:
-    """mse and mse_raw of `model` on `val`: siRNAs averaged within each experiment, then experiments."""
-    scores = score_batches({"bridge": model}, val, np.unique(batch_labels(val)), whiten)
+def validation_scores(model, val: sc.AnnData) -> dict:
+    """mse of `model` on `val`: siRNAs averaged within each experiment, then experiments."""
+    scores = score_batches({"bridge": model}, val, np.unique(batch_labels(val)))
     return summary(scores).loc["bridge"].to_dict()
 
 
 def inner_folds(adata: sc.AnnData, train_batches: np.ndarray, cfg: DictConfig, seed) -> Iterator:
     """(training data, Evaluate) of each of cfg.inner_folds folds of `train_batches`, fit on the
-    other folds; the whitener comes from those."""
+    other folds."""
     batch = batch_labels(adata)
     rng = np.random.default_rng(seed)
     for val_batches in experiment_folds(train_batches, cfg.inner_folds, rng, cfg.cell_type):
         train = adata[np.isin(batch, np.setdiff1d(train_batches, val_batches))]
-        whiten = negative_control_whitener(train, cfg.whiten_eps)
-        yield (
-            train,
-            partial(validation_scores, val=adata[np.isin(batch, val_batches)], whiten=whiten),
-        )
+        yield train, partial(validation_scores, val=adata[np.isin(batch, val_batches)])
 
 
 def log_selected(fold: int, selected: dict) -> None:
@@ -99,11 +92,10 @@ def nested_cv(adata: sc.AnnData, cfg: DictConfig) -> Iterator[tuple]:
         train = adata[np.isin(batch, train_batches)]
         models = _fit_linear(train) | {"tvn": TVNTransferModel().fit(train)}
         models |= tuning.fit_selected(train, selected, cfg, f"fold {i + 1}/neural bridge")
-        whiten = negative_control_whitener(train, cfg.whiten_eps)
         yield (
             inner.assign(fold=i),
             pd.DataFrame([{"fold": i, "bridge": b, **s} for b, s in selected.items()]),
-            score_batches(models, adata, held_out, whiten).assign(fold=i),
+            score_batches(models, adata, held_out).assign(fold=i),
         )
 
 
