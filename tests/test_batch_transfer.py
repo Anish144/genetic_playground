@@ -16,6 +16,7 @@ from genetic_perturbation_playground.model.batch_transfer import (
 from genetic_perturbation_playground.model.proxy_unconfounded import MarginalEmbeddingBridge
 from genetic_perturbation_playground.model.proxy_unconfounded_neural import (
     NeuralMarginalEmbeddingBridge,
+    NeuralPerXEmbeddingBridge,
     _features,
     _mlp,
     _weighted_ridge,
@@ -215,3 +216,71 @@ def test_mlp_hidden_layers_are_swiglu_with_residual_connections_where_sizes_matc
     h1 = swiglu(first, x)  # 3 -> 4 units: no residual
     h2 = h1 + swiglu(second.layer, h1)  # 4 -> 4 units: residual
     torch.testing.assert_close(mlp(x), out(h2))
+
+
+def _categorical_envs(rng, n_envs=4, n_cats=3, d_y=2):
+    """One-hot xs (every category in every environment, but the last misses category 0), ys, ws
+    and counts."""
+    cats = [np.arange(n_cats)[e == n_envs - 1 :] for e in range(n_envs)]
+    xs = [np.eye(n_cats)[c] for c in cats]
+    ys = [rng.normal(size=(len(c), d_y)) for c in cats]
+    ws = [rng.normal(size=(7, 2)) for _ in range(n_envs)]
+    counts = [rng.integers(1, 4, size=len(c)) for c in cats]
+    return xs, ys, ws, counts
+
+
+def _dense_fit(bridge, xs, ys, ws, counts, held=None):
+    """The shared bridge's fit with phi(x) = x on `bridge`'s psi (features x ⊗ mu_e): A solved
+    without environment `held` and its weighted sse on `held` (on all pairs if None)."""
+    data = NeuralMarginalEmbeddingBridge._to_tensors(bridge, xs, ys, ws, counts)
+    feats = _features(data.x, bridge._embed(data.w_envs)[data.env])
+    out = data.env == (-1 if held is None else held)
+    A = _weighted_ridge(feats[~out], data.y[~out], data.c[~out], bridge.reg)
+    scored = out if held is not None else ~out
+    return _weighted_sse(feats[scored] @ A, data.y[scored], data.c[scored]), A
+
+
+def test_per_x_bridge_is_the_shared_bridge_with_phi_the_identity():
+    rng = np.random.default_rng(0)
+    xs, ys, ws, counts = _categorical_envs(rng)
+    bridge = NeuralPerXEmbeddingBridge(n_steps=2, n_features_w=2, reg=1e-2)
+    bridge.fit(xs, ys, ws, counts)
+    with torch.no_grad():
+        loss, A = bridge._stage2(bridge._to_tensors(xs, ys, ws, counts))
+        sse, dense_A = _dense_fit(bridge, xs, ys, ws, counts)
+    torch.testing.assert_close(loss, sse / sum(c.sum() for c in counts))
+    torch.testing.assert_close(A.flatten(0, 1), dense_A)
+    torch.testing.assert_close(bridge.A_, A)
+
+
+def test_per_x_cross_fit_with_one_fold_per_environment_is_leave_one_environment_out():
+    rng = np.random.default_rng(0)
+    xs, ys, ws, counts = _categorical_envs(rng)
+    bridge = NeuralPerXEmbeddingBridge(n_steps=2, n_features_w=2, reg=1e-2)
+    bridge.fit(xs, ys, ws, counts)
+    bridge.cross_fit_folds = 4
+    with torch.no_grad():
+        loss = bridge._cross_fit_loss(bridge._to_tensors(xs, ys, ws, counts))
+        sse = sum(_dense_fit(bridge, xs, ys, ws, counts, held=e)[0] for e in range(4))
+    torch.testing.assert_close(loss, sse / sum(c.sum() for c in counts))
+
+
+def test_per_x_bridge_predicts_each_category_from_its_own_A():
+    rng = np.random.default_rng(0)
+    xs, ys, ws, counts = _categorical_envs(rng)
+    bridge = NeuralPerXEmbeddingBridge(n_steps=2, n_features_w=2).fit(xs, ys, ws, counts)
+    w = rng.normal(size=(5, 2))
+    with torch.no_grad():
+        mu = bridge.psi_(torch.as_tensor(w)).mean(dim=0)
+    pred = bridge.predict(np.eye(3)[[2, 0]], w)
+    np.testing.assert_allclose(pred, (mu @ bridge.A_[[2, 0]]).numpy())
+
+
+def test_neural_bridge_transfer_per_perturbation_uses_the_per_x_bridge():
+    rng = np.random.default_rng(0)
+    data = _cells(rng)
+    train, test = data[data.obs["batch"] != "b3"], data[data.obs["batch"] == "b3"]
+    perts = sorted(set(test.obs["perturbation"]) - {"control"})
+    model = NeuralBridgeTransfer(per_perturbation=True, n_features_w=3, n_steps=2).fit(train)
+    assert isinstance(model.bridge_, NeuralPerXEmbeddingBridge)
+    assert model.predict(perts, test).shape == (len(perts), 5)

@@ -16,6 +16,9 @@ Stage 1: mu_e = mean_j psi(w_ej), the closed-form embedding of each environment 
 means no regression on x is needed). Stage 2: A = ridge regression of y on the p q features
 phi(x_i) ⊗ mu_env(i), also closed form. phi and psi are trained with AdamW on the stage-2 squared
 error, backpropagating through A and mu_e (as in DFPV, Xu et al., 2021).
+
+NeuralPerXEmbeddingBridge is the special case phi(x) = x for one-hot x: a separate A_x per
+category, h(x, w) = A_x^T psi(w), so only psi is shared across categories.
 """
 
 from collections.abc import Callable, Collection
@@ -89,7 +92,7 @@ def _normal_equations(feats: torch.Tensor, y: torch.Tensor, c: torch.Tensor) -> 
 
 def _ridge_solve(gram: torch.Tensor, cross: torch.Tensor, weight: torch.Tensor, reg: float):
     """Ridge solution from the normal equations, with penalty reg * weight * |A|^2."""
-    eye = torch.eye(gram.shape[0], dtype=gram.dtype, device=gram.device)
+    eye = torch.eye(gram.shape[-1], dtype=gram.dtype, device=gram.device)
     return torch.linalg.solve(gram + reg * weight * eye, cross)
 
 
@@ -241,12 +244,15 @@ class NeuralMarginalEmbeddingBridge:
 
     def _random_folds(self, data: _Stage2Data) -> torch.Tensor:
         """Fold of each pair: its environment's fold in a random split of the environments."""
-        n_envs = len(data.w_envs)
+        return self._env_folds(len(data.w_envs))[data.env]
+
+    def _env_folds(self, n_envs: int) -> torch.Tensor:
+        """Fold of each environment in a random split into cross_fit_folds (at most n_envs)."""
         n_folds = min(self.cross_fit_folds, n_envs)
         if n_folds < 2:
             raise ValueError("cross-fitting needs at least two folds and two environments")
         env_fold = torch.randperm(n_envs) % n_folds  # balanced: fold sizes differ by at most one
-        return env_fold.to(data.env.device)[data.env]
+        return env_fold.to(self.device)
 
     def _solve_A(self, data: _Stage2Data) -> None:
         """Set A_ to the ridge solution for the current phi and psi."""
@@ -266,3 +272,94 @@ class NeuralMarginalEmbeddingBridge:
     def _embed(self, w_envs: list[torch.Tensor]) -> torch.Tensor:
         """Mean psi features of each environment's proxies, shape (D, q)."""
         return torch.stack([self.psi_(w).mean(dim=0) for w in w_envs])
+
+
+class _GroupedData(NamedTuple):
+    """Sums of the pairs per (category, environment), and per-environment proxies."""
+
+    c: torch.Tensor  # (G, D) replicate counts
+    cy: torch.Tensor  # (G, D, d_y) count-weighted sums of y
+    cyy: torch.Tensor  # (D,) count-weighted sums of |y|^2 / d_y
+    w_envs: list[torch.Tensor]  # D tensors of shape (m_e, d_w)
+
+
+def _sums(data: _GroupedData, mu: torch.Tensor, envs: torch.Tensor) -> tuple:
+    """Per-category Gram (G, q, q) and cross term (G, q, d_y), sum of c |y|^2 / d_y and total
+    count over the pairs of the environments in the mask `envs` (D,)."""
+    c = data.c * envs
+    gram = (c[:, :, None] * mu).transpose(1, 2) @ mu
+    cross = (mu * envs[:, None]).T @ data.cy
+    return gram, cross, data.cyy[envs].sum(), c.sum()
+
+
+def _sse(A: torch.Tensor, gram: torch.Tensor, cross: torch.Tensor, cyy: torch.Tensor):
+    """sum_i c_i |y_i - A_x(i)^T mu_i|^2 / d_y over the pairs that `gram`, `cross`, `cyy` sum."""
+    return cyy - (2 * (A * cross).sum() - (A * (gram @ A)).sum()) / cross.shape[-1]
+
+
+@dataclass
+class NeuralPerXEmbeddingBridge(NeuralMarginalEmbeddingBridge):
+    """Bridge h(x, w) = A_x^T psi(w) with a separate A_x in R^{q x d_y} per one-hot category x.
+
+    NeuralMarginalEmbeddingBridge with phi(x) = x: no response surface is shared across categories,
+    only psi. A_x is the ridge regression of y on mu_e over x's pairs alone, with the same penalty
+    reg * N. n_features, width_x are unused; ys must be 2-D. The losses are computed from sums per
+    (category, environment), never per pair: memory and time grow as G q d_y, not (G q)^2.
+
+    After ``fit``: ``psi_`` and ``A_``, shape (G, q, d_y); ``phi_`` is the identity.
+    """
+
+    def fit(self, xs, ys, ws, counts=None, checkpoints=(), on_checkpoint=None):
+        """As NeuralMarginalEmbeddingBridge.fit; each row of xs[e] is one-hot."""
+        torch.manual_seed(self.seed)
+        data = self._to_tensors(xs, ys, ws, counts)
+        self.phi_ = nn.Identity()
+        self.psi_ = _mlp(data.w_envs[0].shape[1], self.width_w, self.depth, self.n_features_w)
+        self.psi_.to(self.device)
+        self._train(data, checkpoints, on_checkpoint)
+        self._solve_A(data)
+        return self
+
+    def predict(self, x: np.ndarray, w_target: np.ndarray) -> np.ndarray:
+        """E[Y | x, e*], shape (n_new, d_y), for one-hot x and the target's proxies ``w_target``."""
+        with torch.no_grad():
+            mu = self.psi_(_tensor(w_target, self.device)).mean(dim=0)  # (q,)
+            pred = mu @ self.A_  # (G, d_y), every category's prediction
+            return pred[_tensor(x, self.device).argmax(dim=1)].cpu().numpy()
+
+    def _to_tensors(self, xs, ys, ws, counts) -> _GroupedData:
+        """The pairs summed per (category, environment), on the device."""
+        pairs = super()._to_tensors(xs, ys, ws, counts)
+        n_cats, n_envs = pairs.x.shape[1], len(ws)
+        cell = pairs.x.argmax(dim=1) * n_envs + pairs.env  # flat (category, environment) index
+
+        def summed(values, index, n):
+            zeros = torch.zeros(n, *values.shape[1:], dtype=values.dtype, device=values.device)
+            return zeros.index_add(0, index, values)
+
+        n = n_cats * n_envs
+        return _GroupedData(
+            c=summed(pairs.c, cell, n).reshape(n_cats, n_envs),
+            cy=summed(pairs.c[:, None] * pairs.y, cell, n).reshape(n_cats, n_envs, -1),
+            cyy=summed(pairs.c * (pairs.y**2).mean(dim=1), pairs.env, n_envs),
+            w_envs=pairs.w_envs,
+        )
+
+    def _stage2(self, data: _GroupedData) -> tuple[torch.Tensor, torch.Tensor]:
+        """Closed-form ridge A_x of every category, and the weighted squared error."""
+        mu = self._embed(data.w_envs)
+        gram, cross, cyy, n = _sums(data, mu, torch.ones(len(mu), dtype=bool, device=mu.device))
+        A = _ridge_solve(gram, cross, n, self.reg)
+        return _sse(A, gram, cross, cyy) / n, A
+
+    def _cross_fit_loss(self, data: _GroupedData) -> torch.Tensor:
+        """Weighted squared error of each fold's pairs under A_x solved on the other folds."""
+        mu = self._embed(data.w_envs)
+        fold = self._env_folds(len(mu))
+        parts = [_sums(data, mu, fold == k) for k in range(int(fold.max()) + 1)]
+        gram, cross, _, n = map(sum, zip(*parts, strict=True))
+        sse = sum(
+            _sse(_ridge_solve(gram - g, cross - b, n - m, self.reg), g, b, yy)
+            for g, b, yy, m in parts
+        )
+        return sse / n

@@ -11,6 +11,7 @@ bridges: [kernel, neural]  # bridge models to fit next to the linear ones; neura
 standardise_w: true  # bridges see mean 0, variance 1 proxies W (control cells), by the training controls
 standardise_y: true  # and targets Y, by the training (perturbation, batch) means; predictions mapped back
 neural:               # NeuralBridgeTransfer settings; see model/proxy_unconfounded_neural.py
+  per_perturbation: false  # true: a separate A_x per perturbation, Y = A_x^T mu_e; phi unused
   n_features: 32      # p, output dimension of phi (perturbation side)
   n_features_w: 32    # q, output dimension of psi (batch side); cost grows with (p q)^2
   width_x: 64         # hidden units of phi; psi's width_w defaults to 64

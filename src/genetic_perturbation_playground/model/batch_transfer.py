@@ -11,6 +11,7 @@ from genetic_perturbation_playground.model.proxy_unconfounded import (
 )
 from genetic_perturbation_playground.model.proxy_unconfounded_neural import (
     NeuralMarginalEmbeddingBridge,
+    NeuralPerXEmbeddingBridge,
 )
 from genetic_perturbation_playground.utils.kernels import RBF, median_heuristic
 
@@ -243,11 +244,16 @@ class NeuralBridgeTransfer:
 
     Fit on the same count-weighted per-(perturbation, batch) means as KernelBridgeTransfer. Unlike
     the delta kernel, phi(x) and A are shared, so perturbations borrow strength from each other.
-    weight_by_cells=False gives every (perturbation, batch) mean equal weight instead.
+    per_perturbation=True fits NeuralPerXEmbeddingBridge instead: a separate response A_x to the
+    batch embedding per perturbation, only psi shared. weight_by_cells=False gives every
+    (perturbation, batch) mean equal weight instead.
     """
 
-    def __init__(self, weight_by_cells: bool = True, **bridge_kwargs):
+    def __init__(
+        self, weight_by_cells: bool = True, per_perturbation: bool = False, **bridge_kwargs
+    ):
         self.weight_by_cells = weight_by_cells
+        self.per_perturbation = per_perturbation
         self.bridge_kwargs = bridge_kwargs
 
     def fit(self, adata: sc.AnnData, checkpoints=(), on_checkpoint=None) -> "NeuralBridgeTransfer":
@@ -259,7 +265,10 @@ class NeuralBridgeTransfer:
         ys = [data.y[e] for e in envs]
         counts = [data.weight[e] for e in envs]
         # set before fitting: checkpoint callbacks predict with it
-        self.bridge_ = NeuralMarginalEmbeddingBridge(**self.bridge_kwargs)
+        bridge = (
+            NeuralPerXEmbeddingBridge if self.per_perturbation else NeuralMarginalEmbeddingBridge
+        )
+        self.bridge_ = bridge(**self.bridge_kwargs)
         self.bridge_.fit(xs, ys, data.ctrl, counts, checkpoints, on_checkpoint)
         return self
 
