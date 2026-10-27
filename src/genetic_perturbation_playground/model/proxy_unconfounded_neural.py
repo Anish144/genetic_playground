@@ -30,6 +30,7 @@ import numpy as np
 import torch
 import wandb
 from torch import nn
+from torch.utils.checkpoint import checkpoint
 from tqdm import trange
 
 
@@ -353,13 +354,20 @@ class NeuralPerXEmbeddingBridge(NeuralMarginalEmbeddingBridge):
         return _sse(A, gram, cross, cyy) / n, A
 
     def _cross_fit_loss(self, data: _GroupedData) -> torch.Tensor:
-        """Weighted squared error of each fold's pairs under A_x solved on the other folds."""
+        """Weighted squared error of each fold's pairs under A_x solved on the other folds.
+
+        Each fold's term is checkpointed: its G q d_y intermediates are recomputed in the backward
+        pass rather than kept for all folds at once (out of memory on Replogle otherwise).
+        """
         mu = self._embed(data.w_envs)
         fold = self._env_folds(len(mu))
-        parts = [_sums(data, mu, fold == k) for k in range(int(fold.max()) + 1)]
-        gram, cross, _, n = map(sum, zip(*parts, strict=True))
         sse = sum(
-            _sse(_ridge_solve(gram - g, cross - b, n - m, self.reg), g, b, yy)
-            for g, b, yy, m in parts
+            checkpoint(self._fold_sse, data, mu, fold == k, use_reentrant=False)
+            for k in range(int(fold.max()) + 1)
         )
-        return sse / n
+        return sse / data.c.sum()
+
+    def _fold_sse(self, data: _GroupedData, mu: torch.Tensor, held: torch.Tensor) -> torch.Tensor:
+        """Weighted sse of the `held` environments' pairs under A_x solved on the others."""
+        gram, cross, _, n = _sums(data, mu, ~held)
+        return _sse(_ridge_solve(gram, cross, n, self.reg), *_sums(data, mu, held)[:3])
