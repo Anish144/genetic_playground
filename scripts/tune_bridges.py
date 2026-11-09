@@ -10,10 +10,14 @@ on the inner folds too, as a reference only.
 Config: configs/tune_bridges.yaml (grids; everything else from train_batch_transfer_expression.yaml).
 Usage:
 
-    sbatch -J tune --time=6-00:00:00 hpc/run.sbatch scripts/tune_bridges.py name=tune
+    sbatch -J tune --time=2-00:00:00 hpc/run.sbatch scripts/tune_bridges.py name=tune
+    sbatch -J perx --time=2-00:00:00 hpc/run.sbatch scripts/tune_bridges.py \
+        --config-name tune_bridges_perx name=perx
 
 Writes inner_scores.csv (every configuration on every inner fold), selected.csv (winner per outer
-fold and bridge), scores_per_perturbation.csv, scores_per_batch.csv and plots/ to the Hydra run dir.
+fold and bridge), scores_per_perturbation.csv, scores_per_batch.csv, scores_per_pair.csv (each
+model's mse, the squared error averaged over genes, per (perturbation, held-out batch)) and plots/
+to the Hydra run dir.
 """
 
 from collections.abc import Iterator
@@ -84,7 +88,8 @@ def _inner_folds(adata, batch, seen, train_batches, cfg: DictConfig, seed) -> It
 def nested_cv(adata: sc.AnnData, cfg: DictConfig) -> tuple:
     """Tune per outer fold on its inner folds, then score the tuned bridges on the outer fold.
 
-    Returns (inner scores, selected settings, per-perturbation scores, per-batch scores).
+    Returns (inner scores, selected settings, per-perturbation scores, per-batch scores, the mse
+    per (perturbation, held-out batch)).
     """
     batch = batch_labels(adata)
     rng = np.random.default_rng(cfg.seed)
@@ -104,23 +109,27 @@ def nested_cv(adata: sc.AnnData, cfg: DictConfig) -> tuple:
         models = _fit_linear(outer.train) | tuning.fit_selected(outer.train, selected, cfg)
         pert_scores.append(score(models, outer.eval, cfg.top_k, outer.seen))
         _print_fold_means(pert_scores[-1])
-        batch_scores += _score_batches(models, outer.eval, outer.seen, held_out, batch, cfg.top_k)
+        scored = _score_batches(models, outer.eval, outer.seen, held_out, batch, cfg.top_k)
+        batch_scores += [s.assign(fold=i) for s in scored]
+    pair_scores = pd.concat(batch_scores, ignore_index=True).query("metric == 'mse'")
     return (
         pd.concat(inner_tables),
         pd.DataFrame(selected_rows),
         _average_per_perturbation(pert_scores),
         _average_per_batch(batch_scores),
+        pair_scores.drop(columns=["metric", "cells"]),  # cells is the whole batch's, not the pair's
     )
 
 
 @hydra.main(config_path="../configs", config_name="tune_bridges", version_base=None)
 def main(cfg: DictConfig):
     adata = load_dataset()
-    inner, selected, per_pert, per_batch = nested_cv(adata, cfg)
+    inner, selected, per_pert, per_batch, per_pair = nested_cv(adata, cfg)
     out_dir = Path(HydraConfig.get().runtime.output_dir)
     inner.to_csv(out_dir / "inner_scores.csv", index=False)
     selected.to_csv(out_dir / "selected.csv", index=False)
     _save_scores(per_pert, per_batch, out_dir)
+    per_pair.to_csv(out_dir / "scores_per_pair.csv", index=False)
     _plot_scores(per_pert, per_batch, out_dir / "plots")
 
 

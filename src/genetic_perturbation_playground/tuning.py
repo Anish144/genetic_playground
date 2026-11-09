@@ -22,9 +22,13 @@ from genetic_perturbation_playground.model.batch_transfer import (
     Standardised,
 )
 
-METRICS = ["mse", "pearson", "pearson_top20"]  # of either data set
 INT_SETTINGS = ["phi_size", "psi_size", "n_steps", "depth", "cross_fit_folds"]
 Evaluate = Callable[[object], dict]  # fitted model -> its validation scores, {metric: value}
+
+
+def _metrics(columns) -> list[str]:
+    """The metric columns among `columns`: mse, pearson and pearson_top<k> for any k."""
+    return [c for c in columns if c in ("mse", "pearson") or c.startswith("pearson_top")]
 
 
 def batch_folds(batch: np.ndarray, n_folds: int, rng: np.random.Generator) -> list:
@@ -131,7 +135,7 @@ def _neural_rows(train: sc.AnnData, evaluate: Evaluate, cfg: DictConfig) -> list
 
 def mean_over_inner_folds(inner: pd.DataFrame) -> pd.DataFrame:
     """Each configuration's (and shift's) validation scores averaged over the inner folds."""
-    metrics = [c for c in inner.columns if c in METRICS]
+    metrics = _metrics(inner.columns)
     settings = [c for c in inner.columns if c not in [*metrics, "inner_fold"]]
     return inner.groupby(settings, dropna=False)[metrics].mean().reset_index()
 
@@ -146,12 +150,16 @@ def select(averaged: pd.DataFrame) -> dict:
 def _winners(averaged: pd.DataFrame) -> pd.DataFrame:
     """Mean validation scores of the best configuration of each bridge, and of shift."""
     best = averaged.loc[averaged.groupby("bridge")["mse"].idxmin()].set_index("bridge")
-    return best[[m for m in METRICS if m in best]]
+    return best[_metrics(best.columns)]
 
 
 def _best(rows: pd.DataFrame) -> dict:
     """The settings of the row with the lowest mse, integer settings as ints."""
-    best = rows.loc[rows["mse"].idxmin()].drop(["bridge", *METRICS], errors="ignore").dropna()
+    best = (
+        rows.loc[rows["mse"].idxmin()]
+        .drop(["bridge", *_metrics(rows.columns)], errors="ignore")
+        .dropna()
+    )
     return {key: int(v) if key in INT_SETTINGS else v for key, v in best.items()}
 
 

@@ -1,0 +1,14 @@
+defaults:  # tune_bridges with a separate A_x per perturbation, only psi shared
+  - tune_bridges
+  - _self_
+
+n_configs: 6
+neural:
+  per_perturbation: true
+# Narrowed to the best region of the wider grid's inner scores (5,000 genes, per perturbation).
+neural_grid:         # 6 configurations
+  reg: [1.0e-5, 1.0e-4]
+  weight_decay: [0.0]
+  phi_size: [8]        # unused: phi is the identity
+  psi_size: [8, 16, 32]
+neural_checkpoints: [50, 100, 200]

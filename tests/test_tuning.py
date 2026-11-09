@@ -98,10 +98,17 @@ def test_replogle_nested_cv_tunes_on_inner_folds_and_scores_the_outer_folds():
             "neural": {"device": "cpu", "cross_fit_folds": 0},
         },
     )
-    inner, selected, per_pert, per_batch = tune_bridges.nested_cv(_cells(), config)
+    inner, selected, per_pert, per_batch, per_pair = tune_bridges.nested_cv(_cells(), config)
     # per outer and inner fold: 2 kernel configurations, 1 neural at 2 checkpoints, shift
     assert inner.groupby(["fold", "inner_fold"]).size().tolist() == [2 + 2 + 1] * 4
     assert set(selected["bridge"]) == {"kernel", "neural"}
     assert {"kernel bridge (tuned)", "neural bridge (tuned)", "shift (b=1)"} <= set(
         per_batch["model"]
     )
+    # one row per (perturbation, held-out batch, model); averaging over perturbations gives per_batch
+    assert not per_pair.duplicated(["perturbation", "batch", "model"]).any()
+    from_pairs = per_pair.groupby(["batch", "model"])["value"].mean().sort_index()
+    batch_mse = (
+        per_batch.query("metric == 'mse'").set_index(["batch", "model"])["value"].sort_index()
+    )
+    pd.testing.assert_series_equal(from_pairs, batch_mse, check_names=False)
