@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import anndata as ad
 import scanpy as sc
 
 DATA_DIR = Path(__file__).parents[3] / "data"
@@ -25,7 +26,10 @@ def load_dataset() -> sc.AnnData:
     """Replogle 2022 K562 essential screen, preprocessed once and cached under data/."""
     if not CACHE_PATH.exists():
         CACHE_PATH.parent.mkdir(exist_ok=True)
-        replogle_load_and_preprocess().write_h5ad(CACHE_PATH, compression="gzip")
+        partial = CACHE_PATH.with_suffix(".partial.h5ad")  # a failed write must not pass for the cache
+        with ad.settings.override(allow_write_nullable_strings=True):  # pandas 3 strings in obs
+            replogle_load_and_preprocess().write_h5ad(partial, compression="gzip")
+        partial.replace(CACHE_PATH)
     adata = sc.read_h5ad(CACHE_PATH)
     print(f"Loaded {CACHE_PATH}")
     print(f"  {adata.n_obs:,} cells  ×  {adata.n_vars:,} genes  |  {adata.obs['perturbation'].nunique():,} perturbations")
