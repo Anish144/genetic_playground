@@ -2,12 +2,11 @@ defaults:  # control split, scoring and neural settings as in train_batch_transf
   - train_batch_transfer_expression
   - _self_
 
-n_folds: 5           # every batch is still held out once; 10 only trains on a few more batches per fold
 inner_folds: 3       # K-fold over each outer fold's training batches; settings picked by mean mse
 n_configs: 8         # per bridge, drawn at random from its grid (all of them if n_configs covers it)
 # Grids for standardised expression (standardise_w, standardise_y): the bridges' ridge solutions are linear
 # in Y, and Adam with decoupled weight decay ignores the loss scale, so Y's scale moves no optimum.
-# Narrowed to the best region of the wider grids' inner scores (5,000 genes, shared phi).
+# Narrowed using the inner scores of an earlier run (shared phi) on 5,000 highly variable genes, not all 8,563.
 kernel_grid:         # 6 configurations
   reg: [1.0e-4, 1.0e-3]
   lengthscale_scale: [1, 2, 4]  # multiples of the median-heuristic lengthscale
