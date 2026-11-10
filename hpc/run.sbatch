@@ -20,6 +20,7 @@ cd "$SLURM_SUBMIT_DIR"
 export PATH="$HOME/.local/bin:$PATH"  # uv; batch jobs don't read ~/.bashrc
 export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK OPENBLAS_NUM_THREADS=$SLURM_CPUS_PER_TASK
 export TQDM_DISABLE=1  # progress bars would flood the log
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True  # avoid OOM from fragmented GPU memory
 
 # what was run: commit, uncommitted changes, GPU
 echo "job $SLURM_JOB_ID on $(hostname): $*"
