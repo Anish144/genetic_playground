@@ -89,7 +89,9 @@ def test_neural_bridge_counts_match_replicated_rows(cross_fit_folds):
     )
     x_new = rng.normal(size=(5, 2))
     np.testing.assert_allclose(
-        weighted.predict(x_new, ws[0]), replicated.predict(x_new, ws[0]), rtol=1e-6
+        weighted.predict(x_new, ws[0]),
+        replicated.predict(x_new, ws[0]),
+        rtol=1e-4,  # float32 nets
     )
 
 
@@ -130,12 +132,20 @@ def test_unweighted_bridge_ignores_cell_counts():
     assert not np.allclose(pred(train, True), pred(doubled, True))
 
 
-def test_neural_checkpoint_equals_fit_with_that_many_steps():
+@pytest.mark.parametrize("per_perturbation", [False, True])
+@pytest.mark.parametrize("cross_fit_folds", [0, 2])
+def test_neural_checkpoint_equals_fit_with_that_many_steps(per_perturbation, cross_fit_folds):
     rng = np.random.default_rng(0)
     data = _cells(rng)
     train, test = data[data.obs["batch"] != "b3"], data[data.obs["batch"] == "b3"]
     perts = sorted(set(test.obs["perturbation"]) - {"control"})
-    kwargs = {"n_features": 4, "n_features_w": 3, "n_steps": 6}
+    kwargs = {
+        "n_features": 4,
+        "n_features_w": 3,
+        "n_steps": 6,
+        "per_perturbation": per_perturbation,
+        "cross_fit_folds": cross_fit_folds,
+    }
     at_step = {}
 
     model = NeuralBridgeTransfer(**kwargs)
@@ -207,15 +217,15 @@ def test_neural_bridge_sizes_phi_and_psi_separately():
 def test_mlp_hidden_layers_are_swiglu_with_residual_connections_where_sizes_match():
     torch.manual_seed(0)
     mlp = _mlp(d_in=3, width=4, depth=2, d_out=5)
-    first, second, out = mlp
-    x = torch.randn(6, 3, dtype=torch.float64)
+    first, second, out = mlp.net
+    x = torch.randn(6, 3)
 
     def swiglu(layer, h):
         return torch.nn.functional.silu(layer.gate(h)) * layer.value(h)
 
     h1 = swiglu(first, x)  # 3 -> 4 units: no residual
     h2 = h1 + swiglu(second.layer, h1)  # 4 -> 4 units: residual
-    torch.testing.assert_close(mlp(x), out(h2))
+    torch.testing.assert_close(mlp(x.double()), out(h2).double())  # float32 inside
 
 
 def _categorical_envs(rng, n_envs=4, n_cats=3, d_y=2):
@@ -240,17 +250,109 @@ def _dense_fit(bridge, xs, ys, ws, counts, held=None):
     return _weighted_sse(feats[scored] @ A, data.y[scored], data.c[scored]), A
 
 
-def test_per_x_bridge_is_the_shared_bridge_with_phi_the_identity():
+@pytest.mark.parametrize("gene_block_size", [1, 3, 256])
+def test_per_x_bridge_is_the_shared_bridge_with_phi_the_identity(gene_block_size):
     rng = np.random.default_rng(0)
-    xs, ys, ws, counts = _categorical_envs(rng)
-    bridge = NeuralPerXEmbeddingBridge(n_steps=2, n_features_w=2, reg=1e-2)
+    # G = q = D = 4 exposes ambiguity between matrix and batched-vector ridge RHS shapes.
+    xs, ys, ws, counts = _categorical_envs(rng, n_cats=4, d_y=7)
+    bridge = NeuralPerXEmbeddingBridge(
+        n_steps=2, n_features_w=4, reg=1e-2, gene_block_size=gene_block_size
+    )
     bridge.fit(xs, ys, ws, counts)
     with torch.no_grad():
-        loss, A = bridge._stage2(bridge._to_tensors(xs, ys, ws, counts))
+        loss = bridge._training_loss(bridge._to_tensors(xs, ys, ws, counts))
         sse, dense_A = _dense_fit(bridge, xs, ys, ws, counts)
     torch.testing.assert_close(loss, sse / sum(c.sum() for c in counts))
-    torch.testing.assert_close(A.flatten(0, 1), dense_A)
-    torch.testing.assert_close(bridge.A_, A)
+    torch.testing.assert_close(bridge.A_.flatten(0, 1), dense_A)
+
+
+@pytest.mark.parametrize("cross_fit_folds", [0, 2, 4])
+@pytest.mark.parametrize("weighted", [False, True])
+@pytest.mark.parametrize("n_cats, n_features_w", [(3, 2), (3, 6), (4, 4)])
+def test_per_x_target_gram_loss_and_gradients_match_dense_ridge(
+    monkeypatch, cross_fit_folds, weighted, n_cats, n_features_w
+):
+    """Compare against explicit pair predictions, including a rank-deficient feature Gram.
+
+    G=n_cats categories, D=4 environments, J=7 genes, q=n_features_w features. Category 0
+    occurs only in environment 0, so some folds have no training data for that category.
+    Environment 2 has proxies but no pairs. Category 1 has two DIFFERENT targets in
+    environment 0, testing cyy's within-group error. G=q=D=4 checks matrix-RHS disambiguation.
+    """
+    rng = np.random.default_rng(12)
+    xs, ys, ws, counts = _categorical_envs(rng, n_cats=n_cats, d_y=7)
+    for e in [1, 2]:
+        xs[e], ys[e], counts[e] = xs[e][1:], ys[e][1:], counts[e][1:]
+    xs[2], ys[2], counts[2] = xs[2][:0], ys[2][:0], counts[2][:0]
+    xs[0] = np.concatenate([xs[0], xs[0][[1]]])
+    ys[0] = np.concatenate([ys[0], rng.normal(size=(1, 7))])
+    counts[0] = np.append(counts[0], 5)
+    if not weighted:
+        counts = None
+    torch.manual_seed(12)
+    bridge = NeuralPerXEmbeddingBridge(
+        n_features_w=n_features_w, width_w=4, depth=1, cross_fit_folds=cross_fit_folds, reg=1e-5
+    )
+    data = bridge._to_tensors(xs, ys, ws, counts)
+    bridge.psi_ = _mlp(2, 4, 1, n_features_w)
+    mu = bridge._embed(data.w_envs)  # (D, q), connected to the float32 network
+    monkeypatch.setattr(bridge, "_embed", lambda _: mu)
+    fold = torch.arange(4) % max(cross_fit_folds, 1)  # (D,)
+    monkeypatch.setattr(bridge, "_env_folds", lambda _: fold)
+
+    assert data.cy.shape == (n_cats, 4, 7)  # Z (G, D, J), needed only for prediction
+    assert all(
+        t.device == mu.device for t in (data.c, data.cy, data.cyy, data.target_gram, *data.w_envs)
+    )
+    assert data.target_gram.shape == (n_cats, 4, 4)  # Q (G, D, D), sufficient for training
+    # Removing the gene targets must not affect training, including checkpoint recomputation.
+    compressed = bridge._training_loss(data._replace(cy=torch.empty(0)))
+
+    pairs = NeuralMarginalEmbeddingBridge._to_tensors(bridge, xs, ys, ws, counts)
+    feats = _features(pairs.x, mu[pairs.env])  # (N, G*q), one feature row per observed pair
+    reference = 0.0
+    for k in range(max(cross_fit_folds, 1)):
+        scored = fold[pairs.env] == k
+        train = ~scored if cross_fit_folds else scored
+        A = _weighted_ridge(feats[train], pairs.y[train], pairs.c[train], bridge.reg)  # (G*q, J)
+        residual = feats[scored] @ A - pairs.y[scored]  # (N_scored, J), possibly zero rows
+        reference = reference + (pairs.c[scored] * residual.square().mean(dim=1)).sum()
+    reference = reference / pairs.c.sum()
+    torch.testing.assert_close(compressed, reference, rtol=1e-9, atol=1e-10)
+
+    variables = (mu, *bridge.psi_.parameters())
+    actual_grad = torch.autograd.grad(compressed, variables, retain_graph=True)
+    expected_grad = torch.autograd.grad(reference, variables)
+    torch.testing.assert_close(actual_grad[0], expected_grad[0], rtol=1e-8, atol=1e-9)
+    for actual, expected in zip(actual_grad[1:], expected_grad[1:], strict=True):
+        torch.testing.assert_close(actual, expected, rtol=1e-4, atol=1e-6)  # float32 NN backward
+
+
+@pytest.mark.parametrize("gene_block_size", [0, -1])
+def test_per_x_reconstruction_needs_positive_gene_block_size(gene_block_size):
+    xs, ys, ws, counts = _categorical_envs(np.random.default_rng(0))
+    with pytest.raises(ValueError, match="gene_block_size must be positive"):
+        NeuralPerXEmbeddingBridge(gene_block_size=gene_block_size).fit(xs, ys, ws, counts)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA GPU required")
+def test_per_x_cuda_training_and_block_reconstruction_stay_on_device():
+    xs, ys, ws, counts = _categorical_envs(np.random.default_rng(0), d_y=7)
+    bridge = NeuralPerXEmbeddingBridge(
+        n_steps=2, n_features_w=6, cross_fit_folds=2, gene_block_size=3, device="cuda"
+    ).fit(xs, ys, ws, counts)
+    data = bridge._to_tensors(xs, ys, ws, counts)
+    assert all(
+        t.device.type == "cuda" for t in (data.c, data.cy, data.cyy, data.target_gram, *data.w_envs)
+    )
+    assert bridge.A_.device.type == "cuda"
+    with torch.no_grad():
+        sse, dense_A = _dense_fit(bridge, xs, ys, ws, counts)
+        mu = bridge.psi_(torch.as_tensor(ws[0], device="cuda")).mean(dim=0)
+        expected = mu @ dense_A.reshape(3, 6, 7)  # A: (G=3, q=6, J=7)
+    torch.testing.assert_close(bridge.A_.flatten(0, 1), dense_A, rtol=1e-8, atol=1e-9)
+    assert torch.isfinite(sse)
+    np.testing.assert_allclose(bridge.predict(np.eye(3), ws[0]), expected.cpu().numpy())
 
 
 def test_per_x_cross_fit_with_one_fold_per_environment_is_leave_one_environment_out():

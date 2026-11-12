@@ -57,12 +57,24 @@ class _Residual(nn.Module):
         return h + self.layer(h)
 
 
-def _mlp(d_in: int, width: int, depth: int, d_out: int) -> nn.Sequential:
-    """MLP with `depth` SwiGLU hidden layers of `width` units and a linear output, in float64.
-    Hidden layers whose input has `width` units too (all but the first) are residual."""
+class _Float32(nn.Module):
+    """`net` run in float32 on float64 inputs, with float64 outputs for the ridge algebra."""
+
+    def __init__(self, net: nn.Module):
+        super().__init__()
+        self.net = net
+
+    def forward(self, h: torch.Tensor) -> torch.Tensor:
+        return self.net(h.float()).double()
+
+
+def _mlp(d_in: int, width: int, depth: int, d_out: int) -> _Float32:
+    """MLP with `depth` SwiGLU hidden layers of `width` units and a linear output, in float32
+    (float64 in and out). Hidden layers whose input has `width` units too (all but the first)
+    are residual."""
     dims = [d_in] + [width] * depth
     hidden = [_Residual(_SwiGLU(a, b)) if a == b else _SwiGLU(a, b) for a, b in pairwise(dims)]
-    return nn.Sequential(*hidden, nn.Linear(dims[-1], d_out)).double()
+    return _Float32(nn.Sequential(*hidden, nn.Linear(dims[-1], d_out)))
 
 
 def _tensor(a: np.ndarray, device: str) -> torch.Tensor:
@@ -165,7 +177,7 @@ class NeuralMarginalEmbeddingBridge:
         """
         torch.manual_seed(self.seed)
         data = self._to_tensors(xs, ys, ws, counts)
-        self._build_networks(data.x.shape[1], data.w_envs[0].shape[1])
+        self._build_networks(data)
         self._train(data, checkpoints, on_checkpoint)
         self._solve_A(data)
         return self
@@ -192,10 +204,12 @@ class NeuralMarginalEmbeddingBridge:
             w_envs=[_tensor(w, self.device) for w in ws],
         )
 
-    def _build_networks(self, d_x: int, d_w: int) -> None:
+    def _build_networks(self, data: _Stage2Data) -> None:
         """Freshly initialised phi and psi on the device."""
-        self.phi_ = _mlp(d_x, self.width_x, self.depth, self.n_features).to(self.device)
-        self.psi_ = _mlp(d_w, self.width_w, self.depth, self.n_features_w).to(self.device)
+        self.phi_ = _mlp(data.x.shape[1], self.width_x, self.depth, self.n_features).to(self.device)
+        self.psi_ = _mlp(data.w_envs[0].shape[1], self.width_w, self.depth, self.n_features_w).to(
+            self.device
+        )
 
     def _train(self, data: _Stage2Data, checkpoints, on_checkpoint) -> None:
         """Full-batch AdamW on phi and psi against the stage-2 loss."""
@@ -276,26 +290,43 @@ class NeuralMarginalEmbeddingBridge:
 
 
 class _GroupedData(NamedTuple):
-    """Sums of the pairs per (category, environment), and per-environment proxies."""
+    """Fixed statistics for G categories, D environments and J output genes.
+
+    All tensors live on the training device. Training uses the small target_gram
+    Q_x = cy_x @ cy_x.T / J for each category x. m_e is environment e's
+    proxy count, and d_w is the number of input features per proxy.
+    """
 
     c: torch.Tensor  # (G, D) replicate counts
-    cy: torch.Tensor  # (G, D, d_y) count-weighted sums of y
-    cyy: torch.Tensor  # (D,) count-weighted sums of |y|^2 / d_y
+    cy: torch.Tensor  # (G, D, J) count-weighted sums of y, used for reconstructing A
+    cyy: torch.Tensor  # (D,) count-weighted sums of |y|^2 / J over all categories
+    target_gram: torch.Tensor  # (G, D, D) Q: gene-averaged products of cy's environment rows
     w_envs: list[torch.Tensor]  # D tensors of shape (m_e, d_w)
 
 
-def _sums(data: _GroupedData, mu: torch.Tensor, envs: torch.Tensor) -> tuple:
-    """Per-category Gram (G, q, q) and cross term (G, q, d_y), sum of c |y|^2 / d_y and total
-    count over the pairs of the environments in the mask `envs` (D,)."""
-    c = data.c * envs
-    gram = (c[:, :, None] * mu).transpose(1, 2) @ mu
-    cross = (mu * envs[:, None]).T @ data.cy
-    return gram, cross, data.cyy[envs].sum(), c.sum()
+def _grouped_gram(c: torch.Tensor, mu: torch.Tensor) -> torch.Tensor:
+    """M.T C_x M for each category: c (G, D), M = mu (D, q) -> Gram (G, q, q)."""
+    return (c[:, :, None] * mu).transpose(1, 2) @ mu
 
 
-def _sse(A: torch.Tensor, gram: torch.Tensor, cross: torch.Tensor, cyy: torch.Tensor):
-    """sum_i c_i |y_i - A_x(i)^T mu_i|^2 / d_y over the pairs that `gram`, `cross`, `cyy` sum."""
-    return cyy - (2 * (A * cross).sum() - (A * (gram @ A)).sum()) / cross.shape[-1]
+def _target_sse(data: _GroupedData, mu: torch.Tensor, R: torch.Tensor, scored: torch.Tensor):
+    """The existing prediction SSE, contracted over precomputed target products.
+
+    G categories, D environments, q embedding features, J output genes:
+    M = mu (D, q), R (G, q, D), Z = cy (G, D, J), Q = target_gram (G, D, D).
+    R maps Z to ridge coefficients A = R Z; its columns outside the fit set are zero.
+    scored (D,) selects S; C_{x,S} = diag(c_x * scored) has shape (D, D).
+    With M_S (D, q) zero outside S and G_{x,S} = M.T C_{x,S} M (q, q), compute
+        cyy_S - 2 tr(R Q M_S) + tr(G_S R Q R.T),
+    summed over categories. Q and cyy already include division by J. No coefficient
+    penalty is added to this loss, matching the original training objective.
+    """
+    rq = R @ data.target_gram  # (G, q, D)
+    scored_mu = mu * scored[:, None]  # (D, q)
+    gram = _grouped_gram(data.c * scored, mu)  # (G, q, q)
+    cross_term = (rq * scored_mu.T).sum()
+    quadratic = (rq * (gram @ R)).sum()
+    return data.cyy[scored].sum() - 2 * cross_term + quadratic
 
 
 @dataclass
@@ -304,22 +335,32 @@ class NeuralPerXEmbeddingBridge(NeuralMarginalEmbeddingBridge):
 
     NeuralMarginalEmbeddingBridge with phi(x) = x: no response surface is shared across categories,
     only psi. A_x is the ridge regression of y on mu_e over x's pairs alone, with the same penalty
-    reg * N. n_features, width_x are unused; ys must be 2-D. The losses are computed from sums per
-    (category, environment), never per pair: memory and time grow as G q d_y, not (G q)^2.
+    reg * N. n_features, width_x are unused; ys must be 2-D.
 
-    After ``fit``: ``psi_`` and ``A_``, shape (G, q, d_y); ``phi_`` is the identity.
+    G is the number of categories, D the number of environments, J = d_y the number of output
+    genes, and q = n_features_w the embedding dimension. N is the total replicate count across
+    all categories in the fit environments. Training precomputes target products
+    Q (G, D, D) and uses ridge maps R (G, q, D), without gene-sized ridge intermediates.
+    All tensors, including count-weighted targets Z (G, D, J), stay on the training device.
+    At checkpoints and the final fit, A = R Z is reconstructed in blocks of at most
+    gene_block_size output genes.
+    gene_block_size bounds reconstruction temporaries; the complete A_ still has G q J entries.
+
+    After ``fit``: ``psi_`` and ``A_``, shape (G, q, J); ``phi_`` is the identity.
     """
 
-    def fit(self, xs, ys, ws, counts=None, checkpoints=(), on_checkpoint=None):
-        """As NeuralMarginalEmbeddingBridge.fit; each row of xs[e] is one-hot."""
-        torch.manual_seed(self.seed)
-        data = self._to_tensors(xs, ys, ws, counts)
+    gene_block_size: int = 256
+
+    def __post_init__(self):
+        if self.gene_block_size < 1:
+            raise ValueError("gene_block_size must be positive")
+
+    def _build_networks(self, data: _GroupedData) -> None:
+        """Only psi is learned; each row of xs[e] is a one-hot category."""
         self.phi_ = nn.Identity()
-        self.psi_ = _mlp(data.w_envs[0].shape[1], self.width_w, self.depth, self.n_features_w)
-        self.psi_.to(self.device)
-        self._train(data, checkpoints, on_checkpoint)
-        self._solve_A(data)
-        return self
+        self.psi_ = _mlp(data.w_envs[0].shape[1], self.width_w, self.depth, self.n_features_w).to(
+            self.device
+        )
 
     def predict(self, x: np.ndarray, w_target: np.ndarray) -> np.ndarray:
         """E[Y | x, e*], shape (n_new, d_y), for one-hot x and the target's proxies ``w_target``."""
@@ -329,35 +370,80 @@ class NeuralPerXEmbeddingBridge(NeuralMarginalEmbeddingBridge):
             return pred[_tensor(x, self.device).argmax(dim=1)].cpu().numpy()
 
     def _to_tensors(self, xs, ys, ws, counts) -> _GroupedData:
-        """The pairs summed per (category, environment), on the device."""
-        pairs = super()._to_tensors(xs, ys, ws, counts)
-        n_cats, n_envs = pairs.x.shape[1], len(ws)
-        cell = pairs.x.argmax(dim=1) * n_envs + pairs.env  # flat (category, environment) index
+        """Aggregate each environment's pairs directly on the configured device.
 
-        def summed(values, index, n):
-            zeros = torch.zeros(n, *values.shape[1:], dtype=values.dtype, device=values.device)
-            return zeros.index_add(0, index, values)
-
-        n = n_cats * n_envs
+        G = xs[0].shape[1], D = len(ws), J = ys[0].shape[1], and n_e = len(xs[e]) is the
+        number of observed pairs in environment e. Multiple rows for the same (category,
+        environment) are supported; cyy retains their separate squared targets.
+        """
+        n_cats, n_envs, n_genes = xs[0].shape[1], len(ws), ys[0].shape[1]
+        c = torch.zeros(n_cats, n_envs, dtype=torch.float64, device=self.device)  # (G, D)
+        cy = c.new_zeros((n_cats, n_envs, n_genes))  # (G, D, J)
+        cyy = c.new_zeros((n_envs,))  # (D,)
+        for e, (x, y) in enumerate(zip(xs, ys, strict=True)):
+            cat = torch.as_tensor(np.asarray(x).argmax(axis=1), device=self.device)  # (n_e,)
+            y = torch.as_tensor(
+                y, dtype=torch.float64, device=self.device
+            )  # (n_e, J), possibly empty
+            count = torch.as_tensor(
+                np.ones(len(x)) if counts is None else counts[e],
+                dtype=torch.float64,
+                device=self.device,
+            )  # (n_e,)
+            c[:, e].index_add_(0, cat, count)
+            cy[:, e].index_add_(0, cat, count[:, None] * y)
+            cyy[e] = (count * y.square().mean(dim=1)).sum()
+        target_gram = (cy @ cy.transpose(1, 2)) / n_genes  # (G, D, D)
         return _GroupedData(
-            c=summed(pairs.c, cell, n).reshape(n_cats, n_envs),
-            cy=summed(pairs.c[:, None] * pairs.y, cell, n).reshape(n_cats, n_envs, -1),
-            cyy=summed(pairs.c * (pairs.y**2).mean(dim=1), pairs.env, n_envs),
-            w_envs=pairs.w_envs,
+            c=c,
+            cy=cy,
+            cyy=cyy,
+            target_gram=target_gram,
+            w_envs=[_tensor(w, self.device) for w in ws],
         )
 
-    def _stage2(self, data: _GroupedData) -> tuple[torch.Tensor, torch.Tensor]:
-        """Closed-form ridge A_x of every category, and the weighted squared error."""
-        mu = self._embed(data.w_envs)
-        gram, cross, cyy, n = _sums(data, mu, torch.ones(len(mu), dtype=bool, device=mu.device))
-        A = _ridge_solve(gram, cross, n, self.reg)
-        return _sse(A, gram, cross, cyy) / n, A
+    def _ridge_map(self, c: torch.Tensor, mu: torch.Tensor) -> torch.Tensor:
+        """R_x = (M.T C_x M + reg N I)^-1 M.T, shape (G, q, D).
+
+        c (G, D) holds counts and M = mu (D, q) holds environment embeddings.
+        For a fold, both inputs are zero outside its fit set, giving R zero columns there.
+        C_x = diag(c_x) has shape (D, D); N = sum(c) counts ALL categories in the fit set.
+        """
+        gram = _grouped_gram(c, mu)  # (G, q, q)
+        # Explicit matrix RHS prevents batched-vector interpretation when G = q = D.
+        return _ridge_solve(gram, mu.T.expand(len(c), -1, -1), c.sum(), self.reg)  # (G, q, D)
+
+    def _training_loss(self, data: _GroupedData) -> torch.Tensor:
+        """The original SSE objective, with no gene-sized tensors in the ridge autograd graph."""
+        if self.cross_fit_folds:
+            return self._cross_fit_loss(data)
+        mu = self._embed(data.w_envs)  # (D, q)
+        all_envs = torch.ones(len(mu), dtype=bool, device=mu.device)  # (D,)
+        R = self._ridge_map(data.c, mu)  # (G, q, D)
+        return _target_sse(data, mu, R, all_envs) / data.c.sum()
+
+    @torch.no_grad()
+    def _solve_A(self, data: _GroupedData) -> None:
+        """Set A_ (G, q, J) to the ridge coefficients for predictions.
+
+        Training calls _training_loss instead. This checkpoint/final-fit path uses target
+        blocks of at most gene_block_size genes, all on the configured device.
+        """
+        mu = self._embed(data.w_envs)  # (D, q)
+        R = self._ridge_map(data.c, mu)  # (G, q, D)
+        n_genes = data.cy.shape[-1]  # J
+        A = R.new_empty((*R.shape[:2], n_genes))  # (G, q, J)
+        for start in range(0, n_genes, self.gene_block_size):
+            stop = start + self.gene_block_size
+            cy_block = data.cy[:, :, start:stop]  # (G, D, j), j <= block size
+            A[:, :, start:stop] = R @ cy_block  # (G, q, j)
+        self.A_ = A
 
     def _cross_fit_loss(self, data: _GroupedData) -> torch.Tensor:
         """Weighted squared error of each fold's pairs under A_x solved on the other folds.
 
-        Each fold's term is checkpointed: its G q d_y intermediates are recomputed in the backward
-        pass rather than kept for all folds at once (out of memory on Replogle otherwise).
+        Each fold's term is checkpointed: its (G, q, D) ridge intermediates are recomputed in
+        the backward pass rather than kept for all folds at once. No gene-sized solves occur.
         """
         mu = self._embed(data.w_envs)
         fold = self._env_folds(len(mu))
@@ -369,5 +455,6 @@ class NeuralPerXEmbeddingBridge(NeuralMarginalEmbeddingBridge):
 
     def _fold_sse(self, data: _GroupedData, mu: torch.Tensor, held: torch.Tensor) -> torch.Tensor:
         """Weighted sse of the `held` environments' pairs under A_x solved on the others."""
-        gram, cross, _, n = _sums(data, mu, ~held)
-        return _sse(_ridge_solve(gram, cross, n, self.reg), *_sums(data, mu, held)[:3])
+        train = ~held  # (D,)
+        R = self._ridge_map(data.c * train, mu * train[:, None])  # (G, q, D), held columns zero
+        return _target_sse(data, mu, R, held)

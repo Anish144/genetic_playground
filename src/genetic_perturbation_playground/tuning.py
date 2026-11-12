@@ -22,7 +22,7 @@ from genetic_perturbation_playground.model.batch_transfer import (
     Standardised,
 )
 
-INT_SETTINGS = ["phi_size", "psi_size", "n_steps", "depth", "cross_fit_folds"]
+INT_SETTINGS = ["phi_size", "psi_size", "width_w", "n_steps", "depth", "cross_fit_folds"]
 Evaluate = Callable[[object], dict]  # fitted model -> its validation scores, {metric: value}
 
 
@@ -63,10 +63,10 @@ def make_neural(config: dict, cfg: DictConfig):
 
 
 def _network_sizes(config: dict) -> dict:
-    """`config` with phi_size as phi's hidden width and output dimension, psi_size as psi's."""
+    """Expand phi_size and psi_size into widths and output dimensions; explicit settings win."""
     settings = dict(config)
     phi, psi = settings.pop("phi_size"), settings.pop("psi_size")
-    return settings | {"width_x": phi, "n_features": phi, "width_w": psi, "n_features_w": psi}
+    return {"width_x": phi, "n_features": phi, "width_w": psi, "n_features_w": psi} | settings
 
 
 def tune(folds: Iterable[tuple[sc.AnnData, Evaluate]], cfg: DictConfig) -> tuple:

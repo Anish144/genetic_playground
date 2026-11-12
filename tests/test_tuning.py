@@ -26,12 +26,27 @@ def test_sample_configs_draws_distinct_grid_points():
     assert len({tuple(c.items()) for c in drawn}) == 4
 
 
+def test_per_x_grid_varies_hidden_width_independently_of_output_dimension():
+    with initialize_config_dir(str(ROOT / "configs"), version_base=None):
+        config = compose("tune_bridges_perx", ["name=test"])
+    drawn = tuning.sample_configs(config.neural_grid, config.n_configs, config.seed)
+    assert len(drawn) == 108
+    assert {(c["width_w"], c["psi_size"]) for c in drawn} == {
+        (width, dim) for width in [32, 64, 128, 256] for dim in [8, 16, 32]
+    }
+    for settings in drawn:
+        model = tuning.make_neural(settings, config).model
+        assert model.bridge_kwargs["width_w"] == settings["width_w"]
+        assert model.bridge_kwargs["n_features_w"] == settings["psi_size"]
+
+
 def test_selection_ranks_configurations_by_their_mean_over_inner_folds():
     inner = pd.DataFrame(
         {
             "bridge": ["kernel"] * 4 + ["neural"] * 2 + ["shift (b=1)"] * 2,
             "reg": [1.0, 1.0, 2.0, 2.0, 3.0, 3.0, None, None],
             "phi_size": [None] * 4 + [8.0, 8.0, None, None],
+            "width_w": [None] * 4 + [128.0, 128.0, None, None],
             "inner_fold": [0, 1, 0, 1, 0, 1, 0, 1],
             "mse": [0.1, 0.9, 0.4, 0.4, 0.3, 0.3, 0.5, 0.7],  # reg 1 wins fold 0, reg 2 on average
             "pearson": [1.0, 3.0, 2.0, 2.0, 1.0, 1.0, 5.0, 7.0],
@@ -40,9 +55,10 @@ def test_selection_ranks_configurations_by_their_mean_over_inner_folds():
     averaged = tuning.mean_over_inner_folds(inner)
     assert tuning.select(averaged) == {
         "kernel": {"reg": 2.0},
-        "neural": {"reg": 3.0, "phi_size": 8},
+        "neural": {"reg": 3.0, "phi_size": 8, "width_w": 128},
     }
     assert isinstance(tuning.select(averaged)["neural"]["phi_size"], int)
+    assert isinstance(tuning.select(averaged)["neural"]["width_w"], int)
     shift = averaged[averaged["bridge"] == "shift (b=1)"].iloc[0]
     assert (shift["mse"], shift["pearson"]) == pytest.approx((0.6, 6.0))
 
@@ -85,7 +101,7 @@ def _cells(n_batches=6):
 
 def test_replogle_nested_cv_tunes_on_inner_folds_and_scores_the_outer_folds():
     with initialize_config_dir(str(ROOT / "configs"), version_base=None):
-        config = compose("tune_bridges", ["name=test"])
+        config = compose("tune_bridges", ["name=test", "+neural_grid.width_w=[4]"])
     config = OmegaConf.merge(
         config,
         {
