@@ -59,8 +59,8 @@ def sample_configs(grid: DictConfig, n: int, seed: int) -> list[dict]:
 
 
 def with_standardisation(bridge, cfg: DictConfig):
-    """Optionally standardise bridge inputs; targets and predictions are always unscaled."""
-    return Standardised(bridge) if cfg.standardise_w else bridge
+    """Wrap a bridge to centre its targets and, with cfg.standardise_w, scale its control inputs."""
+    return Standardised(bridge, w=cfg.standardise_w)
 
 
 def make_kernel(config: dict, cfg: DictConfig):

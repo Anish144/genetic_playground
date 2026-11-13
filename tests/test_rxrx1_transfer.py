@@ -200,18 +200,18 @@ class Spy:
         return np.ones((len(perts), test.n_vars))
 
 
-def test_standardised_bridge_scales_only_inputs(tiny_rxrx1):
+def test_standardised_bridge_scales_inputs_and_centres_targets(tiny_rxrx1):
     huvec = mod.select_cell_type(tiny_rxrx1, "HUVEC")
     original = huvec.X.copy()
     seen = Standardised(Spy()).fit(huvec).model.adata
     ctrl = (seen.obs["perturbation"] == "control").to_numpy()
     np.testing.assert_allclose(seen.X[ctrl].mean(axis=0), 0, atol=1e-12)
     np.testing.assert_allclose(seen.X[ctrl].std(axis=0), 1)
-    np.testing.assert_array_equal(seen.X[~ctrl], huvec.X[~ctrl])
+    np.testing.assert_allclose(seen.X[~ctrl], huvec.X[~ctrl] - huvec.X[~ctrl].mean(0))
     np.testing.assert_array_equal(huvec.X, original)
 
 
-def test_prediction_reuses_training_input_scale_and_leaves_output_raw(tiny_rxrx1):
+def test_prediction_reuses_training_input_scale_and_adds_back_target_mean(tiny_rxrx1):
     huvec = mod.select_cell_type(tiny_rxrx1, "HUVEC")
     train = huvec[huvec.obs["batch"] != "HUVEC-3"]
     test = huvec[huvec.obs["batch"] == "HUVEC-3"].copy()
@@ -223,8 +223,9 @@ def test_prediction_reuses_training_input_scale_and_leaves_output_raw(tiny_rxrx1
     np.testing.assert_allclose(
         model.model.test.X[ctrl], (test.X[ctrl] - controls.mean(0)) / controls.std(0)
     )
-    np.testing.assert_array_equal(model.model.test.X[~ctrl], test.X[~ctrl])
-    np.testing.assert_array_equal(pred, np.ones((2, test.n_vars)))
+    y_mean = train.X[~(train.obs["perturbation"] == "control").to_numpy()].mean(0)
+    np.testing.assert_allclose(model.model.test.X[~ctrl], test.X[~ctrl] - y_mean)
+    np.testing.assert_allclose(pred, 1 + np.tile(y_mean, (2, 1)))
 
 
 def test_fit_models_standardises_linear_and_bridge_inputs(tiny_rxrx1):
@@ -236,5 +237,5 @@ def test_fit_models_standardises_linear_and_bridge_inputs(tiny_rxrx1):
         np.testing.assert_allclose(models[name].w_mean_, controls.mean(0))
         np.testing.assert_allclose(models[name].w_std_, controls.std(0))
     plain = mod.fit_models(huvec, cfg(bridges=["kernel"], standardise_w=False))
-    assert not isinstance(plain["kernel bridge"], Standardised)
+    assert plain["kernel bridge"].w_std_ == 1  # targets still centred, inputs left as they are
     np.testing.assert_array_equal(plain["transfer (fit b)"].w_std_, 1)
