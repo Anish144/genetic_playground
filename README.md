@@ -18,7 +18,7 @@ We use the scPerturb version of the Replogle 2022 K562 essential-gene CRISPRi sc
 
 Measured genes are output features; targeted genes are perturbation labels. These sets differ. Perturbations have unequal cell counts and do not all occur in every batch.
 
-`data/data_loader.py` downloads the [scPerturb H5AD](https://exampledata.scverse.org/pertpy/replogle_2022_k562_essential.h5ad) and applies these steps in order:
+The dataset loader downloads the [scPerturb H5AD](https://exampledata.scverse.org/pertpy/replogle_2022_k562_essential.h5ad) and applies these steps in order:
 
 1. Remove cells with fewer than 100 total counts.
 2. Remove genes detected in fewer than 5 cells.
@@ -49,7 +49,7 @@ The local checkout currently contains only a smoke subset: 88 sites from four ex
 
 # Methods
 
-Let $x$ be a perturbation, $e$ a batch and $g$ an output feature (gene or embedding coordinate). Let $\bar y_{xe}$ be the mean response, $n_{xe}$ its cell/crop count, and $w_{ej}$ a control sample. Linear models use the control mean $W_e$; bridges use the full control distribution.
+Let $x$ be a perturbation, $e$ a batch and $g$ one of $G$ output features (genes or embedding coordinates). Let $\bar y_{xe}$ be the mean response, $n_{xe}$ its cell/crop count, and $w_{ej}$ a control sample. Linear models use the control mean $W_e$; bridges use the full control distribution.
 
 **Input standardisation.** By default (`standardise_w=true`), every continuous proxy coordinate uses $\tilde w_g=(w_g-a_g)/s_g$. The mean $a_g$ and population standard deviation $s_g$ are fitted to pooled training controls only, and reused for validation and test controls. Constant coordinates use $s_g=1$. Linear control means use the same transformation. Categorical/one-hot perturbation inputs stay unchanged. Targets and predictions remain in log-expression or Phenom units. Image normalisation above is a separate step.
 
@@ -105,7 +105,7 @@ $\bar Y_x$ contains the observed batch means; $M_{e^*,x}$ compares new-batch con
 
 ## 3. Neural bridge
 
-Both versions learn a control network $\psi$ and use $\mu_e=m_e^{-1}\sum_j\psi(\tilde w_{ej})$.
+Both versions learn a control network $\psi$ with $q$ output features and use $\mu_e=m_e^{-1}\sum_j\psi(\tilde w_{ej})$.
 
 - **Learned $\phi(x)$:** an MLP maps one-hot perturbations to $p$ features. For each output, $\hat y_{xeg}=\phi(x)^T A_g\mu_e$, with $A_g\in\mathbb R^{p\times q}$. Both networks and the response coefficients are shared across perturbations.
 - **Delta $\phi(x)=\delta_x$ (per $x$):** keep the one-hot input and fit a separate $A_x\in\mathbb R^{q\times G}$ for each perturbation: $\hat y_{xe}=A_x^T\mu_e$. Only $\psi$ is shared. Select this with `neural.per_perturbation=true`; `n_features` and `width_x` are unused.
@@ -152,7 +152,7 @@ Cell counts in score tables describe coverage; they do not weight evaluation ave
 
 # Paths and how to run the experiments
 
-Run commands from the repository root. Use Python 3.12+ and install the locked environment with `uv sync`. Neural runs default to CUDA; use `neural.device=cpu` for small runs. Apple MPS does not support the required float64 ridge algebra.
+Run commands from the repository root. Use Python 3.12+ and install the locked environment with `uv sync`. Neural runs default to CUDA; use `neural.device=cpu` for small runs. Apple MPS does not support the required float64 ridge algebra. Set `MPLBACKEND=Agg` for headless plotting.
 
 ```text
 configs/                       Hydra defaults, tuning grids and checkpoints
