@@ -120,7 +120,7 @@ def test_cross_validate_trains_on_all_other_experiments(tiny_rxrx1, monkeypatch,
     assert len(set(held_out)) == n
     for train, batch in zip(training_batches, held_out, strict=True):
         assert train == {"HUVEC-1", "HUVEC-2", "HUVEC-3"} - {batch}
-    assert all("tvn" in set(scores["model"]) for scores in folds)
+    assert all("tvn" not in set(scores["model"]) for scores in folds)
     for scores in folds:
         assert (
             scores["n_training_batches"].tolist()
@@ -165,7 +165,8 @@ def test_nested_cv_tunes_on_inner_validation_and_scores_the_outer_folds(tiny_rxr
         assert neural["n_steps"] in {1, 2}
         assert (neural["phi_size"], neural["psi_size"]) == (2, 3)
         models = set(scores["model"])
-        assert {"kernel bridge (tuned)", "neural bridge (tuned)", "tvn", "shift (b=1)"} <= models
+        assert {"kernel bridge (tuned)", "neural bridge (tuned)", "shift (b=1)"} <= models
+        assert "tvn" not in models
 
 
 def test_log_summary_writes_every_model_and_metric(monkeypatch):
@@ -176,17 +177,17 @@ def test_log_summary_writes_every_model_and_metric(monkeypatch):
         {
             "perturbation": ["s1", "s1"],
             "metric": ["mse", "mse"],
-            "model": ["shift", "tvn"],
+            "model": ["shift", "kernel"],
             "value": [1.0, 3.0],
             "batch": "e1",
         }
     )
     mod.log_summary("fold 2", mod.summary(scores))
-    assert logged == {"fold 2/shift/mse": 1.0, "fold 2/tvn/mse": 3.0}
+    assert logged == {"fold 2/shift/mse": 1.0, "fold 2/kernel/mse": 3.0}
 
 
 class Spy:
-    """Records the data it is fit on; predicts ones."""
+    """Records training and prediction inputs; predicts ones."""
 
     perturbations_ = np.array(["s1", "s2"])
 
@@ -195,49 +196,45 @@ class Spy:
         return self
 
     def predict(self, perts, test):
+        self.test = test
         return np.ones((len(perts), test.n_vars))
 
 
-def test_standardised_bridge_sees_unit_scale_proxies_and_targets(tiny_rxrx1):
+def test_standardised_bridge_scales_only_inputs(tiny_rxrx1):
     huvec = mod.select_cell_type(tiny_rxrx1, "HUVEC")
+    original = huvec.X.copy()
     seen = Standardised(Spy()).fit(huvec).model.adata
     ctrl = (seen.obs["perturbation"] == "control").to_numpy()
     np.testing.assert_allclose(seen.X[ctrl].mean(axis=0), 0, atol=1e-12)
     np.testing.assert_allclose(seen.X[ctrl].std(axis=0), 1)
-    pairs = pd.DataFrame(seen.X[~ctrl]).groupby(
-        [seen.obs["perturbation"][~ctrl].to_numpy(), seen.obs["batch"][~ctrl].to_numpy()]
-    )
-    np.testing.assert_allclose(pairs.mean().mean(), 0, atol=1e-12)
-    np.testing.assert_allclose(pairs.mean().std(ddof=0), 1)
-
-
-def test_standardised_can_leave_the_targets_raw(tiny_rxrx1):
-    huvec = mod.select_cell_type(tiny_rxrx1, "HUVEC")
-    seen = Standardised(Spy(), y=False).fit(huvec).model.adata
-    ctrl = (seen.obs["perturbation"] == "control").to_numpy()
-    np.testing.assert_allclose(seen.X[ctrl].std(axis=0), 1)
     np.testing.assert_array_equal(seen.X[~ctrl], huvec.X[~ctrl])
+    np.testing.assert_array_equal(huvec.X, original)
 
 
-def test_standardised_can_leave_the_proxies_raw(tiny_rxrx1):
+def test_prediction_reuses_training_input_scale_and_leaves_output_raw(tiny_rxrx1):
     huvec = mod.select_cell_type(tiny_rxrx1, "HUVEC")
-    seen = Standardised(Spy(), w=False).fit(huvec).model.adata
-    ctrl = (seen.obs["perturbation"] == "control").to_numpy()
-    np.testing.assert_array_equal(seen.X[ctrl], huvec.X[ctrl])
+    train = huvec[huvec.obs["batch"] != "HUVEC-3"]
+    test = huvec[huvec.obs["batch"] == "HUVEC-3"].copy()
+    test.X = test.X * 3 + 100
+    controls = train.X[(train.obs["perturbation"] == "control").to_numpy()]
+    model = Standardised(Spy()).fit(train)
+    pred = model.predict(["s1", "s2"], test)
+    ctrl = (test.obs["perturbation"] == "control").to_numpy()
+    np.testing.assert_allclose(
+        model.model.test.X[ctrl], (test.X[ctrl] - controls.mean(0)) / controls.std(0)
+    )
+    np.testing.assert_array_equal(model.model.test.X[~ctrl], test.X[~ctrl])
+    np.testing.assert_array_equal(pred, np.ones((2, test.n_vars)))
 
 
-def test_standardised_maps_predictions_back_to_embedding_coordinates(tiny_rxrx1):
+def test_fit_models_standardises_linear_and_bridge_inputs(tiny_rxrx1):
     huvec = mod.select_cell_type(tiny_rxrx1, "HUVEC")
-    model = Standardised(Spy()).fit(huvec)
-    pred = model.predict(["s1", "s2"], huvec)
-    np.testing.assert_allclose(pred, np.tile(model.y_mean_ + model.y_std_, (2, 1)))
-
-
-def test_fit_models_standardises_only_the_bridges(tiny_rxrx1):
-    huvec = mod.select_cell_type(tiny_rxrx1, "HUVEC")
-    models = mod.fit_models(huvec, cfg(bridges=["kernel"], standardise_w=True, standardise_y=False))
+    models = mod.fit_models(huvec, cfg(bridges=["kernel"]))
     assert isinstance(models["kernel bridge"], Standardised)
-    assert (models["kernel bridge"].w, models["kernel bridge"].y) == (True, False)
-    assert not isinstance(models["shift (b=1)"], Standardised)
-    plain = mod.fit_models(huvec, cfg(bridges=["kernel"], standardise_w=False, standardise_y=False))
+    controls = huvec.X[(huvec.obs["perturbation"] == "control").to_numpy()]
+    for name in ["kernel bridge", "shift (b=1)", "pooled (b=0)", "transfer (fit b)"]:
+        np.testing.assert_allclose(models[name].w_mean_, controls.mean(0))
+        np.testing.assert_allclose(models[name].w_std_, controls.std(0))
+    plain = mod.fit_models(huvec, cfg(bridges=["kernel"], standardise_w=False))
     assert not isinstance(plain["kernel bridge"], Standardised)
+    np.testing.assert_array_equal(plain["transfer (fit b)"].w_std_, 1)

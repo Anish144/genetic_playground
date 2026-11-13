@@ -7,7 +7,7 @@ The outer experiment never enters tuning. n_configs configurations per bridge, d
 one; each neural configuration is trained once per inner fold to the last of neural_checkpoints
 and scored at each. The configuration with the lowest validation mse averaged over the inner
 folds is refit on all training experiments and scored on the outer fold, next to the linear
-models and TVN. shift (b=1) is scored on the inner folds too, as a reference only.
+models. shift (b=1) is scored on the inner folds too, as a reference only.
 n_validation_batches counts outer evaluations; inner tuning fits and final refits are additional.
 W&B: one run per job, named name. Per outer fold k: the selected settings (fold k/selected/...),
 their mean validation scores and shift's (fold k/validation/<bridge>/<metric>), the training
@@ -51,7 +51,6 @@ from train_batch_transfer_rxrx1 import (
 from genetic_perturbation_playground import tuning
 from genetic_perturbation_playground.data.rxrx1 import load_rxrx1
 from genetic_perturbation_playground.model.batch_transfer import batch_labels, training_batch_counts
-from genetic_perturbation_playground.model.tvn import TVNTransferModel
 from genetic_perturbation_playground.utils.plotting import report_by_training_batches
 
 
@@ -104,7 +103,7 @@ def nested_cv(adata: sc.AnnData, cfg: DictConfig) -> Iterator[tuple]:
         log_selected(i + 1, selected)
         log_summary(f"fold {i + 1}/validation", winners)
         train = adata[np.isin(batch, train_batches)]
-        models = _fit_linear(train) | {"tvn": TVNTransferModel().fit(train)}
+        models = _fit_linear(train, cfg.standardise_w)
         models |= tuning.fit_selected(train, selected, cfg, f"fold {i + 1}/neural bridge")
         scores = score_batches(models, adata, [held_out]).assign(fold=i)
         scores["n_training_batches"] = scores["perturbation"].map(training_batch_counts(train))

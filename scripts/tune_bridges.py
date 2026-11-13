@@ -60,8 +60,6 @@ class Split(NamedTuple):
     train: sc.AnnData  # training batches, seen controls only
     eval: sc.AnnData  # evaluation batches, all cells
     seen: np.ndarray  # seen-control mask of the evaluation cells
-    eval_batches: np.ndarray
-    batch: np.ndarray  # batch of every cell in the full data
 
 
 def _split(adata, batch, seen, train_batches, eval_batches) -> Split:
@@ -69,14 +67,12 @@ def _split(adata, batch, seen, train_batches, eval_batches) -> Split:
     train_cells = ~is_control(adata) | seen  # models only ever see the seen controls
     is_eval = np.isin(batch, eval_batches)
     train = adata[np.isin(batch, train_batches) & train_cells]
-    return Split(train, adata[is_eval], seen[is_eval], eval_batches, batch)
+    return Split(train, adata[is_eval], seen[is_eval])
 
 
 def _validation_scores(model, split: Split, k: int) -> dict:
     """Mean over evaluation batches of each per-batch metric of `model`."""
-    scores = _score_batches(
-        {"bridge": model}, split.eval, split.seen, split.eval_batches, split.batch, k
-    )
+    scores = _score_batches({"bridge": model}, split.eval, split.seen, k)
     per_batch = _average_per_batch(scores)
     bridge = per_batch[per_batch["model"] == "bridge"]
     return bridge.groupby("metric")["value"].mean().to_dict()
@@ -118,7 +114,9 @@ def nested_cv(adata: sc.AnnData, cfg: DictConfig) -> tuple:
         selected_rows += [{"fold": i, "bridge": b, **c} for b, c in selected.items()]
 
         outer = _split(adata, batch, seen, train_batches, [held_out])
-        models = _fit_linear(outer.train) | tuning.fit_selected(outer.train, selected, cfg)
+        models = _fit_linear(outer.train, cfg.standardise_w) | tuning.fit_selected(
+            outer.train, selected, cfg
+        )
         scores = score(models, outer.eval, cfg.top_k, outer.seen)
         scores["n_training_batches"] = scores["perturbation"].map(
             training_batch_counts(outer.train)

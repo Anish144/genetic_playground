@@ -49,14 +49,17 @@ MODELS = {"pooled (b=0)": 0.0, "shift (b=1)": 1.0, "transfer (fit b)": None}
 
 def fit(train: sc.AnnData, cfg: DictConfig) -> dict:
     """Fit every model variant on the training batches."""
-    models = _fit_linear(train) | _fit_bridges(train, cfg)
+    models = _fit_linear(train, cfg.standardise_w) | _fit_bridges(train, cfg)
     _print_slope(models["transfer (fit b)"].slope_)
     return models
 
 
-def _fit_linear(train: sc.AnnData) -> dict:
-    """The three BatchTransferModel variants of MODELS."""
-    return {name: BatchTransferModel(slope).fit(train) for name, slope in MODELS.items()}
+def _fit_linear(train: sc.AnnData, standardise_w: bool = True) -> dict:
+    """Fit the linear variants with optional input scaling and unscaled targets."""
+    return {
+        name: BatchTransferModel(slope, standardise_w=standardise_w).fit(train)
+        for name, slope in MODELS.items()
+    }
 
 
 def _fit_bridges(train: sc.AnnData, cfg: DictConfig) -> dict:
@@ -65,8 +68,7 @@ def _fit_bridges(train: sc.AnnData, cfg: DictConfig) -> dict:
 
 
 def _make_bridge(kind: str, cfg: DictConfig):
-    """An unfitted kernel or neural bridge with the config's settings, standardised per
-    cfg.standardise_w and cfg.standardise_y."""
+    """An unfitted kernel or neural bridge, optionally standardising its control inputs."""
     if kind == "kernel":
         bridge = KernelBridgeTransfer(cfg.bridge_reg, cfg.weight_by_cells)
     else:
@@ -149,14 +151,14 @@ def _seen_controls(adata: sc.AnnData, batch: np.ndarray, rng: np.random.Generato
     return rank.to_numpy() % 2 == 0
 
 
-def _score_batches(models, test, seen, held_out, batch, k) -> list[pd.DataFrame]:
-    """Scores of each held-out batch on its own, tagged with the batch and its total cells."""
+def _score_batches(models, test, seen, k) -> list[pd.DataFrame]:
+    """Score each batch in `test` separately, tagging its label and total cell count."""
     test_batch = batch_labels(test)
     scores = []
-    for b in held_out:
+    for b in np.unique(test_batch):
         in_b = test_batch == b
         s = score(models, test[in_b], k, seen[in_b])
-        scores.append(s.assign(batch=b, cells=(batch == b).sum()))
+        scores.append(s.assign(batch=b, cells=in_b.sum()))
     return scores
 
 

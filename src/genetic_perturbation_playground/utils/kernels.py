@@ -4,15 +4,21 @@ Inputs are (n, d) arrays; 1-D inputs are treated as a single column.
 """
 
 import abc
+from math import ceil
 
 import numpy as np
 from scipy.spatial.distance import pdist
 
 
 def square_distance(X: np.ndarray, X2: np.ndarray) -> np.ndarray:
-    """Pairwise squared Euclidean distances, shape (n, n2)."""
+    """Pairwise squared Euclidean distances using BLAS, shape (n, n2).
+
+    Centre both inputs at the same point to reduce cancellation from large shared offsets.
+    """
+    offset = X.mean(axis=0) if len(X) else 0.0
+    X, X2 = X - offset, X2 - offset
     sq = np.sum(X**2, axis=1)[:, None] + np.sum(X2**2, axis=1)[None, :] - 2.0 * X @ X2.T
-    return np.maximum(sq, 0.0)  # cancellation can give tiny negatives
+    return np.maximum(sq, 0.0)  # roundoff can give tiny negatives
 
 
 def median_heuristic(X: np.ndarray, max_points: int = 2000) -> float:
@@ -22,7 +28,7 @@ def median_heuristic(X: np.ndarray, max_points: int = 2000) -> float:
     domain is still covered evenly.
     """
     X = _as_2d(X)
-    X = X[:: -(-len(X) // max_points)]  # stride = ceil(n / max_points)
+    X = X[:: ceil(len(X) / max_points)]
     return float(np.median(pdist(X)))
 
 

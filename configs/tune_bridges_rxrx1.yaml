@@ -4,9 +4,7 @@ defaults:  # validation batches, cell type, proxies, scoring and neural settings
 
 inner_folds: 3       # K-fold over each outer fold's training experiments; settings picked by mean mse
 n_configs: 20        # per bridge, drawn at random from its grid (the same draw in every outer fold)
-# Grids for standardised embeddings (standardise_w, standardise_y): the bridges' ridge solutions are linear
-# in Y, and Adam with decoupled weight decay ignores the loss scale, so Y's scale moves no optimum;
-# the ranges are wide because nothing has been tuned on standardised W yet.
+# Inputs use training-control statistics; embedding targets stay unscaled.
 kernel_grid:         # 36 configurations
   reg: [1.0e-9, 1.0e-8, 1.0e-7, 1.0e-6, 1.0e-5, 1.0e-4]
   lengthscale_scale: [0.25, 0.5, 1, 2, 4, 8]  # multiples of the median-heuristic lengthscale

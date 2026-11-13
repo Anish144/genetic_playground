@@ -12,6 +12,8 @@ from genetic_perturbation_playground.model.batch_transfer import (
     BatchTransferModel,
     KernelBridgeTransfer,
     NeuralBridgeTransfer,
+    _bridge_data,
+    _test_controls,
 )
 from genetic_perturbation_playground.model.proxy_unconfounded import MarginalEmbeddingBridge
 from genetic_perturbation_playground.model.proxy_unconfounded_neural import (
@@ -36,6 +38,37 @@ def _cells(rng, n_batches=4, perts=("a", "b", "c"), n_genes=5):
     ]
     obs = pd.DataFrame(obs, columns=["perturbation", "batch"])
     return ad.AnnData(rng.normal(size=(len(obs), n_genes)), obs=obs)
+
+
+@pytest.mark.parametrize("prepare", [_bridge_data, _test_controls])
+def test_bridge_data_requires_controls_in_every_perturbed_batch(prepare):
+    data = ad.AnnData(
+        np.ones((2, 3)),
+        obs=pd.DataFrame({"perturbation": ["control", "a"], "batch": ["b0", "b1"]}),
+    )
+    with pytest.raises(ValueError, match="Every batch with perturbed cells needs control cells"):
+        prepare(data)
+
+
+@pytest.mark.parametrize("standardise_w", [True, False])
+@pytest.mark.parametrize("slope, expected", [(0, [45, 397]), (1, [75, 487]), (None, [105, 667])])
+def test_linear_input_scaling_preserves_raw_targets_and_fixed_slopes(
+    standardise_w, slope, expected
+):
+    # Y = [5, 7] + [2, 3] * W. Each batch has two controls and one perturbed cell.
+    X = np.array([[8, 90], [12, 110], [25, 307], [28, 150], [32, 170], [65, 487]], dtype=float)
+    obs = pd.DataFrame(
+        {"perturbation": ["control", "control", "a"] * 2, "batch": ["b0"] * 3 + ["b1"] * 3}
+    )
+    train = ad.AnnData(X, obs=obs)
+    test = ad.AnnData(
+        np.array([[48, 210], [52, 230], [-999, -999]], dtype=float), obs=obs.iloc[:3].copy()
+    )
+    model = BatchTransferModel(slope, standardise_w=standardise_w).fit(train)
+    std = X[[0, 1, 3, 4]].std(0) if standardise_w else 1
+    raw_slope = np.array([2, 3]) if slope is None else slope
+    np.testing.assert_allclose(model.coef_, raw_slope * std)
+    np.testing.assert_allclose(model.predict(["a"], test), [expected])
 
 
 def test_matches_cell_level_marginal_embedding_bridge():

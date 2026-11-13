@@ -59,9 +59,8 @@ def sample_configs(grid: DictConfig, n: int, seed: int) -> list[dict]:
 
 
 def with_standardisation(bridge, cfg: DictConfig):
-    """`bridge` (unfitted), wrapped in Standardised of W and/or Y per cfg.standardise_w/_y."""
-    w, y = cfg.standardise_w, cfg.standardise_y
-    return Standardised(bridge, w, y) if w or y else bridge
+    """Optionally standardise bridge inputs; targets and predictions are always unscaled."""
+    return Standardised(bridge) if cfg.standardise_w else bridge
 
 
 def make_kernel(config: dict, cfg: DictConfig):
@@ -109,15 +108,15 @@ def _inner_scores(folds: Iterable[tuple[sc.AnnData, Evaluate]], cfg: DictConfig)
 def _validation_rows(train: sc.AnnData, evaluate: Evaluate, cfg: DictConfig) -> list[dict]:
     """Validation scores of shift, each kernel configuration and each neural one at each checkpoint."""
     return (
-        _shift_rows(train, evaluate)
+        _shift_rows(train, evaluate, cfg)
         + _kernel_rows(train, evaluate, cfg)
         + _neural_rows(train, evaluate, cfg)
     )
 
 
-def _shift_rows(train: sc.AnnData, evaluate: Evaluate) -> list[dict]:
+def _shift_rows(train: sc.AnnData, evaluate: Evaluate, cfg: DictConfig) -> list[dict]:
     """Validation scores of shift (b=1), the reference the bridges are compared with."""
-    scores = evaluate(BatchTransferModel(1.0).fit(train))
+    scores = evaluate(BatchTransferModel(1.0, standardise_w=cfg.standardise_w).fit(train))
     print(f"  shift (b=1): mse {scores['mse']:.4g}", flush=True)
     return [{"bridge": "shift (b=1)", **scores}]
 

@@ -3,8 +3,8 @@
 - Data: data/rxrx1_phenom_4x4.h5ad (scripts/embed_rxrx1.py), crops of cfg.cell_type only.
 - Batch = experiment; treatment = siRNA; proxy W = the experiment's negative-control crops, plus
   its positive-control crops if cfg.positive_controls_as_proxies.
-- Models: the linear ones and the bridges of train_batch_transfer_expression, plus TVN
-  (model/tvn.py); a held-out experiment is predicted from its proxy crops alone.
+- Models: the linear ones and the bridges of train_batch_transfer_expression, with scaled inputs
+  and unscaled targets; a held-out experiment is predicted from its proxy crops alone.
 - Validation: select n_validation_batches distinct experiments without replacement using seed.
   Hold out each one separately and fit each model on every other experiment, for
   n_validation_batches fits per model. Scores per (treatment siRNA, held-out experiment), on means:
@@ -34,7 +34,7 @@ import scanpy as sc
 import wandb
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf
-from train_batch_transfer_expression import _fit_bridges, _fit_linear, _print_slope
+from train_batch_transfer_expression import fit as fit_models
 
 from genetic_perturbation_playground.data.rxrx1 import load_rxrx1
 from genetic_perturbation_playground.model.batch_transfer import (
@@ -44,7 +44,6 @@ from genetic_perturbation_playground.model.batch_transfer import (
     perturbation_labels,
     training_batch_counts,
 )
-from genetic_perturbation_playground.model.tvn import TVNTransferModel
 from genetic_perturbation_playground.tuning import batch_folds, validation_batches
 from genetic_perturbation_playground.utils.metrics import mse
 from genetic_perturbation_playground.utils.plotting import report_by_training_batches
@@ -81,13 +80,6 @@ def add_positive_controls_to_proxies(adata: sc.AnnData) -> sc.AnnData:
     adata = adata.copy()
     adata.obs["perturbation"] = np.where(positive, "control", perturbation_labels(adata))
     return adata
-
-
-def fit_models(train: sc.AnnData, cfg: DictConfig) -> dict:
-    """Linear models, TVN and the bridges of cfg.bridges, fit on `train`."""
-    models = _fit_linear(train) | {"tvn": TVNTransferModel().fit(train)}
-    _print_slope(models["transfer (fit b)"].slope_)
-    return models | _fit_bridges(train, cfg)
 
 
 def score_batch(models: dict, test: sc.AnnData) -> pd.DataFrame:

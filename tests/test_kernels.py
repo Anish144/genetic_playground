@@ -1,6 +1,14 @@
 import numpy as np
 
-from genetic_perturbation_playground.utils.kernels import median_heuristic
+from genetic_perturbation_playground.utils.kernels import RBF, median_heuristic
+
+
+def test_rbf_preserves_distances_with_large_offsets_and_per_feature_scales():
+    x = np.array([[1e9, -1e9], [1e9 + 3, -1e9 + 4]])
+    kernel = RBF(lengthscales=[3, 4])
+    expected = np.array([[1, np.exp(-1)], [np.exp(-1), 1]])
+    np.testing.assert_allclose(kernel(x), expected)
+    np.testing.assert_allclose(kernel(x[:1], x[1:]), expected[:1, 1:])
 
 
 def test_median_heuristic_matches_brute_force():

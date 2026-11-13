@@ -130,28 +130,42 @@ class BatchTransferModel:
 
     slope=None fits b per gene; slope=1 is the beta_1 = beta_2 case (subtract W_e, no transfer
     needed); slope=0 ignores batch entirely (pooled perturbation means).
+
+    By default, W is standardised using the training controls' pooled mean and std, reused
+    at prediction. Targets and predictions stay in their original units. Fixed slopes and
+    the reported slope_/gamma_ use those original units; coef_/intercept_ use standardised W.
     """
 
-    def __init__(self, slope: float | None = None):
+    def __init__(self, slope: float | None = None, standardise_w: bool = True):
         self.slope = slope
+        self.standardise_w = standardise_w
 
     def fit(self, adata: sc.AnnData) -> "BatchTransferModel":
+        """Fit to raw targets, scaling only W with statistics from the training controls."""
         s = summary_stats(adata)
-        self.slope_ = self._slope(s)
+        self.w_mean_, self.w_std_ = (
+            _mean_and_std(_dense(adata.X[is_control(adata)])) if self.standardise_w else (0.0, 1.0)
+        )
+        s["W"] = (s["W"] - self.w_mean_) / self.w_std_
+        s["w_mean"] = (s["w_mean"] - self.w_mean_) / self.w_std_
+        self.coef_ = self._coefficient(s)
         self.perturbations_ = s["perturbations"]
-        self.gamma_ = s["y_mean"] - self.slope_ * s["w_mean"]
+        self.intercept_ = s["y_mean"] - self.coef_ * s["w_mean"]
+        self.slope_ = self.coef_ / self.w_std_
+        self.gamma_ = self.intercept_ - self.slope_ * self.w_mean_
         return self
 
     def predict(self, perturbations: list[str], test: sc.AnnData) -> np.ndarray:
         """Mean expression of each perturbation in `test`, given only `test`'s control cells."""
-        gamma = self.gamma_[_positions(self.perturbations_, perturbations)]
-        return gamma + self.slope_ * matched_control_mean(test, perturbations)
+        intercept = self.intercept_[_positions(self.perturbations_, perturbations)]
+        w = (matched_control_mean(test, perturbations) - self.w_mean_) / self.w_std_
+        return intercept + self.coef_ * w
 
-    def _slope(self, s: dict) -> np.ndarray:
-        """The fixed slope for every gene, or the fitted one if slope is None."""
+    def _coefficient(self, s: dict) -> np.ndarray:
+        """Coefficient on scaled W; convert a fixed slope from its original input units."""
         if self.slope is None:
             return _within_perturbation_slope(s)
-        return np.full(s["y_mean"].shape[1], float(self.slope))
+        return np.full(s["y_mean"].shape[1], float(self.slope)) * self.w_std_
 
 
 class BridgeData(NamedTuple):
@@ -167,15 +181,16 @@ class BridgeData(NamedTuple):
 
 def _bridge_data(adata: sc.AnnData, weight_by_cells: bool = True) -> BridgeData:
     """Per-(perturbation, batch) means of `adata` and the control cells of each batch."""
-    s = summary_stats(adata)
     ctrl = is_control(adata)
-    n_b = len(s["batches"])
-    b_idx = _positions(s["batches"], batch_labels(adata))
-    p_idx = _positions(s["perturbations"], perturbation_labels(adata)[~ctrl])
+    batch = batch_labels(adata)
+    _require_controls(batch[~ctrl], batch[ctrl])
+    batches, b_idx = np.unique(batch, return_inverse=True)
+    perts, p_idx = np.unique(perturbation_labels(adata)[~ctrl], return_inverse=True)
+    n_b = len(batches)
     pairs, pair_idx = np.unique(p_idx * n_b + b_idx[~ctrl], return_inverse=True)
     n = np.bincount(pair_idx)
     return BridgeData(
-        perturbations=s["perturbations"],
+        perturbations=perts,
         ctrl=_per_batch_controls(adata, ctrl, b_idx, n_b),
         pert=pairs // n_b,
         batch=pairs % n_b,
@@ -198,9 +213,10 @@ def _batch_mix(test: sc.AnnData, perturbations) -> np.ndarray:
 
 def _test_controls(test: sc.AnnData) -> list[np.ndarray]:
     """Control cells of each batch of `test`."""
-    batches = summary_stats(test)["batches"]
-    b_idx = _positions(batches, batch_labels(test))
-    return _per_batch_controls(test, is_control(test), b_idx, len(batches))
+    ctrl, batch = is_control(test), batch_labels(test)
+    _require_controls(batch[~ctrl], batch[ctrl])
+    batches, b_idx = np.unique(batch, return_inverse=True)
+    return _per_batch_controls(test, ctrl, b_idx, len(batches))
 
 
 class KernelBridgeTransfer:
@@ -297,43 +313,35 @@ class NeuralBridgeTransfer:
 
 
 class Standardised:
-    """`model` fit and predicting on standardised data; predictions mapped back.
+    """Fit and predict with standardised control inputs and unscaled targets and outputs.
 
-    The model sees mean 0, variance 1 in every dimension: the proxy (control) cells are
-    standardised by the training controls' pooled mean and std, the other cells by the mean and std
-    of the training targets, the per-(perturbation, batch) means. Predictions undo the latter map.
-    Constant dimensions keep std 1. w=False or y=False leaves the proxies or the targets as they are.
+    Each proxy dimension uses the training controls' pooled mean and std, reused at prediction.
+    Constant dimensions use std 1. Perturbed cells, categorical labels and model outputs are
+    unchanged, so the model learns and predicts in the targets' original units.
     """
 
-    def __init__(self, model, w: bool = True, y: bool = True):
-        self.model, self.w, self.y = model, w, y
+    def __init__(self, model):
+        self.model = model
 
     @property
     def perturbations_(self) -> np.ndarray:
         return self.model.perturbations_
 
     def fit(self, adata: sc.AnnData, *args) -> "Standardised":
-        """Fit `model` on standardised `adata`; extra arguments go to its fit (checkpoints)."""
-        X = _dense(adata.X)
-        ctrl = is_control(adata)
-        self.w_mean_, self.w_std_ = _mean_and_std(X[ctrl]) if self.w else (0.0, 1.0)
-        pairs = [perturbation_labels(adata)[~ctrl], batch_labels(adata)[~ctrl]]
-        means = pd.DataFrame(X[~ctrl]).groupby(pairs).mean()
-        self.y_mean_, self.y_std_ = _mean_and_std(means) if self.y else (0.0, 1.0)
+        """Scale training controls and fit to raw targets; forward extra fit arguments."""
+        self.w_mean_, self.w_std_ = _mean_and_std(_dense(adata.X[is_control(adata)]))
         self.model.fit(self._standardise(adata), *args)
         return self
 
     def predict(self, perturbations: list[str], test: sc.AnnData) -> np.ndarray:
-        """`model`'s prediction from standardised `test`, mapped back to the data's coordinates."""
-        pred = self.model.predict(perturbations, self._standardise(test))
-        return pred * self.y_std_ + self.y_mean_
+        """Predict in target units using controls scaled by the training statistics."""
+        return self.model.predict(perturbations, self._standardise(test))
 
     def _standardise(self, adata: sc.AnnData) -> sc.AnnData:
-        """`adata` with control cells in the proxy's standard units and the rest in the targets'."""
+        """Copy `adata` with scaled controls and unchanged perturbed cells."""
         X = _dense(adata.X).astype(float)
         ctrl = is_control(adata)
         X[ctrl] = (X[ctrl] - self.w_mean_) / self.w_std_
-        X[~ctrl] = (X[~ctrl] - self.y_mean_) / self.y_std_
         return sc.AnnData(X, obs=adata.obs)
 
 
