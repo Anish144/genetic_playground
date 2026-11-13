@@ -12,18 +12,16 @@ import pandas as pd
 import scanpy as sc
 import torch
 from PIL import Image
-from skimage.filters import threshold_otsu
 
 from genetic_perturbation_playground.data.data_loader import DATA_DIR
 
 RXRX1_DIR = DATA_DIR / "rxrx1" / "rxrx1"
 
 
-def rxrx1_path(grid: int, standardise_sites: bool = False, min_nuclei_fraction: float = 0.0) -> Path:
+def rxrx1_path(grid: int, standardise_sites: bool = False) -> Path:
     """Embeddings of every site cut into grid x grid crops, with embed_rxrx1's settings in the name."""
     sitenorm = "_sitenorm" if standardise_sites else ""
-    nuclei = f"_nuclei{min_nuclei_fraction:g}" if min_nuclei_fraction else ""
-    return DATA_DIR / f"rxrx1_phenom_{grid}x{grid}{sitenorm}{nuclei}.h5ad"
+    return DATA_DIR / f"rxrx1_phenom_{grid}x{grid}{sitenorm}.h5ad"
 
 
 def site_prefixes(meta: pd.DataFrame) -> list[str]:
@@ -46,14 +44,6 @@ def crop(x: torch.Tensor, grid: int) -> torch.Tensor:
     n, c, h, w = x.shape
     x = x.reshape(n, c, grid, h // grid, grid, w // grid).permute(0, 2, 4, 1, 3, 5)
     return x.reshape(-1, c, h // grid, w // grid)
-
-
-def nuclear_fraction(x: torch.Tensor, grid: int) -> torch.Tensor:
-    """(N, 6, H, W) uint8 sites (cpu) -> share of each crop, in crop() order, above its site's Otsu
-    threshold in the DNA (Hoechst, w1) channel: roughly the area the crop's nuclei cover."""
-    dna = x[:, :1]
-    thresholds = torch.tensor([threshold_otsu(site.numpy()) for site in dna])
-    return crop(dna > thresholds.view(-1, 1, 1, 1), grid).float().mean((1, 2, 3))
 
 
 def crop_obs(meta: pd.DataFrame, grid: int) -> pd.DataFrame:

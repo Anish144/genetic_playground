@@ -13,5 +13,6 @@ def test_positional_table_matches_crop_size():
 def test_embed_shape_and_finite():
     model = load_phenom(128)
     x = torch.randint(0, 255, (3, 6, 128, 128), dtype=torch.uint8)
+    x[0].zero_()  # blank crops are retained by RxRx1 preprocessing
     out = embed(model, standardise(x))
     assert out.shape == (3, 384) and torch.isfinite(out).all()
