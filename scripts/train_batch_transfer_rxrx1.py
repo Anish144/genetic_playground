@@ -18,6 +18,9 @@ Config: configs/train_batch_transfer_rxrx1.yaml. Usage:
 Prints each validation run's mean per (metric, model) as it finishes. In the Hydra run dir,
 scores.csv is rewritten after each run and summary.csv averages over the selected experiments.
 The existing "fold" column and W&B keys identify the leave-one-experiment-out runs.
+Scores include n_training_batches, counting training experiments containing each siRNA.
+plots/by_training_batches/batch_<label>/ contains a separate scatter plot per metric and
+per_perturbation.csv for each held-out experiment, using that experiment's scores directly.
 """
 
 import time
@@ -39,10 +42,12 @@ from genetic_perturbation_playground.model.batch_transfer import (
     batch_labels,
     is_control,
     perturbation_labels,
+    training_batch_counts,
 )
 from genetic_perturbation_playground.model.tvn import TVNTransferModel
 from genetic_perturbation_playground.tuning import batch_folds, validation_batches
 from genetic_perturbation_playground.utils.metrics import mse
+from genetic_perturbation_playground.utils.plotting import report_by_training_batches
 
 
 def select_cell_type(adata: sc.AnnData, cell_type: str | None) -> sc.AnnData:
@@ -135,7 +140,9 @@ def cross_validate(adata: sc.AnnData, cfg: DictConfig) -> Iterator[pd.DataFrame]
         start = time.perf_counter()
         models = fit_models(train, fold_cfg)
         print(f"  fit {len(models)} models in {time.perf_counter() - start:.0f}s", flush=True)
-        yield score_batches(models, adata, [held_out]).assign(fold=i)
+        scores = score_batches(models, adata, [held_out]).assign(fold=i)
+        scores["n_training_batches"] = scores["perturbation"].map(training_batch_counts(train))
+        yield scores
 
 
 def summary(scores: pd.DataFrame) -> pd.DataFrame:
@@ -170,6 +177,7 @@ def main(cfg: DictConfig):
         overall = summary(pd.concat(folds))
         log_summary("all folds", overall)
     overall.to_csv(out_dir / "summary.csv")
+    report_by_training_batches(pd.concat(folds), out_dir / "plots" / "by_training_batches")
     print(f"all folds:\n{overall.to_string(float_format='%.4g')}\nsaved to {out_dir}")
 
 

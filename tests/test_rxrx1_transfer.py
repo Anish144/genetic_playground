@@ -101,6 +101,7 @@ def test_positive_controls_join_the_proxies(tiny_rxrx1):
 @pytest.mark.parametrize("n", [1, 2, 3])
 def test_cross_validate_trains_on_all_other_experiments(tiny_rxrx1, monkeypatch, n):
     huvec = mod.select_cell_type(tiny_rxrx1, "HUVEC")
+    huvec = huvec[~((huvec.obs["batch"] == "HUVEC-3") & (huvec.obs["perturbation"] == "s2"))]
     training_batches = []
     fit_models = mod.fit_models
 
@@ -120,6 +121,11 @@ def test_cross_validate_trains_on_all_other_experiments(tiny_rxrx1, monkeypatch,
     for train, batch in zip(training_batches, held_out, strict=True):
         assert train == {"HUVEC-1", "HUVEC-2", "HUVEC-3"} - {batch}
     assert all("tvn" in set(scores["model"]) for scores in folds)
+    for scores in folds:
+        assert (
+            scores["n_training_batches"].tolist()
+            == scores["perturbation"].map({"s1": 2, "s2": 1}).tolist()
+        )
 
 
 def test_cross_validate_fits_the_neural_bridge(tiny_rxrx1):
@@ -151,6 +157,7 @@ def test_nested_cv_tunes_on_inner_validation_and_scores_the_outer_folds(tiny_rxr
     assert len(folds) == 2
     for inner, selected, scores in folds:
         assert scores["batch"].nunique() == 1
+        assert (scores["n_training_batches"] == 2).all()
         # per inner fold: 2 kernel configurations, 1 neural at 2 checkpoints, the shift reference
         assert inner.groupby("inner_fold").size().tolist() == [2 + 2 + 1] * 2
         assert (inner["bridge"] == "shift (b=1)").sum() == 2

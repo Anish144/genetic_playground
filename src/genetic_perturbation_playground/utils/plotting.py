@@ -1,4 +1,5 @@
 from pathlib import Path
+from urllib.parse import quote
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -81,6 +82,48 @@ def report(scores: pd.DataFrame, unit: str, out_dir: Path) -> None:
         series = {label: wide[label].to_numpy() for label in wide}
         plot_metric(series, name, out_dir / f"{name}.png", cells, log=name == "mse", unit=unit)
     print(f"Plots saved to {out_dir}")
+
+
+def report_by_training_batches(scores: pd.DataFrame, out_dir: Path) -> None:
+    """Plot metrics against training-batch count separately for each held-out batch.
+
+    Scores have one row per (batch, perturbation, metric, model), plus n_training_batches and
+    value. Each dot uses that held-out batch's score directly, with no averaging across batches
+    or perturbations. Colours identify models consistently across plots. Each batch_<label>/
+    folder contains per_perturbation.csv and one PNG per metric; labels are URL-escaped for paths.
+    """
+    finite = scores[np.isfinite(scores["value"])]
+    colours = {model: f"C{i}" for i, model in enumerate(scores["model"].unique())}
+    with plt.rc_context(STYLE):
+        for batch, batch_scores in finite.groupby("batch", sort=False, observed=True):
+            batch_dir = out_dir / f"batch_{quote(str(batch), safe='')}"
+            batch_dir.mkdir(parents=True, exist_ok=True)
+            batch_scores.to_csv(batch_dir / "per_perturbation.csv", index=False)
+            for metric, table in batch_scores.groupby("metric", sort=False, observed=True):
+                fig, ax = plt.subplots(figsize=(6.4, 3.8), layout="constrained")
+                for model, rows in table.groupby("model", sort=False, observed=True):
+                    ax.scatter(
+                        rows["n_training_batches"],
+                        rows["value"],
+                        s=12,
+                        alpha=0.6,
+                        lw=0,
+                        label=model,
+                        color=colours[model],
+                    )
+                ax.set(
+                    title=f"Held-out batch: {batch}",
+                    xlabel="Training batches containing the perturbation",
+                    ylabel=metric.upper() if metric == "mse" else metric,
+                    xticks=sorted(table["n_training_batches"].unique()),
+                )
+                ax.grid(axis="y", color="#e5e4df", lw=0.5)
+                ax.set_axisbelow(True)
+                ax.spines[["top", "right"]].set_visible(False)
+                fig.legend(loc="outside lower center", ncols=2, frameon=False)
+                fig.savefig(batch_dir / f"{metric}.png", dpi=300)
+                plt.close(fig)
+    print(f"Per-perturbation scores and plots saved to {out_dir}")
 
 
 def plot_excess_mse_vs_n_envs(

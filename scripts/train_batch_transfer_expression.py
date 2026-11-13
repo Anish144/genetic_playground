@@ -10,6 +10,9 @@ control mean). Two views:
 - per batch: scores averaged over perturbations within each selected batch -> plots/per_batch/
 
 Raw scores (long tables) go to scores_per_perturbation.csv and scores_per_batch.csv.
+Per-perturbation scores include n_training_batches, the number of training batches containing
+that perturbation. plots/by_training_batches/batch_<label>/ contains a separate scatter plot per
+metric and per_perturbation.csv for each held-out batch, using that batch's scores directly.
 
 Config: configs/train_batch_transfer_expression.yaml. `name` is required and names the output folder. Usage:
 
@@ -35,10 +38,11 @@ from genetic_perturbation_playground.model.batch_transfer import (
     batch_labels,
     is_control,
     summary_stats,
+    training_batch_counts,
 )
 from genetic_perturbation_playground.tuning import validation_batches, with_standardisation
 from genetic_perturbation_playground.utils import metrics
-from genetic_perturbation_playground.utils.plotting import report
+from genetic_perturbation_playground.utils.plotting import report, report_by_training_batches
 
 MODELS = {"pooled (b=0)": 0.0, "shift (b=1)": 1.0, "transfer (fit b)": None}
 
@@ -110,8 +114,9 @@ def cross_validate(adata: sc.AnnData, cfg: DictConfig) -> tuple:
     Every batch's controls are split in two halves. The `seen` half is the proxy for all models, in
     training and held-out batches alike; the other half is only the baseline in scoring.
 
-    Returns (per-perturbation scores, per-batch scores) as long tables. Per-perturbation scores are
-    averaged over validation batches (cells summed); per-batch scores average over perturbations.
+    Returns three long tables: scores averaged per perturbation, scores averaged per batch,
+    and individual scores per (perturbation, held-out batch, metric, model) for separate plots.
+    Per-perturbation averages sum cell counts; per-batch averages are over perturbations.
     """
     batch = batch_labels(adata)
     rng = np.random.default_rng(cfg.seed)
@@ -123,12 +128,19 @@ def cross_validate(adata: sc.AnnData, cfg: DictConfig) -> tuple:
     for i, held_out in enumerate(selected):
         print(f"validation {i + 1}/{len(selected)}: holding out {held_out}")
         is_test = batch == held_out
-        models = fit(adata[~is_test & train_cells], cfg)
+        train = adata[~is_test & train_cells]
+        models = fit(train, cfg)
         test = adata[is_test]
-        pert_scores.append(score(models, test, cfg.top_k, seen[is_test]))
+        scores = score(models, test, cfg.top_k, seen[is_test]).assign(batch=held_out, fold=i)
+        scores["n_training_batches"] = scores["perturbation"].map(training_batch_counts(train))
+        pert_scores.append(scores)
         _print_fold_means(pert_scores[-1])
         batch_scores.append(pert_scores[-1].assign(batch=held_out, cells=is_test.sum()))
-    return _average_per_perturbation(pert_scores), _average_per_batch(batch_scores)
+    return (
+        _average_per_perturbation(pert_scores),
+        _average_per_batch(batch_scores),
+        pd.concat(pert_scores, ignore_index=True),
+    )
 
 
 def _seen_controls(adata: sc.AnnData, batch: np.ndarray, rng: np.random.Generator) -> np.ndarray:
@@ -155,8 +167,14 @@ def _print_fold_means(scores: pd.DataFrame) -> None:
 
 
 def _average_per_perturbation(scores: list[pd.DataFrame]) -> pd.DataFrame:
-    """Scores averaged over validation runs per perturbation, with cells summed."""
-    grouped = pd.concat(scores).groupby(["perturbation", "metric", "model"], sort=False)
+    """Average validation scores per perturbation and training-batch count, summing cells.
+
+    Under leave-one-batch-out evaluation, a scored perturbation has the same count in every run:
+    its total number of observed batches minus the one held out.
+    """
+    grouped = pd.concat(scores).groupby(
+        ["perturbation", "n_training_batches", "metric", "model"], sort=False
+    )
     return grouped.agg(value=("value", "mean"), cells=("cells", "sum")).reset_index()
 
 
@@ -171,10 +189,10 @@ def _average_per_batch(scores: list[pd.DataFrame]) -> pd.DataFrame:
 )
 def main(cfg: DictConfig):
     adata = load_dataset()
-    per_pert, per_batch = cross_validate(adata, cfg)
+    per_pert, per_batch, per_pair = cross_validate(adata, cfg)
     out_dir = Path(HydraConfig.get().runtime.output_dir)
     _save_scores(per_pert, per_batch, out_dir)
-    _plot_scores(per_pert, per_batch, out_dir / "plots")
+    _plot_scores(per_pert, per_batch, per_pair, out_dir / "plots")
 
 
 def _save_scores(per_pert: pd.DataFrame, per_batch: pd.DataFrame, out_dir: Path) -> None:
@@ -183,10 +201,13 @@ def _save_scores(per_pert: pd.DataFrame, per_batch: pd.DataFrame, out_dir: Path)
     per_batch.to_csv(out_dir / "scores_per_batch.csv", index=False)
 
 
-def _plot_scores(per_pert: pd.DataFrame, per_batch: pd.DataFrame, plot_dir: Path) -> None:
-    """One plot per metric for each view, printing the model means."""
+def _plot_scores(
+    per_pert: pd.DataFrame, per_batch: pd.DataFrame, per_pair: pd.DataFrame, plot_dir: Path
+) -> None:
+    """Plot overall score distributions and individual perturbations in each held-out batch."""
     report(per_pert, "perturbation", plot_dir / "per_perturbation")
     report(per_batch, "batch", plot_dir / "per_batch")
+    report_by_training_batches(per_pair, plot_dir / "by_training_batches")
 
 
 if __name__ == "__main__":

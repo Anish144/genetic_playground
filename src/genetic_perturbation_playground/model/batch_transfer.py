@@ -31,6 +31,16 @@ def is_control(adata: sc.AnnData) -> np.ndarray:
     return perturbation_labels(adata) == "control"
 
 
+def training_batch_counts(train: sc.AnnData) -> pd.Series:
+    """Number of training batches containing each perturbation: sum_e 1[c_xe > 0].
+
+    Count observed cells/crops in the actual training split, excluding controls. This measures
+    direct response data for each perturbation; shared model parameters can use other batches.
+    """
+    obs = train.obs.loc[~is_control(train)]
+    return obs.groupby("perturbation", observed=True)["batch"].nunique()
+
+
 def _positions(sorted_labels: np.ndarray, labels) -> np.ndarray:
     """Index of each of `labels` in `sorted_labels`."""
     return np.searchsorted(sorted_labels, labels)

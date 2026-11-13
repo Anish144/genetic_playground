@@ -22,7 +22,9 @@ Config: configs/tune_bridges_rxrx1.yaml. Usage:
 
 Writes inner_scores.csv (every configuration on every inner fold), selected.csv (winner per fold
 and bridge) and scores.csv (outer scores) after every fold, and summary.csv at the end, to the
-Hydra run dir.
+Hydra run dir. Scores include n_training_batches from the outer refit. The folder
+plots/by_training_batches/batch_<label>/ contains a separate scatter plot per metric and
+per_perturbation.csv for each held-out experiment, using that experiment's scores directly.
 """
 
 from collections.abc import Iterator
@@ -48,8 +50,9 @@ from train_batch_transfer_rxrx1 import (
 
 from genetic_perturbation_playground import tuning
 from genetic_perturbation_playground.data.rxrx1 import load_rxrx1
-from genetic_perturbation_playground.model.batch_transfer import batch_labels
+from genetic_perturbation_playground.model.batch_transfer import batch_labels, training_batch_counts
 from genetic_perturbation_playground.model.tvn import TVNTransferModel
+from genetic_perturbation_playground.utils.plotting import report_by_training_batches
 
 
 def validation_scores(model, val: sc.AnnData) -> dict:
@@ -103,10 +106,12 @@ def nested_cv(adata: sc.AnnData, cfg: DictConfig) -> Iterator[tuple]:
         train = adata[np.isin(batch, train_batches)]
         models = _fit_linear(train) | {"tvn": TVNTransferModel().fit(train)}
         models |= tuning.fit_selected(train, selected, cfg, f"fold {i + 1}/neural bridge")
+        scores = score_batches(models, adata, [held_out]).assign(fold=i)
+        scores["n_training_batches"] = scores["perturbation"].map(training_batch_counts(train))
         yield (
             inner.assign(fold=i),
             pd.DataFrame([{"fold": i, "bridge": b, **s} for b, s in selected.items()]),
-            score_batches(models, adata, [held_out]).assign(fold=i),
+            scores,
         )
 
 
@@ -130,6 +135,9 @@ def main(cfg: DictConfig):
         overall = summary(pd.concat(tables["scores"]))
         log_summary("all folds", overall)
     overall.to_csv(out_dir / "summary.csv")
+    report_by_training_batches(
+        pd.concat(tables["scores"]), out_dir / "plots" / "by_training_batches"
+    )
     print(f"all folds:\n{overall.to_string(float_format='%.4g')}\nsaved to {out_dir}")
 
 

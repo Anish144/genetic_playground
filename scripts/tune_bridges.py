@@ -17,7 +17,9 @@ Usage:
 Writes inner_scores.csv (every configuration on every inner fold), selected.csv (winner per outer
 fold and bridge), scores_per_perturbation.csv, scores_per_batch.csv, scores_per_pair.csv (each
 model's mse, the squared error averaged over genes, per (perturbation, held-out batch)) and plots/
-to the Hydra run dir.
+to the Hydra run dir. Per-perturbation and per-pair scores include n_training_batches from the
+outer refit. plots/by_training_batches/batch_<label>/ contains a separate scatter plot per metric
+and per_perturbation.csv for each held-out batch, using that batch's scores directly.
 """
 
 from collections.abc import Iterator
@@ -45,7 +47,11 @@ from train_batch_transfer_expression import (
 
 from genetic_perturbation_playground import tuning
 from genetic_perturbation_playground.data.data_loader import load_dataset
-from genetic_perturbation_playground.model.batch_transfer import batch_labels, is_control
+from genetic_perturbation_playground.model.batch_transfer import (
+    batch_labels,
+    is_control,
+    training_batch_counts,
+)
 
 
 class Split(NamedTuple):
@@ -91,8 +97,8 @@ def nested_cv(adata: sc.AnnData, cfg: DictConfig) -> tuple:
     For each selected outer batch, tune on inner folds of all other batches, refit on those
     batches, and score only the outer batch. Inner tuning retains cfg.inner_folds K-fold splits.
 
-    Returns (inner scores, selected settings, per-perturbation scores, per-batch scores, the mse
-    per (perturbation, held-out batch)).
+    Returns (inner scores, selected settings, per-perturbation averages, per-batch averages,
+    individual scores for every metric per (perturbation, held-out batch, model)).
     """
     batch = batch_labels(adata)
     rng = np.random.default_rng(cfg.seed)
@@ -113,17 +119,20 @@ def nested_cv(adata: sc.AnnData, cfg: DictConfig) -> tuple:
 
         outer = _split(adata, batch, seen, train_batches, [held_out])
         models = _fit_linear(outer.train) | tuning.fit_selected(outer.train, selected, cfg)
-        pert_scores.append(score(models, outer.eval, cfg.top_k, outer.seen))
+        scores = score(models, outer.eval, cfg.top_k, outer.seen)
+        scores["n_training_batches"] = scores["perturbation"].map(
+            training_batch_counts(outer.train)
+        )
+        pert_scores.append(scores)
         _print_fold_means(pert_scores[-1])
-        scored = _score_batches(models, outer.eval, outer.seen, [held_out], batch, cfg.top_k)
-        batch_scores += [s.assign(fold=i) for s in scored]
-    pair_scores = pd.concat(batch_scores, ignore_index=True).query("metric == 'mse'")
+        batch_scores.append(scores.assign(batch=held_out, fold=i, cells=outer.eval.n_obs))
+    pair_scores = pd.concat(batch_scores, ignore_index=True)
     return (
         pd.concat(inner_tables),
         pd.DataFrame(selected_rows),
         _average_per_perturbation(pert_scores),
         _average_per_batch(batch_scores),
-        pair_scores.drop(columns=["metric", "cells"]),  # cells is the whole batch's, not the pair's
+        pair_scores.drop(columns="cells"),  # cells is the whole batch's, not the pair's
     )
 
 
@@ -135,8 +144,10 @@ def main(cfg: DictConfig):
     inner.to_csv(out_dir / "inner_scores.csv", index=False)
     selected.to_csv(out_dir / "selected.csv", index=False)
     _save_scores(per_pert, per_batch, out_dir)
-    per_pair.to_csv(out_dir / "scores_per_pair.csv", index=False)
-    _plot_scores(per_pert, per_batch, out_dir / "plots")
+    per_pair.query("metric == 'mse'").drop(columns="metric").to_csv(
+        out_dir / "scores_per_pair.csv", index=False
+    )
+    _plot_scores(per_pert, per_batch, per_pair, out_dir / "plots")
 
 
 if __name__ == "__main__":

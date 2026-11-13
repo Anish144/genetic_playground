@@ -106,12 +106,14 @@ def test_standardised_leaves_constant_genes_finite():
 
 
 def _cells(n_batches=6):
-    """Expression of control and perturbations a, b in every batch, with a batch offset."""
+    """Controls and a in every batch; b in the first four batches, with a batch offset."""
     rng = np.random.default_rng(0)
     rows, X = [], []
     for e in range(n_batches):
         offset = rng.normal(size=4)
         for label, mean in [("control", 0.0), ("a", 1.0), ("b", -1.0)]:
+            if label == "b" and e >= 4:
+                continue
             X.append(mean + offset + rng.normal(size=(12, 4)))
             rows += [(label, f"b{e}")] * 12
     obs = pd.DataFrame(rows, columns=["perturbation", "batch"])
@@ -131,12 +133,19 @@ def test_replogle_validation_trains_on_all_other_batches(monkeypatch, n):
         return fit(train, cfg)
 
     monkeypatch.setattr(expression, "fit", record_fit)
-    per_pert, per_batch = expression.cross_validate(_cells(), config)
+    per_pert, per_batch, per_pair = expression.cross_validate(_cells(), config)
     held_out = per_batch["batch"].unique()
     assert len(training_batches) == len(held_out) == n
     for train, batch in zip(training_batches, held_out, strict=True):
         assert train == {"b0", "b1", "b2", "b3", "b4", "b5"} - {batch}
     assert not per_pert.empty
+    assert per_pair["batch"].nunique() == n
+    assert set(per_pair["metric"]) == {"mse", "pearson", "pearson_top100"}
+    assert not per_pair.duplicated(["perturbation", "batch", "model", "metric"]).any()
+    assert per_pert.groupby("perturbation")["n_training_batches"].unique().map(list).to_dict() == {
+        "a": [5],
+        "b": [3],
+    }
 
 
 def test_replogle_nested_cv_tunes_on_inner_folds_and_scores_selected_batches():
@@ -157,6 +166,10 @@ def test_replogle_nested_cv_tunes_on_inner_folds_and_scores_selected_batches():
     inner, selected, per_pert, per_batch, per_pair = tune_bridges.nested_cv(_cells(), config)
     assert per_batch["batch"].nunique() == 2
     assert per_pair.groupby("fold")["batch"].nunique().tolist() == [1, 1]
+    for scores in [per_pert, per_pair]:
+        assert scores.groupby("perturbation")["n_training_batches"].unique().map(
+            list
+        ).to_dict() == {"a": [5], "b": [3]}
     # per outer and inner fold: 2 kernel configurations, 1 neural at 2 checkpoints, shift
     assert inner.groupby(["fold", "inner_fold"]).size().tolist() == [2 + 2 + 1] * 4
     assert set(selected["bridge"]) == {"kernel", "neural"}
@@ -164,8 +177,11 @@ def test_replogle_nested_cv_tunes_on_inner_folds_and_scores_selected_batches():
         per_batch["model"]
     )
     # one row per (perturbation, held-out batch, model); averaging over perturbations gives per_batch
-    assert not per_pair.duplicated(["perturbation", "batch", "model"]).any()
-    from_pairs = per_pair.groupby(["batch", "model"])["value"].mean().sort_index()
+    assert set(per_pair["metric"]) == {"mse", "pearson", "pearson_top100"}
+    assert not per_pair.duplicated(["perturbation", "batch", "model", "metric"]).any()
+    from_pairs = (
+        per_pair.query("metric == 'mse'").groupby(["batch", "model"])["value"].mean().sort_index()
+    )
     batch_mse = (
         per_batch.query("metric == 'mse'").set_index(["batch", "model"])["value"].sort_index()
     )
