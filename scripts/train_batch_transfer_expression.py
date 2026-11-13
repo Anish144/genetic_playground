@@ -1,22 +1,24 @@
-"""Out-of-batch prediction on Replogle K562 with the batch-transfer model.
+"""Out-of-batch prediction on Replogle K562 gene expression with the batch-transfer model.
 
-K-fold cross-validation over batches: the batches are split into n_folds groups; each group is
-held out once while the models are fit on the rest. In held-out batches only the control cells are
-used (W_{e*}) to predict each perturbation's mean expression. Metrics compare predicted vs observed
-effects (perturbation mean - batch-matched control mean). Two views:
+n_validation_batches distinct batches are selected without replacement using seed. Each is held
+out in a separate run, with every other batch used for training: n_validation_batches fits per
+model. In held-out batches only the control cells are used (W_{e*}) to predict each perturbation's
+mean expression. Metrics compare predicted vs observed effects (perturbation mean - batch-matched
+control mean). Two views:
 
-- per perturbation: within a fold the held-out batches are pooled, one score per perturbation;
-  averaged over folds                                                    -> plots/per_perturbation/
-- per batch: each batch scored on its own when held out (mean of the per-perturbation scores
-  within that batch); every batch appears once                          -> plots/per_batch/
+- per perturbation: scores averaged over the selected validation batches -> plots/per_perturbation/
+- per batch: scores averaged over perturbations within each selected batch -> plots/per_batch/
 
 Raw scores (long tables) go to scores_per_perturbation.csv and scores_per_batch.csv.
+Per-perturbation scores include n_training_batches, the number of training batches containing
+that perturbation. plots/by_training_batches/batch_<label>/ contains a separate scatter plot per
+metric and per_perturbation.csv for each held-out batch, using that batch's scores directly.
 
-Config: configs/train_batch_transfer.yaml. `name` is required and names the output folder. Usage:
+Config: configs/train_batch_transfer_expression.yaml. `name` is required and names the output folder. Usage:
 
-    uv run python scripts/train_batch_transfer.py name=baseline n_folds=10
-    uv run python scripts/train_batch_transfer.py name=kernel_only 'bridges=[kernel]'   # no GPU: skip the neural bridge
-    uv run python scripts/train_batch_transfer.py name=neural_500 neural.n_steps=500 neural.weight_decay=1e-2
+    uv run python scripts/train_batch_transfer_expression.py name=baseline n_validation_batches=10
+    uv run python scripts/train_batch_transfer_expression.py name=kernel_only 'bridges=[kernel]'   # no GPU: skip the neural bridge
+    uv run python scripts/train_batch_transfer_expression.py name=neural_500 neural.n_steps=500 neural.weight_decay=1e-2
 """
 
 from pathlib import Path
@@ -36,23 +38,28 @@ from genetic_perturbation_playground.model.batch_transfer import (
     batch_labels,
     is_control,
     summary_stats,
+    training_batch_counts,
 )
+from genetic_perturbation_playground.tuning import validation_batches, with_standardisation
 from genetic_perturbation_playground.utils import metrics
-from genetic_perturbation_playground.utils.plotting import report
+from genetic_perturbation_playground.utils.plotting import report, report_by_training_batches
 
 MODELS = {"pooled (b=0)": 0.0, "shift (b=1)": 1.0, "transfer (fit b)": None}
 
 
 def fit(train: sc.AnnData, cfg: DictConfig) -> dict:
     """Fit every model variant on the training batches."""
-    models = _fit_linear(train) | _fit_bridges(train, cfg)
+    models = _fit_linear(train, cfg.standardise_w) | _fit_bridges(train, cfg)
     _print_slope(models["transfer (fit b)"].slope_)
     return models
 
 
-def _fit_linear(train: sc.AnnData) -> dict:
-    """The three BatchTransferModel variants of MODELS."""
-    return {name: BatchTransferModel(slope).fit(train) for name, slope in MODELS.items()}
+def _fit_linear(train: sc.AnnData, standardise_w: bool = True) -> dict:
+    """Fit the linear variants with optional input scaling and unscaled targets."""
+    return {
+        name: BatchTransferModel(slope, standardise_w=standardise_w).fit(train)
+        for name, slope in MODELS.items()
+    }
 
 
 def _fit_bridges(train: sc.AnnData, cfg: DictConfig) -> dict:
@@ -61,12 +68,14 @@ def _fit_bridges(train: sc.AnnData, cfg: DictConfig) -> dict:
 
 
 def _make_bridge(kind: str, cfg: DictConfig):
-    """An unfitted kernel or neural bridge with the config's settings."""
+    """An unfitted kernel or neural bridge, optionally standardising its control inputs."""
     if kind == "kernel":
-        return KernelBridgeTransfer(cfg.bridge_reg, cfg.weight_by_cells)
-    return NeuralBridgeTransfer(
-        cfg.weight_by_cells, reg=cfg.bridge_reg, seed=cfg.seed, **cfg.neural
-    )
+        bridge = KernelBridgeTransfer(cfg.bridge_reg, cfg.weight_by_cells)
+    else:
+        bridge = NeuralBridgeTransfer(
+            cfg.weight_by_cells, reg=cfg.bridge_reg, seed=cfg.seed, **cfg.neural
+        )
+    return with_standardisation(bridge, cfg)
 
 
 def _print_slope(slope: np.ndarray) -> None:
@@ -100,35 +109,40 @@ def _split_controls(test: sc.AnnData, seen: np.ndarray) -> tuple:
 
 
 def cross_validate(adata: sc.AnnData, cfg: DictConfig) -> tuple:
-    """K-fold over batches: each batch is held out exactly once, models refit per fold.
+    """Hold out n_validation_batches distinct batches one at a time, selected using cfg.seed.
+
+    Each model is fit once per selected batch, using all other batches for training.
 
     Every batch's controls are split in two halves. The `seen` half is the proxy for all models, in
     training and held-out batches alike; the other half is only the baseline in scoring.
 
-    Returns (per-perturbation scores, per-batch scores) as long tables. Per-perturbation scores are
-    averaged over folds (cells summed); per-batch scores average over the batch's perturbations.
+    Returns three long tables: scores averaged per perturbation, scores averaged per batch,
+    and individual scores per (perturbation, held-out batch, metric, model) for separate plots.
+    Per-perturbation averages sum cell counts; per-batch averages are over perturbations.
     """
     batch = batch_labels(adata)
     rng = np.random.default_rng(cfg.seed)
-    folds = _batch_folds(batch, cfg.n_folds, rng)
+    selected = validation_batches(batch, cfg.n_validation_batches, rng)
     seen = _seen_controls(adata, batch, rng)
     train_cells = ~is_control(adata) | seen
 
     pert_scores, batch_scores = [], []
-    for i, held_out in enumerate(folds):
-        print(f"fold {i + 1}/{cfg.n_folds}: holding out {len(held_out)} batches")
-        is_test = np.isin(batch, held_out)
-        models = fit(adata[~is_test & train_cells], cfg)
+    for i, held_out in enumerate(selected):
+        print(f"validation {i + 1}/{len(selected)}: holding out {held_out}")
+        is_test = batch == held_out
+        train = adata[~is_test & train_cells]
+        models = fit(train, cfg)
         test = adata[is_test]
-        pert_scores.append(score(models, test, cfg.top_k, seen[is_test]))
+        scores = score(models, test, cfg.top_k, seen[is_test]).assign(batch=held_out, fold=i)
+        scores["n_training_batches"] = scores["perturbation"].map(training_batch_counts(train))
+        pert_scores.append(scores)
         _print_fold_means(pert_scores[-1])
-        batch_scores += _score_batches(models, test, seen[is_test], held_out, batch, cfg.top_k)
-    return _average_per_perturbation(pert_scores), _average_per_batch(batch_scores)
-
-
-def _batch_folds(batch: np.ndarray, n_folds: int, rng: np.random.Generator) -> list:
-    """The batches, shuffled and split into n_folds groups."""
-    return np.array_split(rng.permutation(np.unique(batch)), n_folds)
+        batch_scores.append(pert_scores[-1].assign(batch=held_out, cells=is_test.sum()))
+    return (
+        _average_per_perturbation(pert_scores),
+        _average_per_batch(batch_scores),
+        pd.concat(pert_scores, ignore_index=True),
+    )
 
 
 def _seen_controls(adata: sc.AnnData, batch: np.ndarray, rng: np.random.Generator) -> np.ndarray:
@@ -137,14 +151,14 @@ def _seen_controls(adata: sc.AnnData, batch: np.ndarray, rng: np.random.Generato
     return rank.to_numpy() % 2 == 0
 
 
-def _score_batches(models, test, seen, held_out, batch, k) -> list[pd.DataFrame]:
-    """Scores of each held-out batch on its own, tagged with the batch and its total cells."""
+def _score_batches(models, test, seen, k) -> list[pd.DataFrame]:
+    """Score each batch in `test` separately, tagging its label and total cell count."""
     test_batch = batch_labels(test)
     scores = []
-    for b in held_out:
+    for b in np.unique(test_batch):
         in_b = test_batch == b
         s = score(models, test[in_b], k, seen[in_b])
-        scores.append(s.assign(batch=b, cells=(batch == b).sum()))
+        scores.append(s.assign(batch=b, cells=in_b.sum()))
     return scores
 
 
@@ -155,8 +169,14 @@ def _print_fold_means(scores: pd.DataFrame) -> None:
 
 
 def _average_per_perturbation(scores: list[pd.DataFrame]) -> pd.DataFrame:
-    """Scores averaged over folds per perturbation, with cells summed."""
-    grouped = pd.concat(scores).groupby(["perturbation", "metric", "model"], sort=False)
+    """Average validation scores per perturbation and training-batch count, summing cells.
+
+    Under leave-one-batch-out evaluation, a scored perturbation has the same count in every run:
+    its total number of observed batches minus the one held out.
+    """
+    grouped = pd.concat(scores).groupby(
+        ["perturbation", "n_training_batches", "metric", "model"], sort=False
+    )
     return grouped.agg(value=("value", "mean"), cells=("cells", "sum")).reset_index()
 
 
@@ -166,13 +186,15 @@ def _average_per_batch(scores: list[pd.DataFrame]) -> pd.DataFrame:
     return grouped.agg(value=("value", "mean"), cells=("cells", "first")).reset_index()
 
 
-@hydra.main(config_path="../configs", config_name="train_batch_transfer", version_base=None)
+@hydra.main(
+    config_path="../configs", config_name="train_batch_transfer_expression", version_base=None
+)
 def main(cfg: DictConfig):
     adata = load_dataset()
-    per_pert, per_batch = cross_validate(adata, cfg)
+    per_pert, per_batch, per_pair = cross_validate(adata, cfg)
     out_dir = Path(HydraConfig.get().runtime.output_dir)
     _save_scores(per_pert, per_batch, out_dir)
-    _plot_scores(per_pert, per_batch, out_dir / "plots")
+    _plot_scores(per_pert, per_batch, per_pair, out_dir / "plots")
 
 
 def _save_scores(per_pert: pd.DataFrame, per_batch: pd.DataFrame, out_dir: Path) -> None:
@@ -181,10 +203,13 @@ def _save_scores(per_pert: pd.DataFrame, per_batch: pd.DataFrame, out_dir: Path)
     per_batch.to_csv(out_dir / "scores_per_batch.csv", index=False)
 
 
-def _plot_scores(per_pert: pd.DataFrame, per_batch: pd.DataFrame, plot_dir: Path) -> None:
-    """One plot per metric for each view, printing the model means."""
+def _plot_scores(
+    per_pert: pd.DataFrame, per_batch: pd.DataFrame, per_pair: pd.DataFrame, plot_dir: Path
+) -> None:
+    """Plot overall score distributions and individual perturbations in each held-out batch."""
     report(per_pert, "perturbation", plot_dir / "per_perturbation")
     report(per_batch, "batch", plot_dir / "per_batch")
+    report_by_training_batches(per_pair, plot_dir / "by_training_batches")
 
 
 if __name__ == "__main__":

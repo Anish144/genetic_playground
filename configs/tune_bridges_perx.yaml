@@ -1,0 +1,15 @@
+defaults:  # tune_bridges with a separate A_x per perturbation, only psi shared
+  - tune_bridges
+  - _self_
+
+n_configs: 10       # drawn at random from the grid
+neural:
+  per_perturbation: true
+neural_grid:         # 243 configurations
+  lr: [1.0e-4, 3.0e-4, 1.0e-3]  # AdamW; 1e-3 is the neural default
+  reg: [1.0e-5, 1.0e-4, 1e-3]
+  weight_decay: [1.0e-5, 1.0e-4, 1e-6]
+  phi_size: [8]        # unused: phi is the identity
+  width_w: [64, 128, 256]  # psi hidden width
+  psi_size: [8, 16, 32]       # psi output dimension q
+neural_checkpoints: [50, 100, 150, 200, 300, 400]

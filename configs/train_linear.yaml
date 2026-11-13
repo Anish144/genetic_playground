@@ -1,3 +1,0 @@
-test_frac: 0.2   # fraction of cells held out
-seed: 0
-top_k: 20        # genes used for pearson_top_k
