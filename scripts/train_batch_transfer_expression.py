@@ -108,10 +108,13 @@ def _split_controls(test: sc.AnnData, seen: np.ndarray) -> tuple:
     return test[~ctrl | seen], test[~ctrl | ~seen]
 
 
-def cross_validate(adata: sc.AnnData, cfg: DictConfig) -> tuple:
+def cross_validate(adata: sc.AnnData, cfg: DictConfig, *, fit_models=None) -> tuple:
     """Hold out n_validation_batches distinct batches one at a time, selected using cfg.seed.
 
     Each model is fit once per selected batch, using all other batches for training.
+    Optional fit_models(train, cfg, test, seen) replaces the fitting step, for example
+    to record checkpoint learning curves. It returns the usual name-to-model mapping;
+    test and seen describe only the held-out batch and its input-control mask.
 
     Every batch's controls are split in two halves. The `seen` half is the proxy for all models, in
     training and held-out batches alike; the other half is only the baseline in scoring.
@@ -131,8 +134,10 @@ def cross_validate(adata: sc.AnnData, cfg: DictConfig) -> tuple:
         print(f"validation {i + 1}/{len(selected)}: holding out {held_out}")
         is_test = batch == held_out
         train = adata[~is_test & train_cells]
-        models = fit(train, cfg)
         test = adata[is_test]
+        models = (
+            fit(train, cfg) if fit_models is None else fit_models(train, cfg, test, seen[is_test])
+        )
         scores = score(models, test, cfg.top_k, seen[is_test]).assign(batch=held_out, fold=i)
         scores["n_training_batches"] = scores["perturbation"].map(training_batch_counts(train))
         pert_scores.append(scores)
