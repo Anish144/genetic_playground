@@ -84,24 +84,29 @@ These equations use original units. The implementation standardises inputs and c
 
 ## 2. Kernel bridge
 
-The perturbation feature map is the delta/one-hot basis: $\phi(x)=\delta_x$, so $k_x(x,x')=\mathbf{1}[x=x']$. For controls, use an RBF kernel on standardised inputs:
+The perturbation feature map is the delta/one-hot basis: $\phi(x)=\delta_x$, so $k_x(x,z)=\mathbf{1}[x=z]$. For two standardised control vectors $u$ and $v$, use an RBF kernel:
 
 $$
-k_w(w,w')=\exp\!\left(-\frac{\|\tilde w-\tilde w'\|^2}{2\ell^2}\right),\qquad
-\mu_e=\frac{1}{m_e}\sum_{j=1}^{m_e}\psi(\tilde w_{ej}).
+k_w(u,v)=\exp\left(-\frac{\Vert u-v\Vert^{2}}{2\ell^{2}}\right),\qquad
+\mu_e=\frac{1}{m_e}\sum_{j=1}^{m_e}\psi(\tilde{w}_{ej}).
 $$
 
-Here $m_e$ is the number of proxy samples and $\psi$ is the RBF feature map. Its batch similarity is $M_{ee'}=\langle\mu_e,\mu_{e'}\rangle$, computed by averaging kernel values over all pairs of controls. The lengthscale is the median pairwise distance of at most 2,000 pooled training controls, multiplied by `lengthscale_scale`.
+Here $m_e$ is the number of proxy samples and $\psi$ is the RBF feature map. The similarity between batches $e$ and $f$ is $M_{ef}=\langle\mu_e,\mu_f\rangle$, computed by averaging kernel values over all pairs of controls. The lengthscale is the median pairwise distance of at most 2,000 pooled training controls, multiplied by `lengthscale_scale`.
 
-The bridge predicts $\hat y_{xeg}=\langle h_g,\phi(x)\otimes\mu_e\rangle$. The delta map gives a separate ridge fit per perturbation, with shared batch similarities. On the batches where $x$ occurs:
+The bridge predicts $\hat{y}_{xeg}=\langle h_g,\phi(x)\otimes\mu_e\rangle$. The delta map gives a separate ridge fit per perturbation, with shared batch similarities. On the batches where $x$ occurs, solve:
 
 $$
-\alpha_x=(M_x+\lambda N\,\mathrm{diag}(1/c_{xe}))^{-1}\bar Y_x,
-\qquad
-\hat y_{xe^*}=M_{e^*,x}\alpha_x.
+D_x=\mathrm{diag}(1/c_{xe}),\qquad
+(M_x+\lambda N D_x)\alpha_x=\bar{Y}_x.
 $$
 
-$\bar Y_x$ contains the observed batch means; $M_{e^*,x}$ compares new-batch controls with those training batches. There is no fitted response sharing across perturbations.
+For a new batch $t$, predict:
+
+$$
+\hat{y}_{xt}=M_{t,x}\alpha_x.
+$$
+
+$\bar{Y}_x$ contains the observed batch means, and $M_x$ contains similarities between those training batches. $M_{t,x}$ compares new-batch controls with those training batches. There is no fitted response sharing across perturbations.
 
 ## 3. Neural bridge
 
@@ -132,12 +137,14 @@ $$
 \hat\Delta_{xe}=\hat y_{xe}-W_e^{\mathrm{eval}}.
 $$
 
-These differential-expression effects are differences in mean log-normalised expression. Metrics compare these vectors; there is no significance test.
+**All Replogle metrics compare differential-expression vectors** $\hat\Delta_{xe}$ and $\Delta_{xe}$. These effects are differences in mean log-normalised expression; there is no significance test.
 
 | Dataset | Metrics for each (perturbation, held-out batch) |
 | --- | --- |
-| Replogle | MSE averaged over all genes; Pearson correlation across all genes; `pearson_top100`, across the 100 genes with largest absolute observed effect (`top_k` is configurable). MSE also includes a **no effect** baseline, $\hat\Delta=0$. |
+| Replogle | On differential expression: MSE averaged over all genes; Pearson correlation across all genes; `pearson_top100`, across the 100 genes with largest absolute observed differential expression (`top_k` is configurable). MSE also includes a **no effect** baseline, $\hat\Delta=0$. |
 | RxRx1 | MSE averaged over the 384 coordinates of predicted and observed mean crop embeddings. No control subtraction. |
+
+Subtracting the same control vector from prediction and truth leaves MSE unchanged, so model MSE also equals mean-expression MSE. Pearson correlations and top-gene selection depend on the differential-expression vectors.
 
 RxRx1 uses all negative-control crops as proxies, with no half split. Positive controls are training perturbations by default but are never scored. `positive_controls_as_proxies=true` moves them into the proxy pool instead. Only treatment wells are evaluated. Each response mean averages all crops for that perturbation in that experiment.
 
