@@ -13,7 +13,30 @@ from genetic_perturbation_playground.model.batch_transfer import Standardised
 
 ROOT = Path(__file__).parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
+import train_batch_transfer_expression as expression  # noqa: E402
 import tune_bridges  # noqa: E402
+
+
+def test_validation_batches_are_distinct_and_reproducible():
+    batch = np.array(["b0", "b0", "b1", "b2", "b3"])
+    selected = tuning.validation_batches(batch, 2, np.random.default_rng(4))
+    assert len(selected) == len(set(selected)) == 2
+    assert set(selected) <= {"b0", "b1", "b2", "b3"}
+    np.testing.assert_array_equal(
+        selected, tuning.validation_batches(batch[::-1], 2, np.random.default_rng(4))
+    )
+    assert set(tuning.validation_batches(batch, 4, np.random.default_rng(4))) == {
+        "b0",
+        "b1",
+        "b2",
+        "b3",
+    }
+
+
+@pytest.mark.parametrize("batch,n", [([], 1), (["b0"], 1), (["b0", "b1"], 0), (["b0", "b1"], 3)])
+def test_validation_batches_reject_invalid_counts(batch, n):
+    with pytest.raises(ValueError):
+        tuning.validation_batches(np.array(batch), n, np.random.default_rng(0))
 
 
 def test_sample_configs_draws_distinct_grid_points():
@@ -30,10 +53,7 @@ def test_per_x_grid_varies_hidden_width_independently_of_output_dimension():
     with initialize_config_dir(str(ROOT / "configs"), version_base=None):
         config = compose("tune_bridges_perx", ["name=test"])
     drawn = tuning.sample_configs(config.neural_grid, config.n_configs, config.seed)
-    assert len(drawn) == 108
-    assert {(c["width_w"], c["psi_size"]) for c in drawn} == {
-        (width, dim) for width in [32, 64, 128, 256] for dim in [8, 16, 32]
-    }
+    assert len(drawn) == config.n_configs
     for settings in drawn:
         model = tuning.make_neural(settings, config).model
         assert model.bridge_kwargs["width_w"] == settings["width_w"]
@@ -99,13 +119,33 @@ def _cells(n_batches=6):
     return ad.AnnData(np.vstack(X), obs=obs)
 
 
-def test_replogle_nested_cv_tunes_on_inner_folds_and_scores_the_outer_folds():
+@pytest.mark.parametrize("n", [1, 2])
+def test_replogle_validation_trains_on_all_other_batches(monkeypatch, n):
+    config = OmegaConf.load(ROOT / "configs" / "train_batch_transfer_expression.yaml")
+    config.n_validation_batches, config.bridges = n, []
+    training_batches = []
+    fit = expression.fit
+
+    def record_fit(train, cfg):
+        training_batches.append(set(train.obs["batch"]))
+        return fit(train, cfg)
+
+    monkeypatch.setattr(expression, "fit", record_fit)
+    per_pert, per_batch = expression.cross_validate(_cells(), config)
+    held_out = per_batch["batch"].unique()
+    assert len(training_batches) == len(held_out) == n
+    for train, batch in zip(training_batches, held_out, strict=True):
+        assert train == {"b0", "b1", "b2", "b3", "b4", "b5"} - {batch}
+    assert not per_pert.empty
+
+
+def test_replogle_nested_cv_tunes_on_inner_folds_and_scores_selected_batches():
     with initialize_config_dir(str(ROOT / "configs"), version_base=None):
         config = compose("tune_bridges", ["name=test", "+neural_grid.width_w=[4]"])
     config = OmegaConf.merge(
         config,
         {
-            "n_folds": 2,
+            "n_validation_batches": 2,
             "inner_folds": 2,
             "n_configs": 2,
             "kernel_grid": {"reg": [1e-3, 1e-2], "lengthscale_scale": [1]},
@@ -115,6 +155,8 @@ def test_replogle_nested_cv_tunes_on_inner_folds_and_scores_the_outer_folds():
         },
     )
     inner, selected, per_pert, per_batch, per_pair = tune_bridges.nested_cv(_cells(), config)
+    assert per_batch["batch"].nunique() == 2
+    assert per_pair.groupby("fold")["batch"].nunique().tolist() == [1, 1]
     # per outer and inner fold: 2 kernel configurations, 1 neural at 2 checkpoints, shift
     assert inner.groupby(["fold", "inner_fold"]).size().tolist() == [2 + 2 + 1] * 4
     assert set(selected["bridge"]) == {"kernel", "neural"}

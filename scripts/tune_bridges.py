@@ -1,11 +1,11 @@
 """Nested cross-validation tuning of the kernel and neural bridges on Replogle K562.
 
-Outer folds, control split and scoring are those of train_batch_transfer_expression (same seed,
-same folds). In each outer fold the training batches are split into inner_folds folds and the
-bridges are tuned on them as described in genetic_perturbation_playground/tuning.py: the
-configuration with the lowest validation mse averaged over the inner folds is refit on all
-training batches and scored on the outer fold, next to the linear models. shift (b=1) is scored
-on the inner folds too, as a reference only.
+Select n_validation_batches distinct outer batches using seed, as in train_batch_transfer_expression.
+Each is held out separately; all remaining batches are split into inner_folds folds for tuning.
+The configuration with the lowest mean inner-validation mse is refit on all remaining batches
+and scored on the one outer batch, next to the linear models. shift (b=1) is scored on the inner
+folds too, as a reference only. The outer batch never enters tuning. n_validation_batches counts
+outer evaluations; the inner tuning fits and final refits are additional training runs.
 
 Config: configs/tune_bridges.yaml (grids; everything else from train_batch_transfer_expression.yaml).
 Usage:
@@ -86,30 +86,36 @@ def _inner_folds(adata, batch, seen, train_batches, cfg: DictConfig, seed) -> It
 
 
 def nested_cv(adata: sc.AnnData, cfg: DictConfig) -> tuple:
-    """Tune per outer fold on its inner folds, then score the tuned bridges on the outer fold.
+    """Tune and evaluate on n_validation_batches distinct leave-one-batch-out splits.
+
+    For each selected outer batch, tune on inner folds of all other batches, refit on those
+    batches, and score only the outer batch. Inner tuning retains cfg.inner_folds K-fold splits.
 
     Returns (inner scores, selected settings, per-perturbation scores, per-batch scores, the mse
     per (perturbation, held-out batch)).
     """
     batch = batch_labels(adata)
     rng = np.random.default_rng(cfg.seed)
-    folds = tuning.batch_folds(batch, cfg.n_folds, rng)
+    selected_batches = tuning.validation_batches(batch, cfg.n_validation_batches, rng)
     seen = _seen_controls(adata, batch, rng)  # same draws as train_batch_transfer_expression
 
     inner_tables, selected_rows, pert_scores, batch_scores = [], [], [], []
-    for i, held_out in enumerate(folds):
-        print(f"fold {i + 1}/{cfg.n_folds}: tuning", flush=True)
+    for i, held_out in enumerate(selected_batches):
+        print(
+            f"validation {i + 1}/{len(selected_batches)}: tuning with {held_out} held out",
+            flush=True,
+        )
         train_batches = np.setdiff1d(np.unique(batch), held_out)
         folds_i = _inner_folds(adata, batch, seen, train_batches, cfg, [cfg.seed, i])
         inner, selected, _ = tuning.tune(folds_i, cfg)
         inner_tables.append(inner.assign(fold=i))
         selected_rows += [{"fold": i, "bridge": b, **c} for b, c in selected.items()]
 
-        outer = _split(adata, batch, seen, train_batches, held_out)
+        outer = _split(adata, batch, seen, train_batches, [held_out])
         models = _fit_linear(outer.train) | tuning.fit_selected(outer.train, selected, cfg)
         pert_scores.append(score(models, outer.eval, cfg.top_k, outer.seen))
         _print_fold_means(pert_scores[-1])
-        scored = _score_batches(models, outer.eval, outer.seen, held_out, batch, cfg.top_k)
+        scored = _score_batches(models, outer.eval, outer.seen, [held_out], batch, cfg.top_k)
         batch_scores += [s.assign(fold=i) for s in scored]
     pair_scores = pd.concat(batch_scores, ignore_index=True).query("metric == 'mse'")
     return (

@@ -98,24 +98,36 @@ def test_positive_controls_join_the_proxies(tiny_rxrx1):
     assert set(adata.obs.loc[adata.obs["well_type"] == "treatment", "perturbation"]) == {"s1", "s2"}
 
 
-def test_cross_validate_holds_out_each_experiment_once(tiny_rxrx1):
+@pytest.mark.parametrize("n", [1, 2, 3])
+def test_cross_validate_trains_on_all_other_experiments(tiny_rxrx1, monkeypatch, n):
     huvec = mod.select_cell_type(tiny_rxrx1, "HUVEC")
+    training_batches = []
+    fit_models = mod.fit_models
+
+    def record_fit(train, config):
+        training_batches.append(set(train.obs["batch"]))
+        return fit_models(train, config)
+
+    monkeypatch.setattr(mod, "fit_models", record_fit)
     folds = list(
-        mod.cross_validate(huvec, cfg(n_folds=3, bridges=[], positive_controls_as_proxies=True))
+        mod.cross_validate(
+            huvec, cfg(n_validation_batches=n, bridges=[], positive_controls_as_proxies=True)
+        )
     )
-    assert [set(scores["fold"]) for scores in folds] == [{0}, {1}, {2}]
-    assert sorted(b for scores in folds for b in set(scores["batch"])) == [
-        "HUVEC-1",
-        "HUVEC-2",
-        "HUVEC-3",
-    ]
+    assert len(folds) == len(training_batches) == n
+    held_out = [scores["batch"].unique().item() for scores in folds]
+    assert len(set(held_out)) == n
+    for train, batch in zip(training_batches, held_out, strict=True):
+        assert train == {"HUVEC-1", "HUVEC-2", "HUVEC-3"} - {batch}
     assert all("tvn" in set(scores["model"]) for scores in folds)
 
 
 def test_cross_validate_fits_the_neural_bridge(tiny_rxrx1):
     neural = {"device": "cpu", "n_steps": 2, "n_features": 2, "n_features_w": 2}
     huvec = mod.select_cell_type(tiny_rxrx1, "HUVEC")
-    scores = pd.concat(mod.cross_validate(huvec, cfg(n_folds=3, bridges=["neural"], neural=neural)))
+    scores = pd.concat(
+        mod.cross_validate(huvec, cfg(n_validation_batches=3, bridges=["neural"], neural=neural))
+    )
     assert "neural bridge" in set(scores["model"])
 
 
@@ -125,7 +137,7 @@ def test_nested_cv_tunes_on_inner_validation_and_scores_the_outer_folds(tiny_rxr
     config = OmegaConf.merge(
         config,
         {
-            "n_folds": 3,
+            "n_validation_batches": 2,
             "inner_folds": 2,
             "n_configs": 2,
             "kernel_grid": {"reg": [1e-3, 1e-2], "lengthscale_scale": [1]},
@@ -136,8 +148,9 @@ def test_nested_cv_tunes_on_inner_validation_and_scores_the_outer_folds(tiny_rxr
     )
     huvec = mod.select_cell_type(tiny_rxrx1, "HUVEC")
     folds = list(tune.nested_cv(huvec, config))
-    assert len(folds) == 3
+    assert len(folds) == 2
     for inner, selected, scores in folds:
+        assert scores["batch"].nunique() == 1
         # per inner fold: 2 kernel configurations, 1 neural at 2 checkpoints, the shift reference
         assert inner.groupby("inner_fold").size().tolist() == [2 + 2 + 1] * 2
         assert (inner["bridge"] == "shift (b=1)").sum() == 2

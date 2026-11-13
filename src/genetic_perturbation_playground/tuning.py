@@ -1,4 +1,4 @@
-"""Folds over batches and random-search tuning of the kernel and neural bridges.
+"""Batch selection and random-search tuning of the kernel and neural bridges.
 
 Shared by scripts/tune_bridges.py (Replogle) and scripts/tune_bridges_rxrx1.py. cfg.n_configs
 configurations are drawn from each bridge's grid, the same draw in every fold. On each inner fold,
@@ -34,6 +34,21 @@ def _metrics(columns) -> list[str]:
 def batch_folds(batch: np.ndarray, n_folds: int, rng: np.random.Generator) -> list:
     """The distinct batches of `batch`, shuffled and split into n_folds groups."""
     return np.array_split(rng.permutation(np.unique(batch)), n_folds)
+
+
+def validation_batches(batch: np.ndarray, n: int, rng: np.random.Generator) -> np.ndarray:
+    """Select n distinct batches without replacement for leave-one-batch-out evaluation.
+
+    Each selected batch is held out in a separate run; all other batches train that run,
+    including batches selected for other runs. Requires at least two batches and
+    1 <= n <= the number of distinct batches. The supplied RNG controls the selection.
+    """
+    batches = np.unique(batch)
+    if len(batches) < 2:
+        raise ValueError("leave-one-batch-out evaluation requires at least two batches")
+    if not 1 <= n <= len(batches):
+        raise ValueError(f"n_validation_batches must be between 1 and {len(batches)}, got {n}")
+    return rng.permutation(batches)[:n]
 
 
 def sample_configs(grid: DictConfig, n: int, seed: int) -> list[dict]:

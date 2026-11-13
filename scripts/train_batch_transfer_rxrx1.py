@@ -5,7 +5,9 @@
   its positive-control crops if cfg.positive_controls_as_proxies.
 - Models: the linear ones and the bridges of train_batch_transfer_expression, plus TVN
   (model/tvn.py); a held-out experiment is predicted from its proxy crops alone.
-- Folds: K-fold over experiments. Scores per (treatment siRNA, held-out experiment), on means:
+- Validation: select n_validation_batches distinct experiments without replacement using seed.
+  Hold out each one separately and fit each model on every other experiment, for
+  n_validation_batches fits per model. Scores per (treatment siRNA, held-out experiment), on means:
   mse      squared error in Phenom coordinates
 
 Config: configs/train_batch_transfer_rxrx1.yaml. Usage:
@@ -13,9 +15,9 @@ Config: configs/train_batch_transfer_rxrx1.yaml. Usage:
     uv run python scripts/train_batch_transfer_rxrx1.py name=huvec 'bridges=[kernel]'
     sbatch -J huvec hpc/run.sbatch scripts/train_batch_transfer_rxrx1.py name=huvec
 
-Prints each fold's mean per (metric, model) as it finishes, siRNAs averaged within each experiment
-first. In the Hydra run dir, scores.csv (every score so far) is rewritten after each fold and
-summary.csv (the means over all folds) is written at the end.
+Prints each validation run's mean per (metric, model) as it finishes. In the Hydra run dir,
+scores.csv is rewritten after each run and summary.csv averages over the selected experiments.
+The existing "fold" column and W&B keys identify the leave-one-experiment-out runs.
 """
 
 import time
@@ -39,7 +41,7 @@ from genetic_perturbation_playground.model.batch_transfer import (
     perturbation_labels,
 )
 from genetic_perturbation_playground.model.tvn import TVNTransferModel
-from genetic_perturbation_playground.tuning import batch_folds
+from genetic_perturbation_playground.tuning import batch_folds, validation_batches
 from genetic_perturbation_playground.utils.metrics import mse
 
 
@@ -60,7 +62,7 @@ def select_cell_type(adata: sc.AnnData, cell_type: str | None) -> sc.AnnData:
 
 
 def experiment_folds(batches: np.ndarray, n_folds: int, rng, cell_type: str | None) -> list:
-    """tuning.batch_folds over experiments. Over all cell types (cell_type None), each cell type's
+    """Inner tuning folds over experiments. Over all cell types (cell_type None), each cell type's
     experiments, named <cell type>-<nn>, are dealt round the folds so every fold trains on each."""
     if cell_type is not None:
         return batch_folds(batches, n_folds, rng)
@@ -116,21 +118,24 @@ def _long(perts: np.ndarray, model: str, metric: str, values: np.ndarray) -> pd.
 
 
 def cross_validate(adata: sc.AnnData, cfg: DictConfig) -> Iterator[pd.DataFrame]:
-    """K-fold over experiments, yielding each fold's scores as soon as it is done. Models are fit
-    on the training experiments."""
+    """Hold out n_validation_batches distinct experiments one at a time, selected using cfg.seed.
+
+    Each model is fit on every other experiment, including those held out in other runs.
+    Yield each run's scores immediately; "fold" is the zero-based run index.
+    """
     if cfg.positive_controls_as_proxies:
         adata = add_positive_controls_to_proxies(adata)
     print(f"proxy crops: {is_control(adata).sum():,} of {adata.n_obs:,}", flush=True)
     batch = batch_labels(adata)
-    folds = experiment_folds(batch, cfg.n_folds, np.random.default_rng(cfg.seed), cfg.cell_type)
-    for i, held_out in enumerate(folds):
-        print(f"fold {i + 1}/{cfg.n_folds}: holding out {len(held_out)} experiments", flush=True)
-        train = adata[~np.isin(batch, held_out)]
+    selected = validation_batches(batch, cfg.n_validation_batches, np.random.default_rng(cfg.seed))
+    for i, held_out in enumerate(selected):
+        print(f"validation {i + 1}/{len(selected)}: holding out {held_out}", flush=True)
+        train = adata[batch != held_out]
         fold_cfg = OmegaConf.merge(cfg, {"neural": {"log_key": f"fold {i + 1}/neural bridge"}})
         start = time.perf_counter()
         models = fit_models(train, fold_cfg)
         print(f"  fit {len(models)} models in {time.perf_counter() - start:.0f}s", flush=True)
-        yield score_batches(models, adata, held_out).assign(fold=i)
+        yield score_batches(models, adata, [held_out]).assign(fold=i)
 
 
 def summary(scores: pd.DataFrame) -> pd.DataFrame:

@@ -1,13 +1,14 @@
 """Nested cross-validation tuning of the kernel and neural bridges on RxRx1, one cell type.
 
-Outer folds, proxies and scores are those of train_batch_transfer_rxrx1 (same seed, same folds).
-In each outer fold the training experiments are split into inner_folds folds; each inner fold is
-held out for validation once. n_configs configurations per bridge, drawn at random from its grid
+Select n_validation_batches distinct outer experiments using seed, as in train_batch_transfer_rxrx1.
+Each is held out separately; all remaining experiments are split into inner_folds folds for tuning.
+The outer experiment never enters tuning. n_configs configurations per bridge, drawn from its grid
 (the same draw in every outer fold), are fit on the other inner folds and scored on the held-out
 one; each neural configuration is trained once per inner fold to the last of neural_checkpoints
 and scored at each. The configuration with the lowest validation mse averaged over the inner
 folds is refit on all training experiments and scored on the outer fold, next to the linear
 models and TVN. shift (b=1) is scored on the inner folds too, as a reference only.
+n_validation_batches counts outer evaluations; inner tuning fits and final refits are additional.
 W&B: one run per job, named name. Per outer fold k: the selected settings (fold k/selected/...),
 their mean validation scores and shift's (fold k/validation/<bridge>/<metric>), the training
 loss of the refit neural bridge (fold k/neural bridge/loss, against its step) and every model's
@@ -76,13 +77,23 @@ def log_selected(fold: int, selected: dict) -> None:
 
 
 def nested_cv(adata: sc.AnnData, cfg: DictConfig) -> Iterator[tuple]:
-    """Per outer fold: (inner scores, selected settings, outer scores), as soon as it is done."""
+    """Tune on all but one experiment and evaluate on that experiment, n_validation_batches times.
+
+    Select distinct outer experiments using cfg.seed. Inner tuning retains cfg.inner_folds
+    K-fold splits of the remaining experiments. Yield (inner scores, settings, outer scores)
+    after each run; "fold" is the zero-based outer run index.
+    """
     if cfg.positive_controls_as_proxies:
         adata = add_positive_controls_to_proxies(adata)
     batch = batch_labels(adata)
-    folds = experiment_folds(batch, cfg.n_folds, np.random.default_rng(cfg.seed), cfg.cell_type)
-    for i, held_out in enumerate(folds):
-        print(f"fold {i + 1}/{cfg.n_folds}: tuning", flush=True)
+    selected_batches = tuning.validation_batches(
+        batch, cfg.n_validation_batches, np.random.default_rng(cfg.seed)
+    )
+    for i, held_out in enumerate(selected_batches):
+        print(
+            f"validation {i + 1}/{len(selected_batches)}: tuning with {held_out} held out",
+            flush=True,
+        )
         train_batches = np.setdiff1d(np.unique(batch), held_out)
         inner, selected, winners = tuning.tune(
             inner_folds(adata, train_batches, cfg, [cfg.seed, i]), cfg
@@ -95,7 +106,7 @@ def nested_cv(adata: sc.AnnData, cfg: DictConfig) -> Iterator[tuple]:
         yield (
             inner.assign(fold=i),
             pd.DataFrame([{"fold": i, "bridge": b, **s} for b, s in selected.items()]),
-            score_batches(models, adata, held_out).assign(fold=i),
+            score_batches(models, adata, [held_out]).assign(fold=i),
         )
 
 

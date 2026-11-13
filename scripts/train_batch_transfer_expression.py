@@ -1,20 +1,19 @@
 """Out-of-batch prediction on Replogle K562 gene expression with the batch-transfer model.
 
-K-fold cross-validation over batches: the batches are split into n_folds groups; each group is
-held out once while the models are fit on the rest. In held-out batches only the control cells are
-used (W_{e*}) to predict each perturbation's mean expression. Metrics compare predicted vs observed
-effects (perturbation mean - batch-matched control mean). Two views:
+n_validation_batches distinct batches are selected without replacement using seed. Each is held
+out in a separate run, with every other batch used for training: n_validation_batches fits per
+model. In held-out batches only the control cells are used (W_{e*}) to predict each perturbation's
+mean expression. Metrics compare predicted vs observed effects (perturbation mean - batch-matched
+control mean). Two views:
 
-- per perturbation: within a fold the held-out batches are pooled, one score per perturbation;
-  averaged over folds                                                    -> plots/per_perturbation/
-- per batch: each batch scored on its own when held out (mean of the per-perturbation scores
-  within that batch); every batch appears once                          -> plots/per_batch/
+- per perturbation: scores averaged over the selected validation batches -> plots/per_perturbation/
+- per batch: scores averaged over perturbations within each selected batch -> plots/per_batch/
 
 Raw scores (long tables) go to scores_per_perturbation.csv and scores_per_batch.csv.
 
 Config: configs/train_batch_transfer_expression.yaml. `name` is required and names the output folder. Usage:
 
-    uv run python scripts/train_batch_transfer_expression.py name=baseline n_folds=10
+    uv run python scripts/train_batch_transfer_expression.py name=baseline n_validation_batches=10
     uv run python scripts/train_batch_transfer_expression.py name=kernel_only 'bridges=[kernel]'   # no GPU: skip the neural bridge
     uv run python scripts/train_batch_transfer_expression.py name=neural_500 neural.n_steps=500 neural.weight_decay=1e-2
 """
@@ -37,7 +36,7 @@ from genetic_perturbation_playground.model.batch_transfer import (
     is_control,
     summary_stats,
 )
-from genetic_perturbation_playground.tuning import batch_folds, with_standardisation
+from genetic_perturbation_playground.tuning import validation_batches, with_standardisation
 from genetic_perturbation_playground.utils import metrics
 from genetic_perturbation_playground.utils.plotting import report
 
@@ -104,29 +103,31 @@ def _split_controls(test: sc.AnnData, seen: np.ndarray) -> tuple:
 
 
 def cross_validate(adata: sc.AnnData, cfg: DictConfig) -> tuple:
-    """K-fold over batches: each batch is held out exactly once, models refit per fold.
+    """Hold out n_validation_batches distinct batches one at a time, selected using cfg.seed.
+
+    Each model is fit once per selected batch, using all other batches for training.
 
     Every batch's controls are split in two halves. The `seen` half is the proxy for all models, in
     training and held-out batches alike; the other half is only the baseline in scoring.
 
     Returns (per-perturbation scores, per-batch scores) as long tables. Per-perturbation scores are
-    averaged over folds (cells summed); per-batch scores average over the batch's perturbations.
+    averaged over validation batches (cells summed); per-batch scores average over perturbations.
     """
     batch = batch_labels(adata)
     rng = np.random.default_rng(cfg.seed)
-    folds = batch_folds(batch, cfg.n_folds, rng)
+    selected = validation_batches(batch, cfg.n_validation_batches, rng)
     seen = _seen_controls(adata, batch, rng)
     train_cells = ~is_control(adata) | seen
 
     pert_scores, batch_scores = [], []
-    for i, held_out in enumerate(folds):
-        print(f"fold {i + 1}/{cfg.n_folds}: holding out {len(held_out)} batches")
-        is_test = np.isin(batch, held_out)
+    for i, held_out in enumerate(selected):
+        print(f"validation {i + 1}/{len(selected)}: holding out {held_out}")
+        is_test = batch == held_out
         models = fit(adata[~is_test & train_cells], cfg)
         test = adata[is_test]
         pert_scores.append(score(models, test, cfg.top_k, seen[is_test]))
         _print_fold_means(pert_scores[-1])
-        batch_scores += _score_batches(models, test, seen[is_test], held_out, batch, cfg.top_k)
+        batch_scores.append(pert_scores[-1].assign(batch=held_out, cells=is_test.sum()))
     return _average_per_perturbation(pert_scores), _average_per_batch(batch_scores)
 
 
@@ -154,7 +155,7 @@ def _print_fold_means(scores: pd.DataFrame) -> None:
 
 
 def _average_per_perturbation(scores: list[pd.DataFrame]) -> pd.DataFrame:
-    """Scores averaged over folds per perturbation, with cells summed."""
+    """Scores averaged over validation runs per perturbation, with cells summed."""
     grouped = pd.concat(scores).groupby(["perturbation", "metric", "model"], sort=False)
     return grouped.agg(value=("value", "mean"), cells=("cells", "sum")).reset_index()
 

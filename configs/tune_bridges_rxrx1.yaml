@@ -1,4 +1,4 @@
-defaults:  # cell type, folds, proxies, scoring and neural settings as in train_batch_transfer_rxrx1
+defaults:  # validation batches, cell type, proxies, scoring and neural settings from training
   - train_batch_transfer_rxrx1
   - _self_
 
