@@ -313,35 +313,40 @@ class NeuralBridgeTransfer:
 
 
 class Standardised:
-    """Fit and predict with standardised control inputs and unscaled targets and outputs.
+    """Fit and predict with standardised control inputs and centred targets.
 
-    Each proxy dimension uses the training controls' pooled mean and std, reused at prediction.
-    Constant dimensions use std 1. Perturbed cells, categorical labels and model outputs are
-    unchanged, so the model learns and predicts in the targets' original units.
+    Each proxy dimension uses the training controls' pooled mean and std (w=False: mean 0, std 1),
+    reused at prediction. Constant dimensions use std 1. Perturbed cells are centred by the
+    training perturbed cells' mean, which is added back to predictions: the bridges' ridge has no
+    intercept, so this makes it shrink toward the mean expression rather than toward 0.
     """
 
-    def __init__(self, model):
+    def __init__(self, model, w: bool = True):
         self.model = model
+        self.w = w
 
     @property
     def perturbations_(self) -> np.ndarray:
         return self.model.perturbations_
 
     def fit(self, adata: sc.AnnData, *args) -> "Standardised":
-        """Scale training controls and fit to raw targets; forward extra fit arguments."""
-        self.w_mean_, self.w_std_ = _mean_and_std(_dense(adata.X[is_control(adata)]))
+        """Scale training controls, centre targets and fit; forward extra fit arguments."""
+        ctrl = is_control(adata)
+        self.w_mean_, self.w_std_ = _mean_and_std(_dense(adata.X[ctrl])) if self.w else (0.0, 1.0)
+        self.y_mean_ = np.asarray(adata.X[~ctrl].mean(axis=0)).ravel()
         self.model.fit(self._standardise(adata), *args)
         return self
 
     def predict(self, perturbations: list[str], test: sc.AnnData) -> np.ndarray:
-        """Predict in target units using controls scaled by the training statistics."""
-        return self.model.predict(perturbations, self._standardise(test))
+        """Predict in target units: scaled test controls in, training target mean added back."""
+        return self.model.predict(perturbations, self._standardise(test)) + self.y_mean_
 
     def _standardise(self, adata: sc.AnnData) -> sc.AnnData:
-        """Copy `adata` with scaled controls and unchanged perturbed cells."""
+        """Copy `adata` with scaled controls and centred perturbed cells."""
         X = _dense(adata.X).astype(float)
         ctrl = is_control(adata)
         X[ctrl] = (X[ctrl] - self.w_mean_) / self.w_std_
+        X[~ctrl] -= self.y_mean_
         return sc.AnnData(X, obs=adata.obs)
 
 
