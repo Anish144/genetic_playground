@@ -282,8 +282,10 @@ class NeuralBridgeTransfer:
         self.per_perturbation = per_perturbation
         self.bridge_kwargs = bridge_kwargs
 
-    def fit(self, adata: sc.AnnData, checkpoints=(), on_checkpoint=None) -> "NeuralBridgeTransfer":
-        """Fit on `adata`; checkpoints and on_checkpoint as in NeuralMarginalEmbeddingBridge.fit."""
+    def fit(
+        self, adata: sc.AnnData, checkpoints=(), on_checkpoint=None, on_training_loss=None
+    ) -> "NeuralBridgeTransfer":
+        """Fit on `adata` with the checkpoint and loss callbacks of NeuralMarginalEmbeddingBridge."""
         data = _bridge_data(adata, self.weight_by_cells)
         self.perturbations_ = data.perturbations
         envs = [data.batch == b for b in range(len(data.ctrl))]
@@ -295,7 +297,7 @@ class NeuralBridgeTransfer:
             NeuralPerXEmbeddingBridge if self.per_perturbation else NeuralMarginalEmbeddingBridge
         )
         self.bridge_ = bridge(**self.bridge_kwargs)
-        self.bridge_.fit(xs, ys, data.ctrl, counts, checkpoints, on_checkpoint)
+        self.bridge_.fit(xs, ys, data.ctrl, counts, checkpoints, on_checkpoint, on_training_loss)
         return self
 
     def predict(self, perturbations: list[str], test: sc.AnnData) -> np.ndarray:
@@ -329,12 +331,12 @@ class Standardised:
     def perturbations_(self) -> np.ndarray:
         return self.model.perturbations_
 
-    def fit(self, adata: sc.AnnData, *args) -> "Standardised":
+    def fit(self, adata: sc.AnnData, *args, **kwargs) -> "Standardised":
         """Scale training controls, centre targets and fit; forward extra fit arguments."""
         ctrl = is_control(adata)
         self.w_mean_, self.w_std_ = _mean_and_std(_dense(adata.X[ctrl])) if self.w else (0.0, 1.0)
         self.y_mean_ = np.asarray(adata.X[~ctrl].mean(axis=0)).ravel()
-        self.model.fit(self._standardise(adata), *args)
+        self.model.fit(self._standardise(adata), *args, **kwargs)
         return self
 
     def predict(self, perturbations: list[str], test: sc.AnnData) -> np.ndarray:

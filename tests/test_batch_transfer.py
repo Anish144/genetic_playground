@@ -182,10 +182,12 @@ def test_neural_checkpoint_equals_fit_with_that_many_steps(per_perturbation, cro
     at_step = {}
 
     model = NeuralBridgeTransfer(**kwargs)
-    model.fit(train, [3], lambda step: at_step.update({step: model.predict(perts, test)}))
+    model.fit(train, [0, 3], lambda step: at_step.update({step: model.predict(perts, test)}))
 
-    short = NeuralBridgeTransfer(**{**kwargs, "n_steps": 3}).fit(train)
-    np.testing.assert_allclose(at_step[3], short.predict(perts, test))
+    assert list(at_step) == [0, 3]
+    for step in at_step:
+        short = NeuralBridgeTransfer(**{**kwargs, "n_steps": step}).fit(train)
+        np.testing.assert_allclose(at_step[step], short.predict(perts, test))
 
 
 def test_neural_bridge_logs_loss_every_step_only_with_a_log_key(monkeypatch):
@@ -197,10 +199,19 @@ def test_neural_bridge_logs_loss_every_step_only_with_a_log_key(monkeypatch):
     xs, ys, ws = ([rng.normal(size=(5, 2)) for _ in range(2)] for _ in range(3))
     NeuralMarginalEmbeddingBridge(n_steps=3).fit(xs, ys, ws)
     assert logged == axes == []
-    NeuralMarginalEmbeddingBridge(n_steps=3, log_key="fold 2/neural bridge").fit(xs, ys, ws)
+    recorded = {}
+    bridge = NeuralMarginalEmbeddingBridge(
+        n_steps=3, cross_fit_folds=2, log_key="fold 2/neural bridge"
+    )
+    bridge.fit(xs, ys, ws, on_training_loss=recorded.__setitem__)
     assert axes == ["fold 2/neural bridge/step"]
     assert [m["fold 2/neural bridge/step"] for m in logged] == [0, 1, 2]
     assert all(np.isfinite(m["fold 2/neural bridge/loss"]) for m in logged)
+    assert list(recorded) == [0, 1, 2, 3]
+    assert list(recorded.values())[:3] == [m["fold 2/neural bridge/loss"] for m in logged]
+    with torch.no_grad():
+        final_loss = bridge._training_loss(bridge._to_tensors(xs, ys, ws, None))
+    assert recorded[3] == pytest.approx(final_loss.item())
 
 
 def test_cross_fit_needs_two_environments():

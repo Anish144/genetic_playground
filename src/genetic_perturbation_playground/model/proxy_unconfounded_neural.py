@@ -166,6 +166,7 @@ class NeuralMarginalEmbeddingBridge:
         counts: list[np.ndarray] | None = None,
         checkpoints: Collection[int] = (),
         on_checkpoint: Callable[[int], None] | None = None,
+        on_training_loss: Callable[[int, float], None] | None = None,
     ) -> "NeuralMarginalEmbeddingBridge":
         """Fit from D source environments; element e of each list belongs to environment e.
 
@@ -173,12 +174,18 @@ class NeuralMarginalEmbeddingBridge:
         counts[e]: (n_e,), optional; pair i stands for counts[e][i] replicates with mean y_i, so the
         fit equals the fit on the replicates (weighted loss, ridge scaled by their total).
         After each step in ``checkpoints``, A_ is set and ``on_checkpoint(step)`` is called, so the
-        bridge can be scored there as if fit with n_steps=step.
+        bridge can be scored there as if fit with n_steps=step. Checkpoint 0 uses the
+        initialized networks and ridge coefficients fit before the first optimizer update.
+        on_training_loss(step, mse) records the objective after `step` completed updates.
+        The last point evaluates the objective once more with the final network.
         """
         torch.manual_seed(self.seed)
         data = self._to_tensors(xs, ys, ws, counts)
         self._build_networks(data)
-        self._train(data, checkpoints, on_checkpoint)
+        if 0 in checkpoints:
+            self._solve_A(data)
+            on_checkpoint(0)
+        self._train(data, checkpoints, on_checkpoint, on_training_loss)
         self._solve_A(data)
         return self
 
@@ -211,7 +218,7 @@ class NeuralMarginalEmbeddingBridge:
             self.device
         )
 
-    def _train(self, data: _Stage2Data, checkpoints, on_checkpoint) -> None:
+    def _train(self, data: _Stage2Data, checkpoints, on_checkpoint, on_training_loss) -> None:
         """Full-batch AdamW on phi and psi against the stage-2 loss."""
         params = [*self.phi_.parameters(), *self.psi_.parameters()]
         optimizer = torch.optim.AdamW(params, lr=self.lr, weight_decay=self.weight_decay)
@@ -224,12 +231,19 @@ class NeuralMarginalEmbeddingBridge:
             loss = self._training_loss(data)
             loss.backward()
             optimizer.step()
-            progress.set_postfix(loss=f"{loss.item():.4f}")
+            mse = loss.item()  # evaluated before the update above
+            progress.set_postfix(loss=f"{mse:.4f}")
+            if on_training_loss is not None:
+                on_training_loss(step, mse)
             if logging:
-                wandb.log({f"{self.log_key}/loss": loss.item(), f"{self.log_key}/step": step})
+                wandb.log({f"{self.log_key}/loss": mse, f"{self.log_key}/step": step})
             if step + 1 in checkpoints:
                 self._solve_A(data)
                 on_checkpoint(step + 1)
+        if on_training_loss is not None:
+            # Cross-fitting draws folds on the CPU. Preserve its RNG for later fits.
+            with torch.no_grad(), torch.random.fork_rng(devices=[]):
+                on_training_loss(self.n_steps, self._training_loss(data).item())
 
     def _training_loss(self, data: _Stage2Data) -> torch.Tensor:
         """The loss phi and psi are trained on: cross-fitted, or in-sample stage 2."""
