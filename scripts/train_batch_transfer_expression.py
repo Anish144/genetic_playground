@@ -31,14 +31,18 @@ from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig
 
 from genetic_perturbation_playground.data.data_loader import load_dataset
-from genetic_perturbation_playground.model.batch_transfer import (
-    BatchTransferModel,
-    KernelBridgeTransfer,
-    NeuralBridgeTransfer,
+from genetic_perturbation_playground.data.transfer import (
     batch_labels,
     is_control,
     summary_stats,
     training_batch_counts,
+)
+from genetic_perturbation_playground.model.batch_transfer import (
+    KernelBridgeTransfer,
+    NeuralBridgeTransfer,
+)
+from genetic_perturbation_playground.model.linear_transfer import (
+    LinearTransfer,
 )
 from genetic_perturbation_playground.tuning import validation_batches, with_standardisation
 from genetic_perturbation_playground.utils import metrics
@@ -49,15 +53,15 @@ MODELS = {"pooled (b=0)": 0.0, "shift (b=1)": 1.0, "transfer (fit b)": None}
 
 def fit(train: sc.AnnData, cfg: DictConfig) -> dict:
     """Fit every model variant on the training batches."""
-    models = _fit_linear(train, cfg.standardise_w) | _fit_bridges(train, cfg)
+    models = _fit_linear(train, cfg.standardise_w, reg=cfg.linear_reg) | _fit_bridges(train, cfg)
     _print_slope(models["transfer (fit b)"].slope_)
     return models
 
 
-def _fit_linear(train: sc.AnnData, standardise_w: bool = True) -> dict:
+def _fit_linear(train: sc.AnnData, standardise_w: bool = True, *, reg: float = 1e-3) -> dict:
     """Fit the linear variants with optional input scaling and unscaled targets."""
     return {
-        name: BatchTransferModel(slope, standardise_w=standardise_w).fit(train)
+        name: LinearTransfer(slope, standardise_w=standardise_w, reg=reg).fit(train)
         for name, slope in MODELS.items()
     }
 

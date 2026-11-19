@@ -9,7 +9,9 @@ from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 
 from genetic_perturbation_playground import tuning
-from genetic_perturbation_playground.model.batch_transfer import Standardised
+from genetic_perturbation_playground.utils.standardisation import (
+    Standardised,
+)
 
 ROOT = Path(__file__).parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -65,7 +67,7 @@ def test_selection_ranks_configurations_by_their_mean_over_inner_folds():
         {
             "bridge": ["kernel"] * 4 + ["neural"] * 2 + ["shift (b=1)"] * 2,
             "reg": [1.0, 1.0, 2.0, 2.0, 3.0, 3.0, None, None],
-            "phi_size": [None] * 4 + [8.0, 8.0, None, None],
+            "psi_size": [None] * 4 + [8.0, 8.0, None, None],
             "width_w": [None] * 4 + [128.0, 128.0, None, None],
             "inner_fold": [0, 1, 0, 1, 0, 1, 0, 1],
             "mse": [0.1, 0.9, 0.4, 0.4, 0.3, 0.3, 0.5, 0.7],  # reg 1 wins fold 0, reg 2 on average
@@ -75,9 +77,9 @@ def test_selection_ranks_configurations_by_their_mean_over_inner_folds():
     averaged = tuning.mean_over_inner_folds(inner)
     assert tuning.select(averaged) == {
         "kernel": {"reg": 2.0},
-        "neural": {"reg": 3.0, "phi_size": 8, "width_w": 128},
+        "neural": {"reg": 3.0, "psi_size": 8, "width_w": 128},
     }
-    assert isinstance(tuning.select(averaged)["neural"]["phi_size"], int)
+    assert isinstance(tuning.select(averaged)["neural"]["psi_size"], int)
     assert isinstance(tuning.select(averaged)["neural"]["width_w"], int)
     shift = averaged[averaged["bridge"] == "shift (b=1)"].iloc[0]
     assert (shift["mse"], shift["pearson"]) == pytest.approx((0.6, 6.0))
@@ -158,7 +160,7 @@ def test_replogle_nested_cv_tunes_on_inner_folds_and_scores_selected_batches():
             "inner_folds": 2,
             "n_configs": 2,
             "kernel_grid": {"reg": [1e-3, 1e-2], "lengthscale_scale": [1]},
-            "neural_grid": {"reg": [1e-3], "weight_decay": [0.0], "phi_size": [2], "psi_size": [3]},
+            "neural_grid": {"reg": [1e-3], "weight_decay": [0.0], "psi_size": [3]},
             "neural_checkpoints": [1, 2],
             "neural": {"device": "cpu", "cross_fit_folds": 0},
         },

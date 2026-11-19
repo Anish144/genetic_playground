@@ -53,7 +53,7 @@ Let $x$ be a perturbation, $e$ a batch and $g$ one of $G$ output features (genes
 
 **Input standardisation.** By default (`standardise_w=true`), every continuous proxy coordinate uses $\tilde w_g=(w_g-a_g)/s_g$. The mean $a_g$ and population standard deviation $s_g$ are fitted to pooled training controls only, and reused for validation and test controls. Constant coordinates use $s_g=1$. Linear control means use the same transformation. Categorical/one-hot perturbation inputs stay unchanged. Targets and predictions remain in log-expression or Phenom units. Image normalisation above is a separate step.
 
-**Count weighting.** Linear least squares always uses cell/crop counts. For bridges, $c_{xe}=n_{xe}$ by default; `weight_by_cells=false` sets $c_{xe}=1$ for observed pairs. **If perturbation $x$ is absent from batch $e$, its weight is zero.** Missing responses are omitted, not treated as observed zeros. Let $N=\sum_{xe}c_{xe}$. Bridge ridge penalties use $\lambda N$, where $N$ covers all perturbations in the current training split. Each batch's control embedding is an unweighted mean over its proxy samples.
+**Count weighting.** Linear ridge always uses cell/crop counts. For bridges, $c_{xe}=n_{xe}$ by default; `weight_by_cells=false` sets $c_{xe}=1$ for observed pairs. **If perturbation $x$ is absent from batch $e$, its weight is zero.** Missing responses are omitted, not treated as observed zeros. Let $N=\sum_{xe}c_{xe}$. Ridge penalties use $\lambda N$, where $N$ covers all perturbations in the current training split. Each batch's control embedding is an unweighted mean over its proxy samples.
 
 ## 1. Linear
 
@@ -61,8 +61,11 @@ Each feature has a perturbation intercept $\gamma_{xg}$ and a batch slope $b_g$ 
 
 $$
 \hat y_{xeg}=\gamma_{xg}+b_g W_{eg},\qquad
-\min_{\gamma,b}\sum_{x,e}n_{xe}\sum_g(\bar y_{xeg}-\gamma_{xg}-b_gW_{eg})^2.
+\min_{\gamma,b}\sum_{x,e}n_{xe}\sum_g(\bar y_{xeg}-\gamma_{xg}-b_gW_{eg})^2
++N\lambda\sum_g(s_gb_g)^2.
 $$
+
+The intercepts $\gamma$ have no penalty. Here, $s_g$ is the training-control standard deviation when inputs are standardised, and 1 otherwise. Thus the penalty applies to the fitted slope in the chosen control units. `LinearTransfer(reg=...)` from `model/linear_transfer.py` sets $\lambda$; training and tuning scripts use `linear_reg`, which defaults to `1e-3`. Set it to `0` for ordinary least squares. Fixed slopes (`b=0` and `b=1`) ignore this penalty.
 
 Define the training means $\bar y_{xg}=\sum_e n_{xe}\bar y_{xeg}/\sum_e n_{xe}$ and $\bar W_{xg}=\sum_e n_{xe}W_{eg}/\sum_e n_{xe}$. The three settings predict a new batch $e^*$ as follows:
 
@@ -72,12 +75,12 @@ Define the training means $\bar y_{xg}=\sum_e n_{xe}\bar y_{xeg}/\sum_e n_{xe}$ 
 | Shift (`b=1`) | $\hat y_{xe^*g}=\bar y_{xg}-\bar W_{xg}+W_{e^*g}$ |
 | Transfer (fit $b$) | $\hat y_{xe^*g}=\bar y_{xg}+\hat b_g(W_{e^*g}-\bar W_{xg})$ |
 
-The fitted slope is the within-perturbation least-squares slope:
+The fitted ridge slope is:
 
 $$
 \hat b_g=
 \frac{\sum_{x,e}n_{xe}(W_{eg}-\bar W_{xg})(\bar y_{xeg}-\bar y_{xg})}
-{\sum_{x,e}n_{xe}(W_{eg}-\bar W_{xg})^2}.
+{\sum_{x,e}n_{xe}(W_{eg}-\bar W_{xg})^2+N\lambda s_g^2}.
 $$
 
 These equations use original units. The implementation standardises inputs and converts fixed slopes accordingly, so `b=1` still means a unit shift in original units. Each output uses only its matching control coordinate.
@@ -110,21 +113,68 @@ $\bar{Y}_x$ contains the observed batch means, and $M_x$ contains similarities b
 
 ## 3. Neural bridge
 
-Both versions learn a control network $\psi$ with $q$ output features and use $\mu_e=m_e^{-1}\sum_j\psi(\tilde w_{ej})$.
-
-- **Learned $\phi(x)$:** an MLP maps one-hot perturbations to $p$ features. For each output, $\hat y_{xeg}=\phi(x)^T A_g\mu_e$, with $A_g\in\mathbb R^{p\times q}$. Both networks and the response coefficients are shared across perturbations.
-- **Delta $\phi(x)=\delta_x$ (per $x$):** keep the one-hot input and fit a separate $A_x\in\mathbb R^{q\times G}$ for each perturbation: $\hat y_{xe}=A_x^T\mu_e$. Only $\psi$ is shared. Select this with `neural.per_perturbation=true`; `n_features` and `width_x` are unused.
-
-For fixed networks, solve the response coefficients exactly by weighted ridge regression:
+The default neural model is **per-x**: one control network maps each sample to $q$ features, and its batch mean is $z_e=m_e^{-1}\sum_j\psi(\tilde w_{ej})$. Each perturbation has its own response matrix:
 
 $$
-\min_A\sum_{x,e}c_{xe}\|\bar y_{xe}-\hat y_{xe}\|_2^2
-+\lambda N\|A\|_F^2.
+\hat y_{xe}=z_e^\top A_x,\qquad
+\min_{\{A_x\}}\sum_{x,e}c_{xe}\|\bar y_{xe}-z_e^\top A_x\|^2
++\lambda N\sum_x\|A_x\|_F^2.
 $$
 
-For the per-$x$ version, the penalty sums $\|A_x\|_F^2$ over perturbations, still using the global $N$. Both versions use full-batch AdamW to learn the networks through the ridge solve. MLPs have two SwiGLU hidden layers by default, residual connections where widths match, and linear outputs. Networks run in float32; ridge algebra uses float64.
+Only the control network is shared across perturbations. `neural.variant=per_x` selects this model; it is also the default. The learned-perturbation marginal neural model has been removed. The kernel marginal embedding bridge is still available.
 
-By default, network training uses five-fold cross-fitting over training batches: at every step, randomly split batches, fit coefficients on the other folds, and score each held-out fold. The loss averages squared error over output features and weights pairs by $c_{xe}$. Final coefficients use all training batches. `cross_fit_folds=0` uses an in-sample loss. Default training runs use 200 steps, learning rate `1e-3`, weight decay `1e-2`, and ridge `1e-6`. Feature sizes are $(p,q)=(32,32)$ for Replogle and $(128,32)$ for RxRx1; tuning overrides these.
+The control networks use full-batch AdamW, float32 SwiGLU layers with residual connections, and float64 ridge algebra. `n_features_w` sets the embedding size, `width_w` the hidden width, and `depth` the hidden-layer count. Each training step uses a fresh environment split when `cross_fit_folds >= 2`; `cross_fit_folds=0` uses in-sample MSE. Final coefficients use every training environment. Training and checkpoint callbacks are shared by all three variants.
+
+### Shared 2NN and hybrid
+
+`NeuralSharedEmbeddingBridge` learns two independent control networks. Write their batch means as $s_e$ and $d_e$, each with `n_features_w` coordinates. The shared 2NN prediction is
+
+$$
+\hat y_{xeg}=a_{xg}+s_e^\top b_g+d_e^\top c_{xg}.
+$$
+
+The intercept $a_x$ and deviation coefficients $c_x$ belong to each perturbation; $b$ is shared across perturbations. For fixed networks, all coefficients are fitted jointly with the penalty
+
+$$
+N\left[\lambda\left(\sum_x\|a_x\|^2+\|b\|_F^2\right)
++\lambda_c\sum_x\|c_x\|_F^2\right].
+$$
+
+`reg` sets $\lambda$; `deviation_reg` sets $\lambda_c$ and defaults to `reg`. Both must be finite and positive. The intercept is penalised too. Increasing `deviation_reg` shrinks perturbation-specific deviations toward the shared effect.
+
+`NeuralHybridEmbeddingBridge` adds $\beta_g W_{eg}$ to this prediction and $N\lambda_{\rm linear}\|\beta\|^2$ to the penalty. The linear slope, intercept, shared response and deviation are fitted **jointly**. Each raw-control coordinate must correspond to the same target coordinate. `linear_reg` is nonnegative; `float("inf")` disables this term and reproduces shared 2NN. If controls are standardised, the linear term uses the standardised control mean.
+
+Both models retain count weighting, missing-pair handling, float64 ridge algebra, float32 networks, cross-fitting and checkpoint callbacks. `width_w`, `depth` and `n_features_w` size each network. The training loss is prediction MSE, without the coefficient penalty. `Standardised` centres training targets and adds their mean back at prediction, so coefficients in that wrapper describe centred responses.
+
+Use either variant through the existing AnnData adapter:
+
+```python
+from genetic_perturbation_playground.model.batch_transfer import NeuralBridgeTransfer
+from genetic_perturbation_playground.utils.standardisation import Standardised
+
+model = Standardised(NeuralBridgeTransfer(
+    variant="hybrid",  # "shared_2nn" omits the raw-linear term
+    reg=1e-4,
+    deviation_reg=1e-3,
+    linear_reg=1e-3,  # hybrid only
+    n_features_w=16,
+    width_w=32,
+    cross_fit_folds=5,
+    n_steps=400,
+))
+model.fit(train)
+predictions = model.predict(perturbations, test)
+```
+
+The training scripts accept `neural.variant=shared_2nn` or `neural.variant=hybrid`. Add variant-specific penalties with, for example, `+neural.deviation_reg=1e-3` and `+neural.linear_reg=1e-3` (hybrid only). The default is `per_x`. There is no `marginal` neural variant.
+
+`model/batch_transfer.py` contains the kernel and neural AnnData adapters. `data/transfer.py` prepares their counts, means and batch mixtures. The linear model is `LinearTransfer` in `model/linear_transfer.py`, and the scaling wrapper is `Standardised` in `utils/standardisation.py`.
+
+`utils/neural.py` contains the reusable network layers, network builder, tensor conversion and checkpoint helper. `data/neural.py` defines one `GroupedRidgeData` record shared by the neural models and ridge solver; it holds counts, target sums and optional control tensors without copying them.
+
+Implementation is in `model/proxy_unconfounded_neural.py`. `utils/ridge.py` contains two independent solvers: `LinearRidgeSolver` fits NumPy control slopes with a ridge penalty and unpenalised category intercepts; `NeuralRidgeSolver` fits the coefficients of all three neural bridges with PyTorch gradients. They have no common base class. Per-x retains batched category solves and target-Gram losses. For shared 2NN and hybrid, the neural solver eliminates category coefficients before a small shared solve, then solves the hybrid's extra slope per coordinate. Shared-2NN training uses target Grams and batches all folds' target projections; hybrid training checkpoints folds to limit retained autograd state. Final shared/hybrid coefficients are reconstructed in `gene_block_size` blocks and exposed as `intercept_`, `shared_coef_`, `deviation_coef_` and `linear_coef_` (zero for shared 2NN).
+
+`scripts/benchmark_ridge_solver.py --baseline /path/to/previous_neural_module.py --output outputs/ridge_benchmark.json` compares a saved pre-refactor module against the neural solver. It checks losses, gradients and coefficients, then records CPU training/reconstruction timings and allocation traffic on two synthetic sizes. The linear comparison sets `reg=0` to match the previous least-squares formula.
 
 # Evaluation
 
@@ -184,7 +234,7 @@ hpc/run.sbatch                 Slurm GPU launcher
 outputs/<date>/<name>_<time>/   Results, plots and .hydra/ configuration snapshots
 ```
 
-The `train_proxy_confounded.py` and `train_proxy_unconfounded.py` scripts are separate synthetic experiments.
+The `train_proxy_confounded.py` and `train_proxy_unconfounded.py` scripts are separate synthetic experiments. The unconfounded continuous-X experiment now runs only the kernel bridge, since its neural marginal model has been removed.
 
 **Replogle:** the first run downloads and caches the data. `name` is required.
 
@@ -195,7 +245,7 @@ uv run python scripts/tune_bridges.py name=replogle_tuned
 uv run python scripts/tune_bridges.py --config-name tune_bridges_perx name=replogle_perx
 ```
 
-For linear models plus the kernel bridge on CPU, append `'bridges=[kernel]'` to a **training** command; `'bridges=[]'` runs only linear models. Tuning scripts always tune both bridges. A fixed per-$x$ Replogle run uses `neural.per_perturbation=true`.
+For linear models plus the kernel bridge on CPU, append `'bridges=[kernel]'` to a **training** command; `'bridges=[]'` runs only linear models. Tuning scripts always tune both bridges. A fixed per-$x$ Replogle run uses the default `neural.variant=per_x`.
 
 **RxRx1:** download the images and metadata from the [dataset page](https://www.rxrx.ai/rxrx1). Arrange them as:
 
@@ -212,7 +262,7 @@ uv run python scripts/train_batch_transfer_rxrx1.py name=huvec wandb_mode=disabl
 uv run python scripts/tune_bridges_rxrx1.py name=all_types_tuned cell_type=null wandb_mode=disabled
 ```
 
-Use `grid=2` when embedding and `embeddings.grid=2` when training to use 256-pixel crops. For site normalisation, use `standardise_sites=true` and `embeddings.standardise_sites=true` respectively. RxRx1 defaults to online W&B logging; examples disable it. Add `+neural.per_perturbation=true` to an RxRx1 command for the per-$x$ neural version.
+Use `grid=2` when embedding and `embeddings.grid=2` when training to use 256-pixel crops. For site normalisation, use `standardise_sites=true` and `embeddings.standardise_sites=true` respectively. RxRx1 defaults to online W&B logging; examples disable it. RxRx1 also defaults to `neural.variant=per_x`.
 
 To check the existing local smoke embeddings without a GPU:
 

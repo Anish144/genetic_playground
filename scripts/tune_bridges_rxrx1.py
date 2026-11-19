@@ -50,7 +50,10 @@ from train_batch_transfer_rxrx1 import (
 
 from genetic_perturbation_playground import tuning
 from genetic_perturbation_playground.data.rxrx1 import load_rxrx1
-from genetic_perturbation_playground.model.batch_transfer import batch_labels, training_batch_counts
+from genetic_perturbation_playground.data.transfer import (
+    batch_labels,
+    training_batch_counts,
+)
 from genetic_perturbation_playground.utils.plotting import report_by_training_batches
 
 
@@ -103,7 +106,7 @@ def nested_cv(adata: sc.AnnData, cfg: DictConfig) -> Iterator[tuple]:
         log_selected(i + 1, selected)
         log_summary(f"fold {i + 1}/validation", winners)
         train = adata[np.isin(batch, train_batches)]
-        models = _fit_linear(train, cfg.standardise_w)
+        models = _fit_linear(train, cfg.standardise_w, reg=cfg.linear_reg)
         models |= tuning.fit_selected(train, selected, cfg, f"fold {i + 1}/neural bridge")
         scores = score_batches(models, adata, [held_out]).assign(fold=i)
         scores["n_training_batches"] = scores["perturbation"].map(training_batch_counts(train))

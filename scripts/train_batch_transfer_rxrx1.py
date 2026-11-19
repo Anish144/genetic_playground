@@ -37,8 +37,8 @@ from omegaconf import DictConfig, OmegaConf
 from train_batch_transfer_expression import fit as fit_models
 
 from genetic_perturbation_playground.data.rxrx1 import load_rxrx1
-from genetic_perturbation_playground.model.batch_transfer import (
-    _dense,
+from genetic_perturbation_playground.data.transfer import (
+    as_dense,
     batch_labels,
     is_control,
     perturbation_labels,
@@ -87,7 +87,7 @@ def score_batch(models: dict, test: sc.AnnData) -> pd.DataFrame:
     labels = perturbation_labels(test)
     present = np.unique(labels[_wells(test, "treatment")])
     perts = np.intersect1d(present, next(iter(models.values())).perturbations_)
-    X = _dense(test.X)
+    X = as_dense(test.X)
     obs = np.stack([X[labels == p].mean(axis=0) for p in perts])
     rows = [
         _long(perts, name, "mse", mse(m.predict(perts, test), obs)) for name, m in models.items()

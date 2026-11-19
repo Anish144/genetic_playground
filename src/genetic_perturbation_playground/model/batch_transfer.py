@@ -1,234 +1,78 @@
-from typing import NamedTuple
+"""Kernel and neural transfer bridges for AnnData inputs.
 
+Both bridges fit count-weighted means for each observed (perturbation, batch)
+pair. Predictions use test controls and response counts, without test response
+values. If a perturbation occurs in several test batches, its prediction is the
+count-weighted mean of the batch predictions.
+
+G counts perturbations, D counts source batches and J counts measured outputs.
+Input preparation lives in data.transfer. LinearTransfer and Standardised live
+in model.linear_transfer and utils.standardisation, respectively.
+"""
+
+import anndata as ad
 import numpy as np
-import pandas as pd
-import scanpy as sc
-from scipy import sparse
 
+from genetic_perturbation_playground.data.transfer import (
+    BridgeData,
+    batch_controls,
+    batch_weights,
+    bridge_data,
+    label_positions,
+)
 from genetic_perturbation_playground.model.proxy_unconfounded import (
     MarginalEmbeddingBridge,
     mean_inner,
 )
 from genetic_perturbation_playground.model.proxy_unconfounded_neural import (
-    NeuralMarginalEmbeddingBridge,
+    NeuralHybridEmbeddingBridge,
     NeuralPerXEmbeddingBridge,
+    NeuralSharedEmbeddingBridge,
 )
 from genetic_perturbation_playground.utils.kernels import RBF, median_heuristic
 
 
-def perturbation_labels(adata: sc.AnnData) -> np.ndarray:
-    """Perturbation of every cell, as strings."""
-    return adata.obs["perturbation"].astype(str).to_numpy()
-
-
-def batch_labels(adata: sc.AnnData) -> np.ndarray:
-    """Batch of every cell, as strings."""
-    return adata.obs["batch"].astype(str).to_numpy()
-
-
-def is_control(adata: sc.AnnData) -> np.ndarray:
-    """Boolean mask of the control cells."""
-    return perturbation_labels(adata) == "control"
-
-
-def training_batch_counts(train: sc.AnnData) -> pd.Series:
-    """Number of training batches containing each perturbation: sum_e 1[c_xe > 0].
-
-    Count observed cells/crops in the actual training split, excluding controls. This measures
-    direct response data for each perturbation; shared model parameters can use other batches.
-    """
-    obs = train.obs.loc[~is_control(train)]
-    return obs.groupby("perturbation", observed=True)["batch"].nunique()
-
-
-def _positions(sorted_labels: np.ndarray, labels) -> np.ndarray:
-    """Index of each of `labels` in `sorted_labels`."""
-    return np.searchsorted(sorted_labels, labels)
-
-
-def _onehot(idx: np.ndarray, n_groups: int) -> sparse.csr_matrix:
-    """Sparse (n_groups x n_cells) indicator matrix."""
-    ones = np.ones(len(idx))
-    return sparse.csr_matrix((ones, (idx, np.arange(len(idx)))), shape=(n_groups, len(idx)))
-
-
-def _dense(m) -> np.ndarray:
-    """Dense array from a sparse or dense matrix."""
-    return m.toarray() if sparse.issparse(m) else np.asarray(m)
-
-
-def _group_sums(idx: np.ndarray, n_groups: int, X) -> np.ndarray:
-    """Sum of the rows of X within each group, shape (n_groups, n_columns)."""
-    return _dense(_onehot(idx, n_groups) @ X)
-
-
-def _group_means(idx: np.ndarray, n_groups: int, X) -> np.ndarray:
-    """Mean of the rows of X within each group, shape (n_groups, n_columns)."""
-    counts = np.bincount(idx, minlength=n_groups)
-    return _group_sums(idx, n_groups, X) / counts[:, None]
-
-
-def _require_controls(perturbed_batches: np.ndarray, control_batches: np.ndarray) -> None:
-    """Raise if a batch with perturbed cells has no control cells."""
-    if not np.isin(perturbed_batches, control_batches).all():
-        raise ValueError("Every batch with perturbed cells needs control cells to define W_e.")
-
-
-def summary_stats(adata: sc.AnnData) -> dict:
-    """Per-batch control means W_e and per-perturbation sufficient statistics.
-
-    Returns perturbations, n (cells per perturbation), y_mean (mean of y over the perturbation's
-    cells), w_mean (W_e averaged over the same cells, i.e. weighted by the perturbation's batch
-    distribution), plus per-batch sums used to fit the slope.
-    """
-    ctrl = is_control(adata)
-    batch = batch_labels(adata)
-    batches, ctrl_b = np.unique(batch[ctrl], return_inverse=True)
-    _require_controls(batch[~ctrl], batches)
-    perts, p_idx = np.unique(perturbation_labels(adata)[~ctrl], return_inverse=True)
-    b_idx = _positions(batches, batch[~ctrl])
-    Y = adata.X[~ctrl]
-
-    W = _group_means(ctrl_b, len(batches), adata.X[ctrl])  # (batches, genes)
-    n = np.bincount(p_idx, minlength=len(perts))
-    pert_batch_n = _dense(_onehot(p_idx, len(perts)) @ _onehot(b_idx, len(batches)).T)
-    return {
-        "perturbations": perts,
-        "n": n,
-        "y_mean": _group_means(p_idx, len(perts), Y),
-        "w_mean": pert_batch_n @ W / n[:, None],
-        "batches": batches,
-        "pert_batch_n": pert_batch_n,
-        "W": W,
-        "batch_n": np.bincount(b_idx, minlength=len(batches)),
-        "batch_y_sum": _group_sums(b_idx, len(batches), Y),
-    }
-
-
-def matched_control_mean(adata: sc.AnnData, perturbations) -> np.ndarray:
-    """Control mean matched to each perturbation's batches in `adata`, shape (n_perts, n_genes)."""
-    s = summary_stats(adata)
-    return s["w_mean"][_positions(s["perturbations"], perturbations)]
-
-
-def _within_perturbation_slope(s: dict) -> np.ndarray:
-    """Per-gene least-squares slope of y on W_e, within perturbations (Frisch-Waugh)."""
-    y, w, n = s["y_mean"], s["w_mean"], s["n"][:, None]
-    num = (s["W"] * s["batch_y_sum"]).sum(axis=0) - (n * y * w).sum(axis=0)
-    den = (s["batch_n"][:, None] * s["W"] ** 2).sum(axis=0) - (n * w**2).sum(axis=0)
-    return num / den
-
-
-class BatchTransferModel:
-    """Out-of-batch transfer using the batch's control-cell mean W_e as environment proxy.
-
-    Per gene, the mean of perturbation x in batch e is
-        Y_e(x) = gamma_x + b * W_e,    b = beta_2 / beta_1,
-    with the constant alpha_2 - b * alpha_1 absorbed into gamma_x. Fit by cell-level least squares
-    (perturbation fixed effects + one slope per gene). For a new batch e*:
-        Y_{e*}(x) = gamma_x + b * W_{e*}.
-
-    slope=None fits b per gene; slope=1 is the beta_1 = beta_2 case (subtract W_e, no transfer
-    needed); slope=0 ignores batch entirely (pooled perturbation means).
-
-    By default, W is standardised using the training controls' pooled mean and std, reused
-    at prediction. Targets and predictions stay in their original units. Fixed slopes and
-    the reported slope_/gamma_ use those original units; coef_/intercept_ use standardised W.
-    """
-
-    def __init__(self, slope: float | None = None, standardise_w: bool = True):
-        self.slope = slope
-        self.standardise_w = standardise_w
-
-    def fit(self, adata: sc.AnnData) -> "BatchTransferModel":
-        """Fit to raw targets, scaling only W with statistics from the training controls."""
-        s = summary_stats(adata)
-        self.w_mean_, self.w_std_ = (
-            _mean_and_std(_dense(adata.X[is_control(adata)])) if self.standardise_w else (0.0, 1.0)
-        )
-        s["W"] = (s["W"] - self.w_mean_) / self.w_std_
-        s["w_mean"] = (s["w_mean"] - self.w_mean_) / self.w_std_
-        self.coef_ = self._coefficient(s)
-        self.perturbations_ = s["perturbations"]
-        self.intercept_ = s["y_mean"] - self.coef_ * s["w_mean"]
-        self.slope_ = self.coef_ / self.w_std_
-        self.gamma_ = self.intercept_ - self.slope_ * self.w_mean_
-        return self
-
-    def predict(self, perturbations: list[str], test: sc.AnnData) -> np.ndarray:
-        """Mean expression of each perturbation in `test`, given only `test`'s control cells."""
-        intercept = self.intercept_[_positions(self.perturbations_, perturbations)]
-        w = (matched_control_mean(test, perturbations) - self.w_mean_) / self.w_std_
-        return intercept + self.coef_ * w
-
-    def _coefficient(self, s: dict) -> np.ndarray:
-        """Coefficient on scaled W; convert a fixed slope from its original input units."""
-        if self.slope is None:
-            return _within_perturbation_slope(s)
-        return np.full(s["y_mean"].shape[1], float(self.slope)) * self.w_std_
-
-
-class BridgeData(NamedTuple):
-    """Bridge training data: one row per observed (perturbation, batch) pair."""
-
-    perturbations: np.ndarray  # sorted perturbation labels
-    ctrl: list[np.ndarray]  # control cells of each batch
-    pert: np.ndarray  # perturbation index of each pair
-    batch: np.ndarray  # batch index of each pair
-    y: np.ndarray  # mean expression of each pair
-    weight: np.ndarray  # cell count of each pair, or 1 if not weighted by cells
-
-
-def _bridge_data(adata: sc.AnnData, weight_by_cells: bool = True) -> BridgeData:
-    """Per-(perturbation, batch) means of `adata` and the control cells of each batch."""
-    ctrl = is_control(adata)
-    batch = batch_labels(adata)
-    _require_controls(batch[~ctrl], batch[ctrl])
-    batches, b_idx = np.unique(batch, return_inverse=True)
-    perts, p_idx = np.unique(perturbation_labels(adata)[~ctrl], return_inverse=True)
-    n_b = len(batches)
-    pairs, pair_idx = np.unique(p_idx * n_b + b_idx[~ctrl], return_inverse=True)
-    n = np.bincount(pair_idx)
-    return BridgeData(
-        perturbations=perts,
-        ctrl=_per_batch_controls(adata, ctrl, b_idx, n_b),
-        pert=pairs // n_b,
-        batch=pairs % n_b,
-        y=_group_means(pair_idx, len(pairs), adata.X[~ctrl]),
-        weight=n if weight_by_cells else np.ones_like(n),
-    )
-
-
-def _per_batch_controls(adata, ctrl: np.ndarray, b_idx: np.ndarray, n_batches: int) -> list:
-    """Control cells of each batch, as dense arrays."""
-    return [_dense(adata.X[ctrl & (b_idx == b)]) for b in range(n_batches)]
-
-
-def _batch_mix(test: sc.AnnData, perturbations) -> np.ndarray:
-    """Share of each perturbation's cells in each batch of `test` (rows sum to 1)."""
-    s = summary_stats(test)
-    mix = s["pert_batch_n"] / s["n"][:, None]
-    return mix[_positions(s["perturbations"], perturbations)]
-
-
-def _test_controls(test: sc.AnnData) -> list[np.ndarray]:
-    """Control cells of each batch of `test`."""
-    ctrl, batch = is_control(test), batch_labels(test)
-    _require_controls(batch[~ctrl], batch[ctrl])
-    batches, b_idx = np.unique(batch, return_inverse=True)
-    return _per_batch_controls(test, ctrl, b_idx, len(batches))
-
-
 class KernelBridgeTransfer:
-    """MarginalEmbeddingBridge on cells, with a delta kernel on the perturbation x.
+    """Fit a kernel response for each perturbation using its observed batches.
 
-    w is a control cell, so mu_e is the mean embedding of batch e's control cells. The delta kernel
-    makes the cell-level Gram block-diagonal over perturbations, so the one cell-level bridge splits
-    exactly into one bridge per perturbation over the batches it was seen in (x constant within a
-    block), fit on its per-batch means. All blocks share M = <mu_e, mu_e'>, computed once.
+    The kernel compares batches by averaging similarities between their controls.
+    All perturbations use the same batch similarities, but fit separate responses.
+    Missing perturbation/batch pairs have no weight. Ridge scales by the total
+    response weight across all perturbations.
 
-    weight_by_cells=False gives every (perturbation, batch) mean equal weight instead.
-    lengthscale_scale multiplies the median-heuristic lengthscale of the RBF kernel on w.
+    Parameters
+    ----------
+    reg : float, default=1e-6
+        Ridge penalty before multiplying by the total training weight.
+    weight_by_cells : bool, default=True
+        Weight each observed pair by its cell count. False gives every pair weight one.
+    lengthscale_scale : float, default=1.0
+        Multiplier on the median-distance lengthscale fitted to training controls.
+
+    Attributes
+    ----------
+    perturbations_ : numpy.ndarray of shape (G,)
+        Sorted perturbation labels seen during fitting.
+    ctrl_ : list of numpy.ndarray
+        Control samples for each source batch, in sorted batch order.
+    kernel_w_ : RBF
+        Control kernel with its fitted lengthscale.
+    bridges_ : list of MarginalEmbeddingBridge
+        One fitted response per perturbation, in perturbations_ order.
+
+    Examples
+    --------
+    >>> import anndata as ad
+    >>> import numpy as np
+    >>> import pandas as pd
+    >>> obs = pd.DataFrame(
+    ...     {"perturbation": ["control", "a", "control", "a"],
+    ...      "batch": ["b0", "b0", "b1", "b1"]}, index=["0", "1", "2", "3"])
+    >>> data = ad.AnnData(np.array([[0.], [1.], [2.], [5.]]), obs=obs)
+    >>> from genetic_perturbation_playground.model.batch_transfer import KernelBridgeTransfer
+    >>> model = KernelBridgeTransfer(reg=0.01).fit(data)
+    >>> model.predict(["a"], data).shape
+    (1, 1)
     """
 
     def __init__(
@@ -238,8 +82,21 @@ class KernelBridgeTransfer:
         self.weight_by_cells = weight_by_cells
         self.lengthscale_scale = lengthscale_scale
 
-    def fit(self, adata: sc.AnnData) -> "KernelBridgeTransfer":
-        data = _bridge_data(adata, self.weight_by_cells)
+    def fit(self, adata: ad.AnnData) -> "KernelBridgeTransfer":
+        """Fit one kernel bridge per observed perturbation.
+
+        Parameters
+        ----------
+        adata : anndata.AnnData
+            Cells by outputs, with perturbation and batch labels in obs.
+            Controls use the perturbation label "control".
+
+        Returns
+        -------
+        self : KernelBridgeTransfer
+            Fitted model.
+        """
+        data = bridge_data(adata, self.weight_by_cells)
         self.perturbations_ = data.perturbations
         self.ctrl_ = data.ctrl
         lengthscale = self.lengthscale_scale * median_heuristic(np.concatenate(self.ctrl_))
@@ -248,16 +105,37 @@ class KernelBridgeTransfer:
         self.bridges_ = [self._fit_block(data, inner, p) for p in range(len(self.perturbations_))]
         return self
 
-    def predict(self, perturbations: list[str], test: sc.AnnData) -> np.ndarray:
-        """Mean expression of each perturbation in `test`, given only `test`'s control cells."""
-        inner = mean_inner(self.kernel_w_, self.ctrl_, _test_controls(test))
-        targets = _batch_mix(test, perturbations) @ inner.T
-        bridges = [self.bridges_[p] for p in _positions(self.perturbations_, perturbations)]
+    def predict(self, perturbations: list[str], test: ad.AnnData) -> np.ndarray:
+        """Predict perturbation means from test controls and batch counts.
+
+        Parameters
+        ----------
+        perturbations : list of str
+            Labels present in training and test data, in the desired order.
+        test : anndata.AnnData
+            Test controls and perturbation/batch labels. Response values are unused.
+
+        Returns
+        -------
+        numpy.ndarray of shape (len(perturbations), J)
+            Predicted means, averaged over each perturbation's test-batch distribution.
+
+        Raises
+        ------
+        ValueError
+            If a label is missing or a response batch has no controls.
+        """
+        inner = mean_inner(self.kernel_w_, self.ctrl_, batch_controls(test))
+        targets = batch_weights(test, perturbations) @ inner.T
+        bridges = [self.bridges_[p] for p in label_positions(self.perturbations_, perturbations)]
         preds = [b.predict_embedded(np.zeros(1), t) for b, t in zip(bridges, targets, strict=True)]
         return np.concatenate(preds)
 
     def _fit_block(self, data: BridgeData, inner: np.ndarray, p: int) -> MarginalEmbeddingBridge:
-        """Bridge for perturbation p alone, fit on its per-batch means."""
+        """Fit perturbation p using the total weight across all perturbations.
+
+        Rescale reg because the inner bridge multiplies it by its own weight.
+        """
         rows = np.flatnonzero(data.pert == p)
         reg = self.reg * data.weight.sum() / data.weight[rows].sum()  # global N, as on cells
         bridge = MarginalEmbeddingBridge(RBF(), self.kernel_w_, reg)
@@ -266,94 +144,129 @@ class KernelBridgeTransfer:
 
 
 class NeuralBridgeTransfer:
-    """NeuralMarginalEmbeddingBridge with x = one-hot perturbation and w = control cell.
+    """Adapt AnnData cells to a neural transfer bridge.
 
-    Fit on the same count-weighted per-(perturbation, batch) means as KernelBridgeTransfer. Unlike
-    the delta kernel, phi(x) and A are shared, so perturbations borrow strength from each other.
-    per_perturbation=True fits NeuralPerXEmbeddingBridge instead: a separate response A_x to the
-    batch embedding per perturbation, only psi shared. weight_by_cells=False gives every
-    (perturbation, batch) mean equal weight instead.
+    Fit observed perturbation/batch means, using one-hot perturbation inputs and
+    control samples from each batch. Predictions across several test batches use
+    the perturbation's response-count weights.
+
+    Parameters
+    ----------
+    weight_by_cells : bool, default=True
+        Weight each observed pair by its cell count. False gives every pair weight one.
+    variant : {"per_x", "shared_2nn", "hybrid"}, default="per_x"
+        Neural model to fit. Shared 2NN adds a shared response;
+        hybrid also adds one control slope per output.
+    **bridge_kwargs : dict
+        Settings passed to the selected neural bridge, such as reg, n_steps and device.
+
+    Attributes
+    ----------
+    variant : str
+        Selected model name.
+    bridge_kwargs : dict
+        Settings used to construct the neural bridge.
+    perturbations_ : numpy.ndarray of shape (G,)
+        Sorted perturbation labels seen during fitting.
+    bridge_ : NeuralPerXEmbeddingBridge or subclass
+        Fitted neural bridge. Set before training so checkpoint callbacks can predict.
+
+    Examples
+    --------
+    >>> import anndata as ad
+    >>> import numpy as np
+    >>> import pandas as pd
+    >>> obs = pd.DataFrame(
+    ...     {"perturbation": ["control", "a", "control", "a"],
+    ...      "batch": ["b0", "b0", "b1", "b1"]}, index=["0", "1", "2", "3"])
+    >>> data = ad.AnnData(np.array([[0.], [1.], [2.], [5.]]), obs=obs)
+    >>> from genetic_perturbation_playground.model.batch_transfer import NeuralBridgeTransfer
+    >>> model = NeuralBridgeTransfer(n_steps=1, n_features_w=2, width_w=4).fit(data)
+    >>> model.predict(["a"], data).shape
+    (1, 1)
     """
 
     def __init__(
-        self, weight_by_cells: bool = True, per_perturbation: bool = False, **bridge_kwargs
+        self,
+        weight_by_cells: bool = True,
+        *,
+        variant: str = "per_x",
+        **bridge_kwargs,
     ):
+        bridges = {
+            "per_x": NeuralPerXEmbeddingBridge,
+            "shared_2nn": NeuralSharedEmbeddingBridge,
+            "hybrid": NeuralHybridEmbeddingBridge,
+        }
+        if variant not in bridges:
+            raise ValueError(f"Unknown neural variant {variant!r}; choose from {tuple(bridges)}")
         self.weight_by_cells = weight_by_cells
-        self.per_perturbation = per_perturbation
+        self.variant = variant
+        self._bridge_type = bridges[variant]
         self.bridge_kwargs = bridge_kwargs
 
     def fit(
-        self, adata: sc.AnnData, checkpoints=(), on_checkpoint=None, on_training_loss=None
+        self, adata: ad.AnnData, checkpoints=(), on_checkpoint=None, on_training_loss=None
     ) -> "NeuralBridgeTransfer":
-        """Fit on `adata` with the checkpoint and loss callbacks of NeuralMarginalEmbeddingBridge."""
-        data = _bridge_data(adata, self.weight_by_cells)
+        """Prepare observed pairs and fit the selected neural bridge.
+
+        Parameters
+        ----------
+        adata : anndata.AnnData
+            Cells by outputs, with perturbation and batch labels in obs.
+            Controls use the perturbation label "control".
+        checkpoints : collection of int, default=()
+            Completed update counts at which to fit coefficients and call on_checkpoint.
+        on_checkpoint : callable or None, default=None
+            Callback on_checkpoint(step); required when checkpoints is nonempty.
+        on_training_loss : callable or None, default=None
+            Callback on_training_loss(step, mse), including the final training loss.
+
+        Returns
+        -------
+        self : NeuralBridgeTransfer
+            Fitted model. Callbacks follow NeuralPerXEmbeddingBridge.fit.
+        """
+        data = bridge_data(adata, self.weight_by_cells)
         self.perturbations_ = data.perturbations
         envs = [data.batch == b for b in range(len(data.ctrl))]
         xs = [self._onehot(data.pert[e]) for e in envs]
         ys = [data.y[e] for e in envs]
         counts = [data.weight[e] for e in envs]
         # set before fitting: checkpoint callbacks predict with it
-        bridge = (
-            NeuralPerXEmbeddingBridge if self.per_perturbation else NeuralMarginalEmbeddingBridge
-        )
-        self.bridge_ = bridge(**self.bridge_kwargs)
+        self.bridge_ = self._bridge_type(**self.bridge_kwargs)
         self.bridge_.fit(xs, ys, data.ctrl, counts, checkpoints, on_checkpoint, on_training_loss)
         return self
 
-    def predict(self, perturbations: list[str], test: sc.AnnData) -> np.ndarray:
-        """Mean expression of each perturbation in `test`, given only `test`'s control cells."""
-        x = self._onehot(_positions(self.perturbations_, perturbations))
-        mix = _batch_mix(test, perturbations)
-        controls = _test_controls(test)
+    def predict(self, perturbations: list[str], test: ad.AnnData) -> np.ndarray:
+        """Predict perturbation means from test controls and batch counts.
+
+        Parameters
+        ----------
+        perturbations : list of str
+            Labels present in training and test data, in the desired order.
+        test : anndata.AnnData
+            Test controls and perturbation/batch labels. Response values are unused.
+
+        Returns
+        -------
+        numpy.ndarray of shape (len(perturbations), J)
+            Predicted means, averaged over each perturbation's test-batch distribution.
+
+        Raises
+        ------
+        ValueError
+            If a label is missing or a response batch has no controls.
+        """
+        x = self._onehot(label_positions(self.perturbations_, perturbations))
+        mix = batch_weights(test, perturbations)
+        controls = batch_controls(test)
         # prediction is linear in mu, so a batch mixture is the mix-weighted per-batch prediction;
         # a generator, so only one batch's prediction is held at a time
         return sum(mix[:, [b]] * self.bridge_.predict(x, w) for b, w in enumerate(controls))
 
     def _onehot(self, idx: np.ndarray) -> np.ndarray:
-        """One-hot rows for perturbation indices `idx`."""
-        return np.eye(len(self.perturbations_))[idx]
-
-
-class Standardised:
-    """Fit and predict with standardised control inputs and centred targets.
-
-    Each proxy dimension uses the training controls' pooled mean and std (w=False: mean 0, std 1),
-    reused at prediction. Constant dimensions use std 1. Perturbed cells are centred by the
-    training perturbed cells' mean, which is added back to predictions: the bridges' ridge has no
-    intercept, so this makes it shrink toward the mean expression rather than toward 0.
-    """
-
-    def __init__(self, model, w: bool = True):
-        self.model = model
-        self.w = w
-
-    @property
-    def perturbations_(self) -> np.ndarray:
-        return self.model.perturbations_
-
-    def fit(self, adata: sc.AnnData, *args, **kwargs) -> "Standardised":
-        """Scale training controls, centre targets and fit; forward extra fit arguments."""
-        ctrl = is_control(adata)
-        self.w_mean_, self.w_std_ = _mean_and_std(_dense(adata.X[ctrl])) if self.w else (0.0, 1.0)
-        self.y_mean_ = np.asarray(adata.X[~ctrl].mean(axis=0)).ravel()
-        self.model.fit(self._standardise(adata), *args, **kwargs)
-        return self
-
-    def predict(self, perturbations: list[str], test: sc.AnnData) -> np.ndarray:
-        """Predict in target units: scaled test controls in, training target mean added back."""
-        return self.model.predict(perturbations, self._standardise(test)) + self.y_mean_
-
-    def _standardise(self, adata: sc.AnnData) -> sc.AnnData:
-        """Copy `adata` with scaled controls and centred perturbed cells."""
-        X = _dense(adata.X).astype(float)
-        ctrl = is_control(adata)
-        X[ctrl] = (X[ctrl] - self.w_mean_) / self.w_std_
-        X[~ctrl] -= self.y_mean_
-        return sc.AnnData(X, obs=adata.obs)
-
-
-def _mean_and_std(X) -> tuple[np.ndarray, np.ndarray]:
-    """Mean and std of each column of X, with std 1 where a column is constant."""
-    X = np.asarray(X)
-    std = X.std(axis=0)
-    return X.mean(axis=0), np.where(std > 0, std, 1.0)
+        """Encode perturbation indices as (n, G) one-hot rows."""
+        encoded = np.zeros((len(idx), len(self.perturbations_)))
+        encoded[np.arange(len(idx)), idx] = 1.0
+        return encoded

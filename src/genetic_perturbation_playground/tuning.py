@@ -16,13 +16,17 @@ import scanpy as sc
 from omegaconf import DictConfig
 
 from genetic_perturbation_playground.model.batch_transfer import (
-    BatchTransferModel,
     KernelBridgeTransfer,
     NeuralBridgeTransfer,
+)
+from genetic_perturbation_playground.model.linear_transfer import (
+    LinearTransfer,
+)
+from genetic_perturbation_playground.utils.standardisation import (
     Standardised,
 )
 
-INT_SETTINGS = ["phi_size", "psi_size", "width_w", "n_steps", "depth", "cross_fit_folds"]
+INT_SETTINGS = ["psi_size", "width_w", "n_steps", "depth", "cross_fit_folds"]
 Evaluate = Callable[[object], dict]  # fitted model -> its validation scores, {metric: value}
 
 
@@ -77,10 +81,10 @@ def make_neural(config: dict, cfg: DictConfig):
 
 
 def _network_sizes(config: dict) -> dict:
-    """Expand phi_size and psi_size into widths and output dimensions; explicit settings win."""
+    """Expand psi_size into control width and output dimension; explicit settings win."""
     settings = dict(config)
-    phi, psi = settings.pop("phi_size"), settings.pop("psi_size")
-    return {"width_x": phi, "n_features": phi, "width_w": psi, "n_features_w": psi} | settings
+    psi = settings.pop("psi_size")
+    return {"width_w": psi, "n_features_w": psi} | settings
 
 
 def tune(folds: Iterable[tuple[sc.AnnData, Evaluate]], cfg: DictConfig) -> tuple:
@@ -116,7 +120,7 @@ def _validation_rows(train: sc.AnnData, evaluate: Evaluate, cfg: DictConfig) -> 
 
 def _shift_rows(train: sc.AnnData, evaluate: Evaluate, cfg: DictConfig) -> list[dict]:
     """Validation scores of shift (b=1), the reference the bridges are compared with."""
-    scores = evaluate(BatchTransferModel(1.0, standardise_w=cfg.standardise_w).fit(train))
+    scores = evaluate(LinearTransfer(1.0, standardise_w=cfg.standardise_w).fit(train))
     print(f"  shift (b=1): mse {scores['mse']:.4g}", flush=True)
     return [{"bridge": "shift (b=1)", **scores}]
 

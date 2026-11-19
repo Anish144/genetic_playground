@@ -4,12 +4,11 @@ defaults:  # tune_bridges with a separate A_x per perturbation, only psi shared
 
 n_configs: 16       # all neural configurations
 neural:
-  per_perturbation: true
+  variant: per_x
 neural_grid:
   lr: [1.0e-4, 7.5e-4]
   reg: [1.0e-5, 1.0e-4]
   weight_decay: [1.0e-4]
-  phi_size: [8]        # unused: phi is the identity
   width_w: [32, 64]    # psi hidden width
   psi_size: [8, 16]    # psi output dimension q
 neural_checkpoints: [0, 1, 2, 4, 8, 16, 32, 50]

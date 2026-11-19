@@ -47,7 +47,7 @@ from train_batch_transfer_expression import (
 
 from genetic_perturbation_playground import tuning
 from genetic_perturbation_playground.data.data_loader import load_dataset
-from genetic_perturbation_playground.model.batch_transfer import (
+from genetic_perturbation_playground.data.transfer import (
     batch_labels,
     is_control,
     training_batch_counts,
@@ -114,9 +114,9 @@ def nested_cv(adata: sc.AnnData, cfg: DictConfig) -> tuple:
         selected_rows += [{"fold": i, "bridge": b, **c} for b, c in selected.items()]
 
         outer = _split(adata, batch, seen, train_batches, [held_out])
-        models = _fit_linear(outer.train, cfg.standardise_w) | tuning.fit_selected(
-            outer.train, selected, cfg
-        )
+        models = _fit_linear(
+            outer.train, cfg.standardise_w, reg=cfg.linear_reg
+        ) | tuning.fit_selected(outer.train, selected, cfg)
         scores = score(models, outer.eval, cfg.top_k, outer.seen)
         scores["n_training_batches"] = scores["perturbation"].map(
             training_batch_counts(outer.train)

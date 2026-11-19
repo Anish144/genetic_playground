@@ -8,7 +8,9 @@ import pytest
 from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 
-from genetic_perturbation_playground.model.batch_transfer import Standardised
+from genetic_perturbation_playground.utils.standardisation import (
+    Standardised,
+)
 
 ROOT = Path(__file__).parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -129,7 +131,7 @@ def test_cross_validate_trains_on_all_other_experiments(tiny_rxrx1, monkeypatch,
 
 
 def test_cross_validate_fits_the_neural_bridge(tiny_rxrx1):
-    neural = {"device": "cpu", "n_steps": 2, "n_features": 2, "n_features_w": 2}
+    neural = {"device": "cpu", "n_steps": 2, "n_features_w": 2}
     huvec = mod.select_cell_type(tiny_rxrx1, "HUVEC")
     scores = pd.concat(
         mod.cross_validate(huvec, cfg(n_validation_batches=3, bridges=["neural"], neural=neural))
@@ -147,7 +149,7 @@ def test_nested_cv_tunes_on_inner_validation_and_scores_the_outer_folds(tiny_rxr
             "inner_folds": 2,
             "n_configs": 2,
             "kernel_grid": {"reg": [1e-3, 1e-2], "lengthscale_scale": [1]},
-            "neural_grid": {"reg": [1e-3], "weight_decay": [0.0], "phi_size": [2], "psi_size": [3]},
+            "neural_grid": {"reg": [1e-3], "weight_decay": [0.0], "psi_size": [3]},
             "neural_checkpoints": [1, 2],
             "neural": {"device": "cpu", "cross_fit_folds": 0},
         },
@@ -163,7 +165,7 @@ def test_nested_cv_tunes_on_inner_validation_and_scores_the_outer_folds(tiny_rxr
         assert (inner["bridge"] == "shift (b=1)").sum() == 2
         neural = selected.set_index("bridge").loc["neural"]
         assert neural["n_steps"] in {1, 2}
-        assert (neural["phi_size"], neural["psi_size"]) == (2, 3)
+        assert neural["psi_size"] == 3
         models = set(scores["model"])
         assert {"kernel bridge (tuned)", "neural bridge (tuned)", "shift (b=1)"} <= models
         assert "tvn" not in models
@@ -239,3 +241,15 @@ def test_fit_models_standardises_linear_and_bridge_inputs(tiny_rxrx1):
     plain = mod.fit_models(huvec, cfg(bridges=["kernel"], standardise_w=False))
     assert plain["kernel bridge"].w_std_ == 1  # targets still centred, inputs left as they are
     np.testing.assert_array_equal(plain["transfer (fit b)"].w_std_, 1)
+
+
+def test_training_config_controls_linear_ridge(tiny_rxrx1):
+    data = mod.select_cell_type(tiny_rxrx1, "HUVEC")
+    ordinary = mod.fit_models(data, cfg(bridges=[], linear_reg=0.0))
+    penalised = mod.fit_models(data, cfg(bridges=[], linear_reg=2.0))
+    assert penalised["transfer (fit b)"].reg == 2.0
+    assert np.all(
+        np.abs(penalised["transfer (fit b)"].coef_) < np.abs(ordinary["transfer (fit b)"].coef_)
+    )
+    for name in ("pooled (b=0)", "shift (b=1)"):
+        np.testing.assert_array_equal(ordinary[name].coef_, penalised[name].coef_)

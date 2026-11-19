@@ -7,24 +7,33 @@ import pandas as pd
 import pytest
 import torch
 import wandb
+from neural_reference import features as _features
+from neural_reference import pair_data
+from neural_reference import weighted_ridge as _weighted_ridge
+from neural_reference import weighted_sse as _weighted_sse
 
+from genetic_perturbation_playground.data.transfer import (
+    batch_controls,
+    bridge_data,
+)
 from genetic_perturbation_playground.model.batch_transfer import (
-    BatchTransferModel,
     KernelBridgeTransfer,
     NeuralBridgeTransfer,
-    _bridge_data,
-    _test_controls,
+)
+from genetic_perturbation_playground.model.linear_transfer import (
+    LinearTransfer,
 )
 from genetic_perturbation_playground.model.proxy_unconfounded import MarginalEmbeddingBridge
 from genetic_perturbation_playground.model.proxy_unconfounded_neural import (
-    NeuralMarginalEmbeddingBridge,
+    NeuralHybridEmbeddingBridge,
     NeuralPerXEmbeddingBridge,
-    _features,
-    _mlp,
-    _weighted_ridge,
-    _weighted_sse,
+    NeuralSharedEmbeddingBridge,
 )
 from genetic_perturbation_playground.utils.kernels import RBF
+from genetic_perturbation_playground.utils.neural import control_mlp
+from genetic_perturbation_playground.utils.standardisation import (
+    Standardised,
+)
 
 
 def _cells(rng, n_batches=4, perts=("a", "b", "c"), n_genes=5):
@@ -40,7 +49,7 @@ def _cells(rng, n_batches=4, perts=("a", "b", "c"), n_genes=5):
     return ad.AnnData(rng.normal(size=(len(obs), n_genes)), obs=obs)
 
 
-@pytest.mark.parametrize("prepare", [_bridge_data, _test_controls])
+@pytest.mark.parametrize("prepare", [bridge_data, batch_controls])
 def test_bridge_data_requires_controls_in_every_perturbed_batch(prepare):
     data = ad.AnnData(
         np.ones((2, 3)),
@@ -64,11 +73,65 @@ def test_linear_input_scaling_preserves_raw_targets_and_fixed_slopes(
     test = ad.AnnData(
         np.array([[48, 210], [52, 230], [-999, -999]], dtype=float), obs=obs.iloc[:3].copy()
     )
-    model = BatchTransferModel(slope, standardise_w=standardise_w).fit(train)
+    model = LinearTransfer(slope, standardise_w=standardise_w, reg=0.0).fit(train)
     std = X[[0, 1, 3, 4]].std(0) if standardise_w else 1
     raw_slope = np.array([2, 3]) if slope is None else slope
     np.testing.assert_allclose(model.coef_, raw_slope * std)
     np.testing.assert_allclose(model.predict(["a"], test), [expected])
+
+
+@pytest.mark.parametrize("standardise_w", [True, False])
+@pytest.mark.parametrize("reg", [0.0, 1e-3, 0.7, 10.0])
+def test_linear_solver_matches_full_cell_level_ridge(standardise_w, reg):
+    data = _cells(np.random.default_rng(21), n_batches=6)
+    model = LinearTransfer(standardise_w=standardise_w, reg=reg).fit(data)
+    controls = data.obs["perturbation"].eq("control").to_numpy()
+    responses = data[~controls]
+    labels = responses.obs["perturbation"].to_numpy()
+    categories = np.eye(len(model.perturbations_))[np.searchsorted(model.perturbations_, labels)]
+    means = {
+        batch: data.X[controls & data.obs["batch"].eq(batch).to_numpy()].mean(axis=0)
+        for batch in data.obs["batch"].unique()
+    }
+    raw_proxy = np.stack([means[batch] for batch in responses.obs["batch"]])
+    proxy = (raw_proxy - model.w_mean_) / model.w_std_
+    for gene in range(data.n_vars):
+        design = np.column_stack((categories, proxy[:, gene]))
+        # One extra row penalises only the slope. Category intercepts stay unpenalised.
+        penalty_row = np.zeros((1, design.shape[1]))
+        penalty_row[0, -1] = np.sqrt(len(responses) * reg)
+        augmented = np.vstack((design, penalty_row))
+        target = np.append(responses.X[:, gene], 0.0)
+        coefficients = np.linalg.lstsq(augmented, target, rcond=None)[0]
+        np.testing.assert_allclose(model.intercept_[:, gene], coefficients[:-1], atol=1e-10)
+        np.testing.assert_allclose(model.coef_[gene], coefficients[-1], atol=1e-10)
+        original_units = (
+            categories @ model.gamma_[:, gene] + model.slope_[gene] * raw_proxy[:, gene]
+        )
+        np.testing.assert_allclose(original_units, design @ coefficients, atol=1e-10)
+
+
+@pytest.mark.parametrize("slope", [0.0, 1.0])
+@pytest.mark.parametrize("standardise_w", [False, True])
+def test_fixed_linear_slopes_ignore_ridge_penalty(slope, standardise_w):
+    data = _cells(np.random.default_rng(11))
+    ordinary = LinearTransfer(slope, standardise_w, reg=0.0).fit(data)
+    penalised = LinearTransfer(slope, standardise_w, reg=100.0).fit(data)
+    np.testing.assert_array_equal(ordinary.coef_, penalised.coef_)
+    np.testing.assert_array_equal(ordinary.intercept_, penalised.intercept_)
+
+
+@pytest.mark.parametrize(
+    "make_model", [LinearTransfer, KernelBridgeTransfer, lambda: NeuralBridgeTransfer(n_steps=0)]
+)
+@pytest.mark.parametrize("label", ["b", "z"])
+def test_transfer_models_reject_unseen_perturbations(make_model, label):
+    train = _cells(np.random.default_rng(0), perts=("a", "c"))
+    model = make_model().fit(train)
+    test = train.copy()
+    test.obs.loc[test.obs["perturbation"] == "a", "perturbation"] = label
+    with pytest.raises(ValueError, match="Unknown labels"):
+        model.predict([label], test)
 
 
 def test_matches_cell_level_marginal_embedding_bridge():
@@ -100,16 +163,15 @@ def test_matches_cell_level_marginal_embedding_bridge():
 def test_neural_bridge_counts_match_replicated_rows(cross_fit_folds):
     """A pair with count c fits exactly like c identical rows (weighted loss and ridge)."""
     rng = np.random.default_rng(0)
-    xs = [rng.normal(size=(6, 2)) for _ in range(3)]
+    xs = [np.eye(3)[rng.integers(0, 3, size=6)] for _ in range(3)]
     ys = [rng.normal(size=(6, 4)) for _ in range(3)]  # multi-output y
     ws = [rng.normal(size=(10, 3)) for _ in range(3)]
     counts = [rng.integers(1, 4, size=6) for _ in range(3)]
 
     def fit(xs, ys, counts=None):
-        bridge = NeuralMarginalEmbeddingBridge(
+        bridge = NeuralPerXEmbeddingBridge(
             n_steps=5,
             weight_decay=1e-2,
-            n_features=4,
             n_features_w=3,
             cross_fit_folds=cross_fit_folds,
         )
@@ -120,7 +182,7 @@ def test_neural_bridge_counts_match_replicated_rows(cross_fit_folds):
         [np.repeat(x, c, 0) for x, c in zip(xs, counts, strict=True)],
         [np.repeat(y, c, 0) for y, c in zip(ys, counts, strict=True)],
     )
-    x_new = rng.normal(size=(5, 2))
+    x_new = np.eye(3)[[0, 1, 2, 0, 1]]
     np.testing.assert_allclose(
         weighted.predict(x_new, ws[0]),
         replicated.predict(x_new, ws[0]),
@@ -136,7 +198,7 @@ def test_score_truth_uses_only_unseen_controls():
     data = _cells(rng, n_batches=1, perts=("a",))
     is_ctrl = (data.obs["perturbation"] == "control").to_numpy()
     seen = np.arange(data.n_obs) % 2 == 0
-    models = {n: BatchTransferModel(s).fit(data) for n, s in MODELS.items()}
+    models = {n: LinearTransfer(s).fit(data) for n, s in MODELS.items()}
     s = score(models, data, 2, seen)
 
     effect = data.X[~is_ctrl].mean(0) - data.X[is_ctrl & ~seen].mean(0)
@@ -165,19 +227,25 @@ def test_unweighted_bridge_ignores_cell_counts():
     assert not np.allclose(pred(train, True), pred(doubled, True))
 
 
-@pytest.mark.parametrize("per_perturbation", [False, True])
+@pytest.mark.parametrize(
+    "bridge_settings",
+    [
+        {},
+        {"variant": "shared_2nn"},
+        {"variant": "hybrid"},
+    ],
+)
 @pytest.mark.parametrize("cross_fit_folds", [0, 2])
-def test_neural_checkpoint_equals_fit_with_that_many_steps(per_perturbation, cross_fit_folds):
+def test_neural_checkpoint_equals_fit_with_that_many_steps(bridge_settings, cross_fit_folds):
     rng = np.random.default_rng(0)
     data = _cells(rng)
     train, test = data[data.obs["batch"] != "b3"], data[data.obs["batch"] == "b3"]
     perts = sorted(set(test.obs["perturbation"]) - {"control"})
     kwargs = {
-        "n_features": 4,
         "n_features_w": 3,
         "n_steps": 6,
-        "per_perturbation": per_perturbation,
         "cross_fit_folds": cross_fit_folds,
+        **bridge_settings,
     }
     at_step = {}
 
@@ -196,13 +264,12 @@ def test_neural_bridge_logs_loss_every_step_only_with_a_log_key(monkeypatch):
     monkeypatch.setattr(wandb, "run", object())
     monkeypatch.setattr(wandb, "log", logged.append)
     monkeypatch.setattr(wandb, "define_metric", lambda key, step_metric: axes.append(step_metric))
-    xs, ys, ws = ([rng.normal(size=(5, 2)) for _ in range(2)] for _ in range(3))
-    NeuralMarginalEmbeddingBridge(n_steps=3).fit(xs, ys, ws)
+    xs = [np.eye(3)[rng.integers(0, 3, size=5)] for _ in range(2)]
+    ys, ws = ([rng.normal(size=(5, 2)) for _ in range(2)] for _ in range(2))
+    NeuralPerXEmbeddingBridge(n_steps=3).fit(xs, ys, ws)
     assert logged == axes == []
     recorded = {}
-    bridge = NeuralMarginalEmbeddingBridge(
-        n_steps=3, cross_fit_folds=2, log_key="fold 2/neural bridge"
-    )
+    bridge = NeuralPerXEmbeddingBridge(n_steps=3, cross_fit_folds=2, log_key="fold 2/neural bridge")
     bridge.fit(xs, ys, ws, on_training_loss=recorded.__setitem__)
     assert axes == ["fold 2/neural bridge/step"]
     assert [m["fold 2/neural bridge/step"] for m in logged] == [0, 1, 2]
@@ -216,51 +283,28 @@ def test_neural_bridge_logs_loss_every_step_only_with_a_log_key(monkeypatch):
 
 def test_cross_fit_needs_two_environments():
     rng = np.random.default_rng(0)
-    bridge = NeuralMarginalEmbeddingBridge(n_steps=1, cross_fit_folds=2)
+    bridge = NeuralPerXEmbeddingBridge(n_steps=1, cross_fit_folds=2)
     with pytest.raises(ValueError, match="two environments"):
-        bridge.fit([rng.normal(size=5)], [rng.normal(size=5)], [rng.normal(size=(4, 2))])
+        bridge.fit(
+            [np.eye(2)[[0, 1, 0, 1, 0]]], [rng.normal(size=(5, 1))], [rng.normal(size=(4, 2))]
+        )
 
 
-def test_cross_fit_with_one_fold_per_environment_is_leave_one_environment_out():
-    """K = D: each environment's error under A solved on all the others, pooled by weight."""
+def test_neural_bridge_sizes_control_width_and_embedding_separately():
     rng = np.random.default_rng(0)
-    xs = [rng.normal(size=(6, 2)) for _ in range(4)]
-    ys = [rng.normal(size=(6, 3)) for _ in range(4)]
-    ws = [rng.normal(size=(10, 2)) for _ in range(4)]
-    counts = [rng.integers(1, 4, size=6) for _ in range(4)]
-    bridge = NeuralMarginalEmbeddingBridge(n_steps=2, n_features=3, n_features_w=2)
-    bridge.fit(xs, ys, ws, counts)
-    bridge.cross_fit_folds = 4
-    data = bridge._to_tensors(xs, ys, ws, counts)
-
-    with torch.no_grad():
-        loss = bridge._cross_fit_loss(data)
-        feats = _features(bridge.phi_(data.x), bridge._embed(data.w_envs)[data.env])
-        sse = 0
-        for e in range(4):
-            held = data.env == e
-            A = _weighted_ridge(feats[~held], data.y[~held], data.c[~held], bridge.reg)
-            sse += _weighted_sse(feats[held] @ A, data.y[held], data.c[held])
-    torch.testing.assert_close(loss, sse / data.c.sum())
-
-
-def test_neural_bridge_sizes_phi_and_psi_separately():
-    rng = np.random.default_rng(0)
-    xs, ys, ws = ([rng.normal(size=(5, 2)) for _ in range(2)] for _ in range(3))
-    bridge = NeuralMarginalEmbeddingBridge(
-        n_steps=1, width_x=3, n_features=4, width_w=5, n_features_w=6
-    ).fit(xs, ys, ws)
+    xs = [np.eye(3)[rng.integers(0, 3, size=5)] for _ in range(2)]
+    ys, ws = ([rng.normal(size=(5, 2)) for _ in range(2)] for _ in range(2))
+    bridge = NeuralPerXEmbeddingBridge(n_steps=1, width_w=5, n_features_w=6).fit(xs, ys, ws)
 
     def last_two_sizes(mlp):
         return [m.out_features for m in mlp.modules() if isinstance(m, torch.nn.Linear)][-2:]
 
-    assert last_two_sizes(bridge.phi_) == [3, 4]  # hidden width, output dimension
     assert last_two_sizes(bridge.psi_) == [5, 6]
 
 
 def test_mlp_hidden_layers_are_swiglu_with_residual_connections_where_sizes_match():
     torch.manual_seed(0)
-    mlp = _mlp(d_in=3, width=4, depth=2, d_out=5)
+    mlp = control_mlp(d_in=3, width=4, depth=2, d_out=5)
     first, second, out = mlp.net
     x = torch.randn(6, 3)
 
@@ -284,9 +328,8 @@ def _categorical_envs(rng, n_envs=4, n_cats=3, d_y=2):
 
 
 def _dense_fit(bridge, xs, ys, ws, counts, held=None):
-    """The shared bridge's fit with phi(x) = x on `bridge`'s psi (features x ⊗ mu_e): A solved
-    without environment `held` and its weighted sse on `held` (on all pairs if None)."""
-    data = NeuralMarginalEmbeddingBridge._to_tensors(bridge, xs, ys, ws, counts)
+    """Fit dense one-hot × control features; score the held-out environment or all rows."""
+    data = pair_data(xs, ys, ws, counts, device=bridge.device)
     feats = _features(data.x, bridge._embed(data.w_envs)[data.env])
     out = data.env == (-1 if held is None else held)
     A = _weighted_ridge(feats[~out], data.y[~out], data.c[~out], bridge.reg)
@@ -295,7 +338,7 @@ def _dense_fit(bridge, xs, ys, ws, counts, held=None):
 
 
 @pytest.mark.parametrize("gene_block_size", [1, 3, 256])
-def test_per_x_bridge_is_the_shared_bridge_with_phi_the_identity(gene_block_size):
+def test_per_x_coefficients_and_loss_match_dense_ridge(gene_block_size):
     rng = np.random.default_rng(0)
     # G = q = D = 4 exposes ambiguity between matrix and batched-vector ridge RHS shapes.
     xs, ys, ws, counts = _categorical_envs(rng, n_cats=4, d_y=7)
@@ -338,7 +381,7 @@ def test_per_x_target_gram_loss_and_gradients_match_dense_ridge(
         n_features_w=n_features_w, width_w=4, depth=1, cross_fit_folds=cross_fit_folds, reg=1e-5
     )
     data = bridge._to_tensors(xs, ys, ws, counts)
-    bridge.psi_ = _mlp(2, 4, 1, n_features_w)
+    bridge.psi_ = control_mlp(2, 4, 1, n_features_w)
     mu = bridge._embed(data.w_envs)  # (D, q), connected to the float32 network
     monkeypatch.setattr(bridge, "_embed", lambda _: mu)
     fold = torch.arange(4) % max(cross_fit_folds, 1)  # (D,)
@@ -352,7 +395,7 @@ def test_per_x_target_gram_loss_and_gradients_match_dense_ridge(
     # Removing the gene targets must not affect training, including checkpoint recomputation.
     compressed = bridge._training_loss(data._replace(cy=torch.empty(0)))
 
-    pairs = NeuralMarginalEmbeddingBridge._to_tensors(bridge, xs, ys, ws, counts)
+    pairs = pair_data(xs, ys, ws, counts, device=bridge.device)
     feats = _features(pairs.x, mu[pairs.env])  # (N, G*q), one feature row per observed pair
     reference = 0.0
     for k in range(max(cross_fit_folds, 1)):
@@ -422,11 +465,60 @@ def test_per_x_bridge_predicts_each_category_from_its_own_A():
     np.testing.assert_allclose(pred, (mu @ bridge.A_[[2, 0]]).numpy())
 
 
-def test_neural_bridge_transfer_per_perturbation_uses_the_per_x_bridge():
+def test_neural_bridge_transfer_uses_the_selected_per_x_bridge():
     rng = np.random.default_rng(0)
     data = _cells(rng)
     train, test = data[data.obs["batch"] != "b3"], data[data.obs["batch"] == "b3"]
     perts = sorted(set(test.obs["perturbation"]) - {"control"})
-    model = NeuralBridgeTransfer(per_perturbation=True, n_features_w=3, n_steps=2).fit(train)
+    model = NeuralBridgeTransfer(variant="per_x", n_features_w=3, n_steps=2).fit(train)
     assert isinstance(model.bridge_, NeuralPerXEmbeddingBridge)
     assert model.predict(perts, test).shape == (len(perts), 5)
+
+
+@pytest.mark.parametrize(
+    "variant, bridge_type",
+    [
+        ("shared_2nn", NeuralSharedEmbeddingBridge),
+        ("hybrid", NeuralHybridEmbeddingBridge),
+    ],
+)
+def test_shared_variants_standardise_controls_and_mix_batches_without_test_response_leakage(
+    variant, bridge_type
+):
+    data = _cells(np.random.default_rng(0), n_batches=6)
+    test_mask = data.obs["batch"].isin(["b4", "b5"])
+    train, test = data[~test_mask], data[test_mask].copy()
+    model = Standardised(NeuralBridgeTransfer(variant=variant, n_steps=2, n_features_w=3))
+    model.fit(train)
+    assert isinstance(model.model.bridge_, bridge_type)
+    labels = np.intersect1d(test.obs["perturbation"].unique(), model.perturbations_)
+    prediction = model.predict(labels, test)
+    expected = np.zeros_like(prediction)
+    for row, label in enumerate(labels):
+        responses = test.obs["perturbation"].eq(label)
+        for batch in test.obs["batch"].unique():
+            subset = test[test.obs["batch"].eq(batch)]
+            controls = subset.X[subset.obs["perturbation"].eq("control")]
+            controls = (controls - model.w_mean_) / model.w_std_
+            x = model.model._onehot(np.searchsorted(model.perturbations_, [label]))
+            share = (responses & test.obs["batch"].eq(batch)).sum() / responses.sum()
+            expected[row] += share * model.model.bridge_.predict(x, controls)[0]
+    np.testing.assert_allclose(prediction, expected + model.y_mean_)
+    test.X[test.obs["perturbation"].ne("control")] += 10000
+    np.testing.assert_array_equal(model.predict(labels, test), prediction)
+
+
+def test_neural_variant_rejects_unknown_names():
+    with pytest.raises(ValueError, match="Unknown neural variant"):
+        NeuralBridgeTransfer(variant="typo")
+
+
+def test_marginal_neural_variant_has_been_removed():
+    with pytest.raises(ValueError, match="Unknown neural variant"):
+        NeuralBridgeTransfer(variant="marginal")
+
+
+def test_neural_transfer_defaults_to_per_x():
+    train = _cells(np.random.default_rng(0))
+    model = NeuralBridgeTransfer(n_steps=0).fit(train)
+    assert type(model.bridge_) is NeuralPerXEmbeddingBridge

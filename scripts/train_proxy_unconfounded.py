@@ -3,8 +3,6 @@
 For each proxy function g, number of source environments D, target theta* and seed, predictors
 are scored by MSE on held-out (x, y) pairs from the target environment:
   kernel  MarginalEmbeddingBridge fit on the sources, given only the target's proxies W
-  neural  NeuralMarginalEmbeddingBridge, likewise; ``bridges`` in the config picks which run
-  neural_crossfit  the same, with phi and psi trained on a cross_fit_folds-fold cross-fitted loss
   pooled  kernel ridge regression of y on x over all sources, ignoring the environment
   oracle  kernel ridge regression of y on x over labelled target data
   bayes   the true E[Y | x, e*]; its MSE is the irreducible error Var(Y | x, e*)
@@ -12,7 +10,6 @@ are scored by MSE on held-out (x, y) pairs from the target environment:
 Config: configs/train_proxy_unconfounded.yaml. Usage:
 
     uv run python scripts/train_proxy_unconfounded.py n_seeds=3 'n_envs=[20]'
-    uv run python scripts/train_proxy_unconfounded.py 'bridges=[kernel,neural]' neural.device=cuda
 
 Per-run scores are written to the Hydra run dir as scores.csv, with one plot per proxy of
 excess MSE over the oracle (every bridge and pooled, against the same oracle) against the
@@ -35,9 +32,6 @@ from genetic_perturbation_playground.data.proxy_unconfounded import (
 )
 from genetic_perturbation_playground.model.proxy_confounded import ConditionalMeanEmbedding
 from genetic_perturbation_playground.model.proxy_unconfounded import MarginalEmbeddingBridge
-from genetic_perturbation_playground.model.proxy_unconfounded_neural import (
-    NeuralMarginalEmbeddingBridge,
-)
 from genetic_perturbation_playground.utils.kernels import RBF, median_heuristic
 from genetic_perturbation_playground.utils.plotting import plot_excess_mse_vs_n_envs
 
@@ -45,8 +39,6 @@ from genetic_perturbation_playground.utils.plotting import plot_excess_mse_vs_n_
 SERIES = {
     "kernel": ("kernel bridge (target W only)", "#2a78d6"),
     "pooled": ("pooled sources (ignores environment)", "#eb6834"),
-    "neural": ("neural bridge (target W only)", "#1baf7a"),
-    "neural_crossfit": ("neural bridge, cross-fitted (target W only)", "#8e5bd0"),
 }
 
 
@@ -63,10 +55,6 @@ def run(cfg: DictConfig, proxy: str, d: int, theta_star: float, seed: int) -> di
     kw = RBF(lengthscales=median_heuristic(np.concatenate(ws)))
     bridges = {
         "kernel": lambda: MarginalEmbeddingBridge(kx, kw, cfg.reg),
-        "neural": lambda: NeuralMarginalEmbeddingBridge(reg=cfg.reg, seed=seed, **cfg.neural),
-        "neural_crossfit": lambda: NeuralMarginalEmbeddingBridge(
-            reg=cfg.reg, seed=seed, **cfg.neural, cross_fit_folds=cfg.cross_fit_folds
-        ),
     }
 
     def kernel_ridge(x, y):  # regression of y on x = ConditionalMeanEmbedding read out at y
