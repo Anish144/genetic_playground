@@ -1,19 +1,20 @@
-"""Out-of-batch prediction of siRNA mean Phenom embeddings on RxRx1, of one cell type or all.
+"""Train and evaluate transfer models on held-out RxRx1 experiments.
 
 - Data: data/rxrx1_phenom_4x4.h5ad (scripts/embed_rxrx1.py), crops of cfg.cell_type only.
 - Batch = experiment; treatment = siRNA; proxy W = the experiment's negative-control crops, plus
   its positive-control crops if cfg.positive_controls_as_proxies.
-- Models: the linear ones and the bridges of train_batch_transfer_expression, with scaled inputs
+- Models: the linear ones and the bridges of train_replogle_transfer, with scaled inputs
   and unscaled targets; a held-out experiment is predicted from its proxy crops alone.
 - Validation: select n_validation_batches distinct experiments without replacement using seed.
   Hold out each one separately and fit each model on every other experiment, for
   n_validation_batches fits per model. Scores per (treatment siRNA, held-out experiment), on means:
   mse      squared error in Phenom coordinates
 
-Config: configs/train_batch_transfer_rxrx1.yaml. Usage:
+Config: configs/train_rxrx1_transfer.yaml. Usage:
 
-    uv run python scripts/train_batch_transfer_rxrx1.py name=huvec 'bridges=[kernel]'
-    sbatch -J huvec hpc/run.sbatch scripts/train_batch_transfer_rxrx1.py name=huvec
+    uv run python scripts/train_rxrx1_transfer.py name=huvec 'bridges=[kernel]'
+    uv run python scripts/train_rxrx1_transfer.py name=hybrid neural=hybrid
+    sbatch -J huvec hpc/run.sbatch scripts/train_rxrx1_transfer.py name=huvec
 
 Prints each validation run's mean per (metric, model) as it finishes. In the Hydra run dir,
 scores.csv is rewritten after each run and summary.csv averages over the selected experiments.
@@ -34,8 +35,9 @@ import scanpy as sc
 import wandb
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf
-from train_batch_transfer_expression import fit as fit_models
+from train_replogle_transfer import fit as fit_models
 
+from genetic_perturbation_playground.config import register_configs
 from genetic_perturbation_playground.data.rxrx1 import load_rxrx1
 from genetic_perturbation_playground.data.transfer import (
     as_dense,
@@ -47,6 +49,8 @@ from genetic_perturbation_playground.data.transfer import (
 from genetic_perturbation_playground.tuning import batch_folds, validation_batches
 from genetic_perturbation_playground.utils.metrics import mse
 from genetic_perturbation_playground.utils.plotting import report_by_training_batches
+
+register_configs()
 
 
 def select_cell_type(adata: sc.AnnData, cell_type: str | None) -> sc.AnnData:
@@ -151,12 +155,12 @@ def log_summary(prefix: str, table: pd.DataFrame) -> None:
         )
 
 
-@hydra.main(config_path="../configs", config_name="train_batch_transfer_rxrx1", version_base=None)
+@hydra.main(config_path="../configs", config_name="train_rxrx1_transfer", version_base=None)
 def main(cfg: DictConfig):
     adata = select_cell_type(load_rxrx1(**cfg.embeddings), cfg.cell_type)
     out_dir = Path(HydraConfig.get().runtime.output_dir)
     folds = []
-    config = OmegaConf.to_container(cfg)
+    config = OmegaConf.to_container(cfg, resolve=True)
     with wandb.init(
         project="genetic-playground", name=cfg.name, config=config, mode=cfg.wandb_mode
     ):

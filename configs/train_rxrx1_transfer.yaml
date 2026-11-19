@@ -1,0 +1,17 @@
+defaults:
+  - transfer_defaults
+  - _self_
+
+name: ???     # required: names the run folder, outputs/<date>/<name>_<time>/
+hydra:
+  run:
+    dir: outputs/${now:%Y-%m-%d}/${name}_${now:%H-%M-%S}
+embeddings:         # which embed_rxrx1 output to load: its settings, see configs/embed_rxrx1.yaml
+  grid: 4
+  standardise_sites: false
+cell_type: HUVEC    # one cell type per run (HUVEC has the most experiments, 24); null = all 51, pooled
+n_validation_batches: 5  # distinct experiments held out one at a time; one fit per model per experiment
+positive_controls_as_proxies: false  # proxy W = negative controls; true adds the positive controls
+wandb_mode: online  # one W&B run per job, named name, with each fold's neural bridge loss; offline or disabled
+neural:
+  width_w: 128        # hidden units of psi

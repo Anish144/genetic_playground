@@ -1,10 +1,9 @@
-defaults:  # tune_bridges with a separate A_x per perturbation, only psi shared
-  - tune_bridges
+defaults:  # tune_replogle_transfer with a separate A_x per perturbation, only psi shared
+  - tune_replogle_transfer
+  - override /neural: per_x
   - _self_
 
 n_configs: 16       # all neural configurations
-neural:
-  variant: per_x
 neural_grid:
   lr: [1.0e-4, 7.5e-4]
   reg: [1.0e-5, 1.0e-4]

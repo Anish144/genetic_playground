@@ -1,6 +1,6 @@
 """Batch selection and random-search tuning of the kernel and neural bridges.
 
-Shared by scripts/tune_bridges.py (Replogle) and scripts/tune_bridges_rxrx1.py. cfg.n_configs
+Shared by scripts/tune_replogle_transfer.py (Replogle) and scripts/tune_rxrx1_transfer.py. cfg.n_configs
 configurations are drawn from each bridge's grid, the same draw in every fold. On each inner fold,
 shift (b=1, a reference only), every kernel configuration and every neural configuration at each
 of cfg.neural_checkpoints are fit on the other inner folds and scored on this one. The
@@ -8,25 +8,33 @@ configuration with the lowest validation mse averaged over the inner folds is se
 """
 
 import itertools
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Collection, Iterable
+from dataclasses import asdict, replace
 
 import numpy as np
 import pandas as pd
 import scanpy as sc
 from omegaconf import DictConfig
 
+from genetic_perturbation_playground.config import resolve_model_config
 from genetic_perturbation_playground.model.batch_transfer import (
-    KernelBridgeTransfer,
-    NeuralBridgeTransfer,
+    build_kernel,
+    build_neural,
 )
 from genetic_perturbation_playground.model.linear_transfer import (
     LinearTransfer,
 )
-from genetic_perturbation_playground.utils.standardisation import (
-    Standardised,
-)
 
-INT_SETTINGS = ["psi_size", "width_w", "n_steps", "depth", "cross_fit_folds"]
+INT_SETTINGS = [
+    "psi_size",
+    "width_w",
+    "n_features_w",
+    "n_steps",
+    "depth",
+    "cross_fit_folds",
+    "seed",
+    "gene_block_size",
+]
 Evaluate = Callable[[object], dict]  # fitted model -> its validation scores, {metric: value}
 
 
@@ -62,22 +70,16 @@ def sample_configs(grid: DictConfig, n: int, seed: int) -> list[dict]:
     return [configs[i] for i in sorted(picks)]
 
 
-def with_standardisation(bridge, cfg: DictConfig):
-    """Wrap a bridge to centre its targets and, with cfg.standardise_w, scale its control inputs."""
-    return Standardised(bridge, w=cfg.standardise_w)
-
-
 def make_kernel(config: dict, cfg: DictConfig):
     """Unfitted kernel bridge with one configuration: reg and lengthscale_scale."""
-    kernel = KernelBridgeTransfer(config["reg"], cfg.weight_by_cells, config["lengthscale_scale"])
-    return with_standardisation(kernel, cfg)
+    settings = resolve_model_config(cfg, "kernel", config)
+    return build_kernel(settings, standardise_w=cfg.standardise_w)
 
 
 def make_neural(config: dict, cfg: DictConfig):
     """Unfitted neural bridge with one configuration; the rest of its settings from cfg.neural."""
-    settings = {**cfg.neural, **_network_sizes(config)}
-    neural = NeuralBridgeTransfer(cfg.weight_by_cells, seed=cfg.seed, **settings)
-    return with_standardisation(neural, cfg)
+    settings = resolve_model_config(cfg, "neural", _network_sizes(config))
+    return build_neural(settings, standardise_w=cfg.standardise_w)
 
 
 def _network_sizes(config: dict) -> dict:
@@ -95,7 +97,7 @@ def tune(folds: Iterable[tuple[sc.AnnData, Evaluate]], cfg: DictConfig) -> tuple
     """
     inner = _inner_scores(folds, cfg)
     averaged = mean_over_inner_folds(inner)
-    selected, winners = select(averaged), _winners(averaged)
+    selected, winners = select(averaged, cfg), _winners(averaged)
     print(f"selected: {selected}\n{winners.to_string(float_format='%.4g')}", flush=True)
     return inner, selected, winners
 
@@ -120,7 +122,8 @@ def _validation_rows(train: sc.AnnData, evaluate: Evaluate, cfg: DictConfig) -> 
 
 def _shift_rows(train: sc.AnnData, evaluate: Evaluate, cfg: DictConfig) -> list[dict]:
     """Validation scores of shift (b=1), the reference the bridges are compared with."""
-    scores = evaluate(LinearTransfer(1.0, standardise_w=cfg.standardise_w).fit(train))
+    config = replace(resolve_model_config(cfg, "linear"), slope=1.0)
+    scores = evaluate(LinearTransfer(**asdict(config)).fit(train))
     print(f"  shift (b=1): mse {scores['mse']:.4g}", flush=True)
     return [{"bridge": "shift (b=1)", **scores}]
 
@@ -158,10 +161,15 @@ def mean_over_inner_folds(inner: pd.DataFrame) -> pd.DataFrame:
     return inner.groupby(settings, dropna=False)[metrics].mean().reset_index()
 
 
-def select(averaged: pd.DataFrame) -> dict:
+def select(averaged: pd.DataFrame, cfg: DictConfig) -> dict:
     """The configuration of each bridge with the lowest mean validation mse."""
+    settings = {
+        "kernel": list(cfg.kernel_grid),
+        "neural": list(dict.fromkeys([*cfg.neural_grid, "n_steps"])),
+    }
     return {
-        bridge: _best(averaged[averaged["bridge"] == bridge]) for bridge in ["kernel", "neural"]
+        bridge: _best(averaged[averaged["bridge"] == bridge], names)
+        for bridge, names in settings.items()
     }
 
 
@@ -171,14 +179,19 @@ def _winners(averaged: pd.DataFrame) -> pd.DataFrame:
     return best[_metrics(best.columns)]
 
 
-def _best(rows: pd.DataFrame) -> dict:
-    """The settings of the row with the lowest mse, integer settings as ints."""
-    best = (
-        rows.loc[rows["mse"].idxmin()]
-        .drop(["bridge", *_metrics(rows.columns)], errors="ignore")
-        .dropna()
-    )
-    return {key: int(v) if key in INT_SETTINGS else v for key, v in best.items()}
+def _best(rows: pd.DataFrame, setting_names: Collection[str]) -> dict:
+    """Keep this bridge's winning settings, including explicit null penalties."""
+    best = rows.loc[rows["mse"].idxmin(), list(setting_names)]
+    settings = {}
+    for key, value in best.items():
+        if isinstance(value, np.generic):
+            value = value.item()  # mixed-type pandas rows retain NumPy scalars
+        if pd.isna(value):
+            value = None
+        elif key in INT_SETTINGS:
+            value = int(value)
+        settings[key] = value
+    return settings
 
 
 def fit_selected(train: sc.AnnData, selected: dict, cfg: DictConfig, log_key=None) -> dict:

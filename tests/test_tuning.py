@@ -9,14 +9,17 @@ from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 
 from genetic_perturbation_playground import tuning
+from genetic_perturbation_playground.config import register_configs
 from genetic_perturbation_playground.utils.standardisation import (
     Standardised,
 )
 
 ROOT = Path(__file__).parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
-import train_batch_transfer_expression as expression  # noqa: E402
-import tune_bridges  # noqa: E402
+import train_replogle_transfer as expression  # noqa: E402
+import tune_replogle_transfer  # noqa: E402
+
+register_configs()
 
 
 def test_validation_batches_are_distinct_and_reproducible():
@@ -53,7 +56,7 @@ def test_sample_configs_draws_distinct_grid_points():
 
 def test_per_x_grid_varies_hidden_width_independently_of_output_dimension():
     with initialize_config_dir(str(ROOT / "configs"), version_base=None):
-        config = compose("tune_bridges_perx", ["name=test"])
+        config = compose("tune_replogle_transfer_perx", ["name=test"])
     drawn = tuning.sample_configs(config.neural_grid, config.n_configs, config.seed)
     assert len(drawn) == config.n_configs
     for settings in drawn:
@@ -70,17 +73,25 @@ def test_selection_ranks_configurations_by_their_mean_over_inner_folds():
             "psi_size": [None] * 4 + [8.0, 8.0, None, None],
             "width_w": [None] * 4 + [128.0, 128.0, None, None],
             "inner_fold": [0, 1, 0, 1, 0, 1, 0, 1],
+            "n_steps": [None] * 4 + [1, 1, None, None],
             "mse": [0.1, 0.9, 0.4, 0.4, 0.3, 0.3, 0.5, 0.7],  # reg 1 wins fold 0, reg 2 on average
             "pearson": [1.0, 3.0, 2.0, 2.0, 1.0, 1.0, 5.0, 7.0],
         }
     )
     averaged = tuning.mean_over_inner_folds(inner)
-    assert tuning.select(averaged) == {
+    config = OmegaConf.create(
+        {
+            "kernel_grid": {"reg": [1, 2]},
+            "neural_grid": {"reg": [3], "psi_size": [8], "width_w": [128]},
+        }
+    )
+    selected = tuning.select(averaged, config)
+    assert selected == {
         "kernel": {"reg": 2.0},
-        "neural": {"reg": 3.0, "psi_size": 8, "width_w": 128},
+        "neural": {"reg": 3.0, "psi_size": 8, "width_w": 128, "n_steps": 1},
     }
-    assert isinstance(tuning.select(averaged)["neural"]["psi_size"], int)
-    assert isinstance(tuning.select(averaged)["neural"]["width_w"], int)
+    assert isinstance(selected["neural"]["psi_size"], int)
+    assert isinstance(selected["neural"]["width_w"], int)
     shift = averaged[averaged["bridge"] == "shift (b=1)"].iloc[0]
     assert (shift["mse"], shift["pearson"]) == pytest.approx((0.6, 6.0))
 
@@ -125,7 +136,8 @@ def _cells(n_batches=6):
 
 @pytest.mark.parametrize("n", [1, 2])
 def test_replogle_validation_trains_on_all_other_batches(monkeypatch, n):
-    config = OmegaConf.load(ROOT / "configs" / "train_batch_transfer_expression.yaml")
+    with initialize_config_dir(str(ROOT / "configs"), version_base=None):
+        config = compose("train_replogle_transfer", ["name=test"])
     config.n_validation_batches, config.bridges = n, []
     training_batches = []
     fit = expression.fit
@@ -152,7 +164,7 @@ def test_replogle_validation_trains_on_all_other_batches(monkeypatch, n):
 
 def test_replogle_nested_cv_tunes_on_inner_folds_and_scores_selected_batches():
     with initialize_config_dir(str(ROOT / "configs"), version_base=None):
-        config = compose("tune_bridges", ["name=test", "+neural_grid.width_w=[4]"])
+        config = compose("tune_replogle_transfer", ["name=test", "+neural_grid.width_w=[4]"])
     config = OmegaConf.merge(
         config,
         {
@@ -165,7 +177,9 @@ def test_replogle_nested_cv_tunes_on_inner_folds_and_scores_selected_batches():
             "neural": {"device": "cpu", "cross_fit_folds": 0},
         },
     )
-    inner, selected, per_pert, per_batch, per_pair = tune_bridges.nested_cv(_cells(), config)
+    inner, selected, per_pert, per_batch, per_pair = tune_replogle_transfer.nested_cv(
+        _cells(), config
+    )
     assert per_batch["batch"].nunique() == 2
     assert per_pair.groupby("fold")["batch"].nunique().tolist() == [1, 1]
     for scores in [per_pert, per_pair]:
@@ -188,3 +202,142 @@ def test_replogle_nested_cv_tunes_on_inner_folds_and_scores_selected_batches():
         per_batch.query("metric == 'mse'").set_index(["batch", "model"])["value"].sort_index()
     )
     pd.testing.assert_series_equal(from_pairs, batch_mse, check_names=False)
+
+
+def test_trial_settings_override_presets_without_mutation():
+    with initialize_config_dir(str(ROOT / "configs"), version_base=None):
+        config = compose("tune_replogle_transfer", ["name=test", "neural=hybrid"])
+    before = OmegaConf.to_container(config, resolve=True)
+    first = tuning.make_neural(
+        {"psi_size": 3, "width_w": 4, "n_features_w": 2, "seed": 19, "log_key": "first"}, config
+    ).model
+    second = tuning.make_neural({"psi_size": 6, "log_key": "second"}, config).model
+    assert first.variant == second.variant == "hybrid"
+    assert (
+        first.bridge_kwargs["width_w"],
+        first.bridge_kwargs["n_features_w"],
+        first.bridge_kwargs["seed"],
+    ) == (4, 2, 19)
+    assert (second.bridge_kwargs["width_w"], second.bridge_kwargs["n_features_w"]) == (6, 6)
+    assert first.bridge_kwargs["log_key"] == "first"
+    assert second.bridge_kwargs["log_key"] == "second"
+    assert OmegaConf.to_container(config, resolve=True) == before
+
+
+def test_selected_null_deviation_overrides_numeric_preset():
+    with initialize_config_dir(str(ROOT / "configs"), version_base=None):
+        config = compose(
+            "tune_replogle_transfer",
+            [
+                "name=test",
+                "neural=shared_2nn",
+                "neural.deviation_reg=0.2",
+                "neural.device=cpu",
+                "neural.cross_fit_folds=0",
+            ],
+        )
+    config.kernel_grid = {"reg": [0.001], "lengthscale_scale": [2]}
+    config.neural_grid = {"reg": [0.005], "deviation_reg": [None, 0.2], "psi_size": [2]}
+    inner = pd.DataFrame(
+        [
+            {"bridge": "kernel", "reg": 0.001, "lengthscale_scale": 2, "mse": 0.3, "inner_fold": 0},
+            {
+                "bridge": "neural",
+                "reg": 0.005,
+                "deviation_reg": None,
+                "psi_size": 2,
+                "n_steps": 1,
+                "mse": 0.1,
+                "inner_fold": 0,
+            },
+            {
+                "bridge": "neural",
+                "reg": 0.005,
+                "deviation_reg": 0.2,
+                "psi_size": 2,
+                "n_steps": 2,
+                "mse": 0.9,
+                "inner_fold": 0,
+            },
+        ]
+    )
+    selected = tuning.select(tuning.mean_over_inner_folds(inner), config)
+    assert selected["neural"] == {"reg": 0.005, "deviation_reg": None, "psi_size": 2, "n_steps": 1}
+    assert selected["kernel"] == {"reg": 0.001, "lengthscale_scale": 2}
+    model = tuning.fit_selected(_cells(), selected, config)["neural bridge (tuned)"].model.bridge_
+    assert model.deviation_reg == model.reg == 0.005
+    assert model.n_steps == 1
+    assert config.neural.deviation_reg == 0.2
+
+
+def test_selection_restores_integer_model_settings():
+    config = OmegaConf.create(
+        {
+            "kernel_grid": {"reg": [0.01]},
+            "neural_grid": {
+                "reg": [0.01],
+                "psi_size": [2],
+                "n_features_w": [2],
+                "seed": [19],
+                "gene_block_size": [8],
+            },
+        }
+    )
+    rows = pd.DataFrame(
+        [
+            {"bridge": "kernel", "reg": 0.01, "mse": 0.2},
+            {
+                "bridge": "neural",
+                "reg": 0.01,
+                "psi_size": 2.0,
+                "n_features_w": 2.0,
+                "seed": 19.0,
+                "gene_block_size": 8.0,
+                "n_steps": 1.0,
+                "mse": 0.1,
+            },
+        ]
+    )
+    selected = tuning.select(rows, config)["neural"]
+    for name, value in [
+        ("psi_size", 2),
+        ("n_features_w", 2),
+        ("seed", 19),
+        ("gene_block_size", 8),
+        ("n_steps", 1),
+    ]:
+        assert selected[name] == value
+        assert type(selected[name]) is int
+
+
+@pytest.mark.parametrize("extra", [{"weight_by_cells": False}, {"device": "cpu"}])
+def test_mixed_type_grid_winners_can_be_refit(extra):
+    with initialize_config_dir(str(ROOT / "configs"), version_base=None):
+        config = compose("tune_replogle_transfer", ["name=test"])
+    config.kernel_grid = {"reg": [0.001], "lengthscale_scale": [1]}
+    config.neural_grid = {"reg": [0.005], "psi_size": [2]} | {
+        key: [value] for key, value in extra.items()
+    }
+    rows = pd.DataFrame(
+        [
+            {"bridge": "kernel", "reg": 0.001, "lengthscale_scale": 1, "mse": 0.3, "inner_fold": 0},
+            {
+                "bridge": "neural",
+                "reg": 0.005,
+                "psi_size": 2,
+                "n_steps": 1,
+                "mse": 0.1,
+                "inner_fold": 0,
+                **extra,
+            },
+        ]
+    )
+    selected = tuning.select(tuning.mean_over_inner_folds(rows), config)
+    model = tuning.make_neural(selected["neural"], config).model
+    assert tuning.make_kernel(selected["kernel"], config).model.reg == 0.001
+    assert model.bridge_kwargs["reg"] == 0.005
+    assert type(selected["neural"]["reg"]) is float
+    if "weight_by_cells" in extra:
+        assert model.weight_by_cells is False
+    else:
+        assert model.bridge_kwargs["device"] == "cpu"

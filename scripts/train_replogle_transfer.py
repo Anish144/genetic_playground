@@ -1,4 +1,4 @@
-"""Out-of-batch prediction on Replogle K562 gene expression with the batch-transfer model.
+"""Train and evaluate transfer models on held-out Replogle K562 batches.
 
 n_validation_batches distinct batches are selected without replacement using seed. Each is held
 out in a separate run, with every other batch used for training: n_validation_batches fits per
@@ -14,13 +14,15 @@ Per-perturbation scores include n_training_batches, the number of training batch
 that perturbation. plots/by_training_batches/batch_<label>/ contains a separate scatter plot per
 metric and per_perturbation.csv for each held-out batch, using that batch's scores directly.
 
-Config: configs/train_batch_transfer_expression.yaml. `name` is required and names the output folder. Usage:
+Config: configs/train_replogle_transfer.yaml. `name` is required and names the output folder. Usage:
 
-    uv run python scripts/train_batch_transfer_expression.py name=baseline n_validation_batches=10
-    uv run python scripts/train_batch_transfer_expression.py name=kernel_only 'bridges=[kernel]'   # no GPU: skip the neural bridge
-    uv run python scripts/train_batch_transfer_expression.py name=neural_500 neural.n_steps=500 neural.weight_decay=1e-2
+    uv run python scripts/train_replogle_transfer.py name=baseline n_validation_batches=10
+    uv run python scripts/train_replogle_transfer.py name=kernel_only 'bridges=[kernel]'   # no GPU: skip the neural bridge
+    uv run python scripts/train_replogle_transfer.py name=neural_500 neural.n_steps=500 neural.weight_decay=1e-2
+    uv run python scripts/train_replogle_transfer.py name=shared neural=shared_2nn
 """
 
+from dataclasses import asdict, replace
 from pathlib import Path
 
 import hydra
@@ -30,6 +32,11 @@ import scanpy as sc
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig
 
+from genetic_perturbation_playground.config import (
+    LinearConfig,
+    register_configs,
+    resolve_model_config,
+)
 from genetic_perturbation_playground.data.data_loader import load_dataset
 from genetic_perturbation_playground.data.transfer import (
     batch_labels,
@@ -38,30 +45,32 @@ from genetic_perturbation_playground.data.transfer import (
     training_batch_counts,
 )
 from genetic_perturbation_playground.model.batch_transfer import (
-    KernelBridgeTransfer,
-    NeuralBridgeTransfer,
+    build_kernel,
+    build_neural,
 )
 from genetic_perturbation_playground.model.linear_transfer import (
     LinearTransfer,
 )
-from genetic_perturbation_playground.tuning import validation_batches, with_standardisation
+from genetic_perturbation_playground.tuning import validation_batches
 from genetic_perturbation_playground.utils import metrics
 from genetic_perturbation_playground.utils.plotting import report, report_by_training_batches
+
+register_configs()
 
 MODELS = {"pooled (b=0)": 0.0, "shift (b=1)": 1.0, "transfer (fit b)": None}
 
 
 def fit(train: sc.AnnData, cfg: DictConfig) -> dict:
     """Fit every model variant on the training batches."""
-    models = _fit_linear(train, cfg.standardise_w, reg=cfg.linear_reg) | _fit_bridges(train, cfg)
+    models = _fit_linear(train, resolve_model_config(cfg, "linear")) | _fit_bridges(train, cfg)
     _print_slope(models["transfer (fit b)"].slope_)
     return models
 
 
-def _fit_linear(train: sc.AnnData, standardise_w: bool = True, *, reg: float = 1e-3) -> dict:
+def _fit_linear(train: sc.AnnData, config: LinearConfig) -> dict:
     """Fit the linear variants with optional input scaling and unscaled targets."""
     return {
-        name: LinearTransfer(slope, standardise_w=standardise_w, reg=reg).fit(train)
+        name: LinearTransfer(**asdict(replace(config, slope=slope))).fit(train)
         for name, slope in MODELS.items()
     }
 
@@ -73,13 +82,10 @@ def _fit_bridges(train: sc.AnnData, cfg: DictConfig) -> dict:
 
 def _make_bridge(kind: str, cfg: DictConfig):
     """An unfitted kernel or neural bridge, optionally standardising its control inputs."""
+    config = resolve_model_config(cfg, kind)
     if kind == "kernel":
-        bridge = KernelBridgeTransfer(cfg.bridge_reg, cfg.weight_by_cells)
-    else:
-        bridge = NeuralBridgeTransfer(
-            cfg.weight_by_cells, reg=cfg.bridge_reg, seed=cfg.seed, **cfg.neural
-        )
-    return with_standardisation(bridge, cfg)
+        return build_kernel(config, standardise_w=cfg.standardise_w)
+    return build_neural(config, standardise_w=cfg.standardise_w)
 
 
 def _print_slope(slope: np.ndarray) -> None:
@@ -195,9 +201,7 @@ def _average_per_batch(scores: list[pd.DataFrame]) -> pd.DataFrame:
     return grouped.agg(value=("value", "mean"), cells=("cells", "first")).reset_index()
 
 
-@hydra.main(
-    config_path="../configs", config_name="train_batch_transfer_expression", version_base=None
-)
+@hydra.main(config_path="../configs", config_name="train_replogle_transfer", version_base=None)
 def main(cfg: DictConfig):
     adata = load_dataset()
     per_pert, per_batch, per_pair = cross_validate(adata, cfg)

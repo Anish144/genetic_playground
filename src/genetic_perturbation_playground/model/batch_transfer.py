@@ -10,9 +10,17 @@ Input preparation lives in data.transfer. LinearTransfer and Standardised live
 in model.linear_transfer and utils.standardisation, respectively.
 """
 
+from dataclasses import asdict
+
 import anndata as ad
 import numpy as np
 
+from genetic_perturbation_playground.config import (
+    HybridConfig,
+    KernelConfig,
+    PerXConfig,
+    Shared2NNConfig,
+)
 from genetic_perturbation_playground.data.transfer import (
     BridgeData,
     batch_controls,
@@ -30,6 +38,7 @@ from genetic_perturbation_playground.model.proxy_unconfounded_neural import (
     NeuralSharedEmbeddingBridge,
 )
 from genetic_perturbation_playground.utils.kernels import RBF, median_heuristic
+from genetic_perturbation_playground.utils.standardisation import Standardised
 
 
 class KernelBridgeTransfer:
@@ -76,7 +85,10 @@ class KernelBridgeTransfer:
     """
 
     def __init__(
-        self, reg: float = 1e-6, weight_by_cells: bool = True, lengthscale_scale: float = 1.0
+        self,
+        reg: float = KernelConfig.reg,
+        weight_by_cells: bool = KernelConfig.weight_by_cells,
+        lengthscale_scale: float = KernelConfig.lengthscale_scale,
     ):
         self.reg = reg
         self.weight_by_cells = weight_by_cells
@@ -188,9 +200,9 @@ class NeuralBridgeTransfer:
 
     def __init__(
         self,
-        weight_by_cells: bool = True,
+        weight_by_cells: bool = PerXConfig.weight_by_cells,
         *,
-        variant: str = "per_x",
+        variant: str = PerXConfig.variant,
         **bridge_kwargs,
     ):
         bridges = {
@@ -270,3 +282,43 @@ class NeuralBridgeTransfer:
         encoded = np.zeros((len(idx), len(self.perturbations_)))
         encoded[np.arange(len(idx)), idx] = 1.0
         return encoded
+
+
+def build_kernel(config: KernelConfig, *, standardise_w: bool = True) -> Standardised:
+    """Construct a kernel bridge with training-data standardisation.
+
+    Parameters
+    ----------
+    config : KernelConfig
+        Model settings. Construction does not change them.
+    standardise_w : bool, default=True
+        Scale controls; targets are centred in either case.
+
+    Returns
+    -------
+    Standardised
+        Unfitted kernel bridge and its scaling wrapper.
+    """
+    return Standardised(KernelBridgeTransfer(**asdict(config)), w=standardise_w)
+
+
+def build_neural(config: PerXConfig, *, standardise_w: bool = True) -> Standardised:
+    """Construct the neural variant described by a settings dataclass.
+
+    Parameters
+    ----------
+    config : PerXConfig, Shared2NNConfig or HybridConfig
+        Model settings. Its variant must match its class.
+    standardise_w : bool, default=True
+        Scale controls; targets are centred in either case.
+
+    Returns
+    -------
+    Standardised
+        Unfitted neural bridge and its scaling wrapper.
+    """
+    if type(config) not in (PerXConfig, Shared2NNConfig, HybridConfig):
+        raise TypeError("Expected PerXConfig, Shared2NNConfig or HybridConfig")
+    if config.variant != type(config).variant:
+        raise ValueError(f"Select the matching config class or Hydra group neural={config.variant}")
+    return Standardised(NeuralBridgeTransfer(**asdict(config)), w=standardise_w)

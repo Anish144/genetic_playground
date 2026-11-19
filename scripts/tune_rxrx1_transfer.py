@@ -1,6 +1,6 @@
 """Nested cross-validation tuning of the kernel and neural bridges on RxRx1, one cell type.
 
-Select n_validation_batches distinct outer experiments using seed, as in train_batch_transfer_rxrx1.
+Select n_validation_batches distinct outer experiments using seed, as in train_rxrx1_transfer.
 Each is held out separately; all remaining experiments are split into inner_folds folds for tuning.
 The outer experiment never enters tuning. n_configs configurations per bridge, drawn from its grid
 (the same draw in every outer fold), are fit on the other inner folds and scored on the held-out
@@ -15,9 +15,9 @@ loss of the refit neural bridge (fold k/neural bridge/loss, against its step) an
 outer scores (fold k/<model>/<metric>); at the end, the means over all folds
 (all folds/<model>/<metric>). The tuning fits are not logged; inner_scores.csv holds them.
 
-Config: configs/tune_bridges_rxrx1.yaml. Usage:
+Config: configs/tune_rxrx1_transfer.yaml. Usage:
 
-    sbatch -J tune_huvec --time=24:00:00 hpc/run.sbatch scripts/tune_bridges_rxrx1.py \
+    sbatch -J tune_huvec --time=24:00:00 hpc/run.sbatch scripts/tune_rxrx1_transfer.py \
         name=tune_huvec positive_controls_as_proxies=true
 
 Writes inner_scores.csv (every configuration on every inner fold), selected.csv (winner per fold
@@ -38,8 +38,8 @@ import scanpy as sc
 import wandb
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf
-from train_batch_transfer_expression import _fit_linear
-from train_batch_transfer_rxrx1 import (
+from train_replogle_transfer import _fit_linear
+from train_rxrx1_transfer import (
     add_positive_controls_to_proxies,
     experiment_folds,
     log_summary,
@@ -49,12 +49,15 @@ from train_batch_transfer_rxrx1 import (
 )
 
 from genetic_perturbation_playground import tuning
+from genetic_perturbation_playground.config import register_configs, resolve_model_config
 from genetic_perturbation_playground.data.rxrx1 import load_rxrx1
 from genetic_perturbation_playground.data.transfer import (
     batch_labels,
     training_batch_counts,
 )
 from genetic_perturbation_playground.utils.plotting import report_by_training_batches
+
+register_configs()
 
 
 def validation_scores(model, val: sc.AnnData) -> dict:
@@ -106,7 +109,7 @@ def nested_cv(adata: sc.AnnData, cfg: DictConfig) -> Iterator[tuple]:
         log_selected(i + 1, selected)
         log_summary(f"fold {i + 1}/validation", winners)
         train = adata[np.isin(batch, train_batches)]
-        models = _fit_linear(train, cfg.standardise_w, reg=cfg.linear_reg)
+        models = _fit_linear(train, resolve_model_config(cfg, "linear"))
         models |= tuning.fit_selected(train, selected, cfg, f"fold {i + 1}/neural bridge")
         scores = score_batches(models, adata, [held_out]).assign(fold=i)
         scores["n_training_batches"] = scores["perturbation"].map(training_batch_counts(train))
@@ -117,12 +120,12 @@ def nested_cv(adata: sc.AnnData, cfg: DictConfig) -> Iterator[tuple]:
         )
 
 
-@hydra.main(config_path="../configs", config_name="tune_bridges_rxrx1", version_base=None)
+@hydra.main(config_path="../configs", config_name="tune_rxrx1_transfer", version_base=None)
 def main(cfg: DictConfig):
     adata = select_cell_type(load_rxrx1(**cfg.embeddings), cfg.cell_type)
     out_dir = Path(HydraConfig.get().runtime.output_dir)
     tables = {"inner_scores": [], "selected": [], "scores": []}
-    config = OmegaConf.to_container(cfg)
+    config = OmegaConf.to_container(cfg, resolve=True)
     with wandb.init(
         project="genetic-playground", name=cfg.name, config=config, mode=cfg.wandb_mode
     ):

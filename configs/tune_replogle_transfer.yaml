@@ -1,5 +1,5 @@
-defaults:  # control split, scoring and neural settings as in train_batch_transfer_expression
-  - train_batch_transfer_expression
+defaults:  # control split, scoring and neural settings as in train_replogle_transfer
+  - train_replogle_transfer
   - _self_
 
 inner_folds: 3       # K-fold over each outer fold's training batches; settings picked by mean mse

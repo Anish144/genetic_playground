@@ -1,18 +1,18 @@
 """Nested cross-validation tuning of the kernel and neural bridges on Replogle K562.
 
-Select n_validation_batches distinct outer batches using seed, as in train_batch_transfer_expression.
+Select n_validation_batches distinct outer batches using seed, as in train_replogle_transfer.
 Each is held out separately; all remaining batches are split into inner_folds folds for tuning.
 The configuration with the lowest mean inner-validation mse is refit on all remaining batches
 and scored on the one outer batch, next to the linear models. shift (b=1) is scored on the inner
 folds too, as a reference only. The outer batch never enters tuning. n_validation_batches counts
 outer evaluations; the inner tuning fits and final refits are additional training runs.
 
-Config: configs/tune_bridges.yaml (grids; everything else from train_batch_transfer_expression.yaml).
+Config: configs/tune_replogle_transfer.yaml (grids; everything else from train_replogle_transfer.yaml).
 Usage:
 
-    sbatch -J tune --time=2-00:00:00 hpc/run.sbatch scripts/tune_bridges.py name=tune
-    sbatch -J perx --time=2-00:00:00 hpc/run.sbatch scripts/tune_bridges.py \
-        --config-name tune_bridges_perx name=perx
+    sbatch -J tune --time=2-00:00:00 hpc/run.sbatch scripts/tune_replogle_transfer.py name=tune
+    sbatch -J perx --time=2-00:00:00 hpc/run.sbatch scripts/tune_replogle_transfer.py \
+        --config-name tune_replogle_transfer_perx name=perx
 
 Writes inner_scores.csv (every configuration on every inner fold), selected.csv (winner per outer
 fold and bridge), scores_per_perturbation.csv, scores_per_batch.csv, scores_per_pair.csv (each
@@ -33,7 +33,7 @@ import pandas as pd
 import scanpy as sc
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig
-from train_batch_transfer_expression import (
+from train_replogle_transfer import (
     _average_per_batch,
     _average_per_perturbation,
     _fit_linear,
@@ -46,12 +46,15 @@ from train_batch_transfer_expression import (
 )
 
 from genetic_perturbation_playground import tuning
+from genetic_perturbation_playground.config import register_configs, resolve_model_config
 from genetic_perturbation_playground.data.data_loader import load_dataset
 from genetic_perturbation_playground.data.transfer import (
     batch_labels,
     is_control,
     training_batch_counts,
 )
+
+register_configs()
 
 
 class Split(NamedTuple):
@@ -99,7 +102,7 @@ def nested_cv(adata: sc.AnnData, cfg: DictConfig) -> tuple:
     batch = batch_labels(adata)
     rng = np.random.default_rng(cfg.seed)
     selected_batches = tuning.validation_batches(batch, cfg.n_validation_batches, rng)
-    seen = _seen_controls(adata, batch, rng)  # same draws as train_batch_transfer_expression
+    seen = _seen_controls(adata, batch, rng)  # same draws as train_replogle_transfer
 
     inner_tables, selected_rows, pert_scores, batch_scores = [], [], [], []
     for i, held_out in enumerate(selected_batches):
@@ -115,7 +118,7 @@ def nested_cv(adata: sc.AnnData, cfg: DictConfig) -> tuple:
 
         outer = _split(adata, batch, seen, train_batches, [held_out])
         models = _fit_linear(
-            outer.train, cfg.standardise_w, reg=cfg.linear_reg
+            outer.train, resolve_model_config(cfg, "linear")
         ) | tuning.fit_selected(outer.train, selected, cfg)
         scores = score(models, outer.eval, cfg.top_k, outer.seen)
         scores["n_training_batches"] = scores["perturbation"].map(
@@ -134,7 +137,7 @@ def nested_cv(adata: sc.AnnData, cfg: DictConfig) -> tuple:
     )
 
 
-@hydra.main(config_path="../configs", config_name="tune_bridges", version_base=None)
+@hydra.main(config_path="../configs", config_name="tune_replogle_transfer", version_base=None)
 def main(cfg: DictConfig):
     adata = load_dataset()
     inner, selected, per_pert, per_batch, per_pair = nested_cv(adata, cfg)

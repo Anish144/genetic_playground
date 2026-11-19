@@ -65,7 +65,7 @@ $$
 +N\lambda\sum_g(s_gb_g)^2.
 $$
 
-The intercepts $\gamma$ have no penalty. Here, $s_g$ is the training-control standard deviation when inputs are standardised, and 1 otherwise. Thus the penalty applies to the fitted slope in the chosen control units. `LinearTransfer(reg=...)` from `model/linear_transfer.py` sets $\lambda$; training and tuning scripts use `linear_reg`, which defaults to `1e-3`. Set it to `0` for ordinary least squares. Fixed slopes (`b=0` and `b=1`) ignore this penalty.
+The intercepts $\gamma$ have no penalty. Here, $s_g$ is the training-control standard deviation when inputs are standardised, and 1 otherwise. Thus the penalty applies to the fitted slope in the chosen control units. `LinearTransfer(reg=...)` from `model/linear_transfer.py` sets $\lambda$; training and tuning scripts use `linear.reg`, which defaults to `1e-3`. Set it to `0` for ordinary least squares. Fixed slopes (`b=0` and `b=1`) ignore this penalty.
 
 Define the training means $\bar y_{xg}=\sum_e n_{xe}\bar y_{xeg}/\sum_e n_{xe}$ and $\bar W_{xg}=\sum_e n_{xe}W_{eg}/\sum_e n_{xe}$. The three settings predict a new batch $e^*$ as follows:
 
@@ -121,7 +121,7 @@ $$
 +\lambda N\sum_x\|A_x\|_F^2.
 $$
 
-Only the control network is shared across perturbations. `neural.variant=per_x` selects this model; it is also the default. The learned-perturbation marginal neural model has been removed. The kernel marginal embedding bridge is still available.
+Only the control network is shared across perturbations. `neural=per_x` selects this model; it is also the default. The learned-perturbation marginal neural model has been removed. The kernel marginal embedding bridge is still available.
 
 The control networks use full-batch AdamW, float32 SwiGLU layers with residual connections, and float64 ridge algebra. `n_features_w` sets the embedding size, `width_w` the hidden width, and `depth` the hidden-layer count. Each training step uses a fresh environment split when `cross_fit_folds >= 2`; `cross_fit_folds=0` uses in-sample MSE. Final coefficients use every training environment. Training and checkpoint callbacks are shared by all three variants.
 
@@ -166,7 +166,35 @@ model.fit(train)
 predictions = model.predict(perturbations, test)
 ```
 
-The training scripts accept `neural.variant=shared_2nn` or `neural.variant=hybrid`. Add variant-specific penalties with, for example, `+neural.deviation_reg=1e-3` and `+neural.linear_reg=1e-3` (hybrid only). The default is `per_x`. There is no `marginal` neural variant.
+The training scripts accept `neural=shared_2nn` or `neural=hybrid`. Set variant-specific penalties with `neural.deviation_reg=1e-3` and `neural.linear_reg=1e-3` (hybrid only). The default is `per_x`. There is no `marginal` neural variant.
+
+Model settings live in the dataclasses in `src/genetic_perturbation_playground/config.py`: `LinearConfig`, `KernelConfig`, `PerXConfig`, `Shared2NNConfig` and `HybridConfig`. All neural models default to one hidden layer per MLP; `neural.depth` excludes the output layer. The existing model constructors still accept keyword arguments. To reuse a named set of settings in Python:
+
+```python
+from genetic_perturbation_playground.config import HybridConfig
+from genetic_perturbation_playground.model.batch_transfer import build_neural
+
+settings = HybridConfig(width_w=32, n_features_w=16, n_steps=400)
+model = build_neural(settings, standardise_w=True)
+model.fit(train)
+```
+
+Hydra applies the dataclass defaults, then `configs/transfer_defaults.yaml`, the dataset/tuning preset, and command-line overrides. Tuning applies each sampled trial last, without changing the experiment config. Direct Python defaults use CPU; the shared transfer preset selects CUDA. Replogle uses width 64 and RxRx1 uses width 128. Tuning grids stay in YAML.
+
+Use `linear.reg` for the standalone linear model, `kernel.reg` for the kernel bridge and `neural.reg` for neural ridge. The hybrid's `neural.linear_reg` is a separate penalty. Setting `neural.deviation_reg=null` makes it follow that trial's `neural.reg`. Model fields are checked against the selected config group, including fields added with `+`.
+
+Older commands need these changes:
+
+| Previous option | Current option |
+|---|---|
+| `neural.variant=hybrid` | `neural=hybrid` |
+| `neural.variant=shared_2nn` | `neural=shared_2nn` |
+| `linear_reg=0` | `linear.reg=0` |
+| `bridge_reg=1e-5` | `kernel.reg=1e-5 neural.reg=1e-5` |
+| `+neural.linear_reg=0` | `neural=hybrid neural.linear_reg=0` |
+| `+neural.deviation_reg=1e-3` | `neural=shared_2nn neural.deviation_reg=1e-3` (or select hybrid) |
+
+For programmatic Hydra composition, call `register_configs()` from the config module before `hydra.compose`, then use `resolve_model_config(cfg, "neural")` to obtain the selected dataclass. Use Hydra composition to load transfer presets; a raw YAML load does not apply their inherited defaults.
 
 `model/batch_transfer.py` contains the kernel and neural AnnData adapters. `data/transfer.py` prepares their counts, means and batch mixtures. The linear model is `LinearTransfer` in `model/linear_transfer.py`, and the scaling wrapper is `Standardised` in `utils/standardisation.py`.
 
@@ -215,18 +243,20 @@ Run commands from the repository root. Use Python 3.12+ and install the locked e
 configs/                       Hydra defaults, tuning grids and checkpoints
 scripts/
   embed_rxrx1.py                Images → Phenom crop embeddings
-  train_batch_transfer_expression.py   Replogle fixed settings
-  train_batch_transfer_rxrx1.py        RxRx1 fixed settings
-  tune_bridges.py               Replogle nested tuning (shared or per-x)
-  tune_bridges_rxrx1.py         RxRx1 nested tuning
+  train_replogle_transfer.py    Replogle fixed settings
+  train_rxrx1_transfer.py       RxRx1 fixed settings
+  tune_replogle_transfer.py     Replogle nested tuning
+  tune_rxrx1_transfer.py        RxRx1 nested tuning
 src/genetic_perturbation_playground/
+  config.py                    Typed model settings and Hydra registration
   data/                        Dataset loading and preprocessing
-  model/batch_transfer.py       Linear models, bridge adapters and scaling
+  model/batch_transfer.py       Kernel and neural bridge adapters
+  model/linear_transfer.py      Linear transfer
   model/proxy_unconfounded.py   Kernel bridge
-  model/proxy_unconfounded_neural.py   Both neural bridges
+  model/proxy_unconfounded_neural.py   Per-x, shared 2NN and hybrid bridges
   model/phenom.py               Frozen OpenPhenom encoder
   tuning.py                    Shared tuning logic
-  utils/                       Kernels, metrics and plots
+  utils/                       Ridge solvers, networks, scaling, kernels, metrics and plots
 data/                          Downloaded data, embeddings and OpenPhenom weights
 notebooks/                     Exploration and derivations
 tests/                         Model, data and evaluation checks
@@ -240,12 +270,13 @@ The `train_proxy_confounded.py` and `train_proxy_unconfounded.py` scripts are se
 
 ```bash
 uv sync
-uv run python scripts/train_batch_transfer_expression.py name=replogle
-uv run python scripts/tune_bridges.py name=replogle_tuned
-uv run python scripts/tune_bridges.py --config-name tune_bridges_perx name=replogle_perx
+uv run python scripts/train_replogle_transfer.py name=replogle
+uv run python scripts/train_replogle_transfer.py name=replogle_shared neural=shared_2nn
+uv run python scripts/tune_replogle_transfer.py name=replogle_tuned
+uv run python scripts/tune_replogle_transfer.py --config-name tune_replogle_transfer_perx name=replogle_perx
 ```
 
-For linear models plus the kernel bridge on CPU, append `'bridges=[kernel]'` to a **training** command; `'bridges=[]'` runs only linear models. Tuning scripts always tune both bridges. A fixed per-$x$ Replogle run uses the default `neural.variant=per_x`.
+For linear models plus the kernel bridge on CPU, append `'bridges=[kernel]'` to a **training** command; `'bridges=[]'` runs only linear models. Tuning scripts always tune both bridges. A fixed per-$x$ Replogle run uses the default `neural=per_x`.
 
 **RxRx1:** download the images and metadata from the [dataset page](https://www.rxrx.ai/rxrx1). Arrange them as:
 
@@ -258,16 +289,17 @@ The embedding script downloads OpenPhenom code and weights into `data/OpenPhenom
 
 ```bash
 uv run python scripts/embed_rxrx1.py grid=4
-uv run python scripts/train_batch_transfer_rxrx1.py name=huvec wandb_mode=disabled
-uv run python scripts/tune_bridges_rxrx1.py name=all_types_tuned cell_type=null wandb_mode=disabled
+uv run python scripts/train_rxrx1_transfer.py name=huvec wandb_mode=disabled
+uv run python scripts/train_rxrx1_transfer.py name=huvec_hybrid neural=hybrid wandb_mode=disabled
+uv run python scripts/tune_rxrx1_transfer.py name=all_types_tuned cell_type=null wandb_mode=disabled
 ```
 
-Use `grid=2` when embedding and `embeddings.grid=2` when training to use 256-pixel crops. For site normalisation, use `standardise_sites=true` and `embeddings.standardise_sites=true` respectively. RxRx1 defaults to online W&B logging; examples disable it. RxRx1 also defaults to `neural.variant=per_x`.
+Use `grid=2` when embedding and `embeddings.grid=2` when training to use 256-pixel crops. For site normalisation, use `standardise_sites=true` and `embeddings.standardise_sites=true` respectively. RxRx1 defaults to online W&B logging; examples disable it. RxRx1 also defaults to `neural=per_x`.
 
 To check the existing local smoke embeddings without a GPU:
 
 ```bash
-uv run python scripts/train_batch_transfer_rxrx1.py name=smoke cell_type=null n_validation_batches=2 'bridges=[]' wandb_mode=disabled
+uv run python scripts/train_rxrx1_transfer.py name=smoke cell_type=null n_validation_batches=2 'bridges=[]' wandb_mode=disabled
 ```
 
 For an embedding smoke run, `experiments='[HEPG2-01]'` limits the input. The output filename does not include this subset, so use a separate checkout/data directory to avoid replacing full embeddings.
@@ -276,8 +308,8 @@ For an embedding smoke run, `experiments='[HEPG2-01]'` limits the input. The out
 
 ```bash
 mkdir -p outputs
-sbatch -J replogle hpc/run.sbatch scripts/train_batch_transfer_expression.py name=replogle
-sbatch -J perx --time=2-00:00:00 hpc/run.sbatch scripts/tune_bridges.py --config-name tune_bridges_perx name=perx
+sbatch -J replogle hpc/run.sbatch scripts/train_replogle_transfer.py name=replogle
+sbatch -J perx --time=2-00:00:00 hpc/run.sbatch scripts/tune_replogle_transfer.py --config-name tune_replogle_transfer_perx name=perx
 ```
 
 **Results:** Replogle writes `scores_per_perturbation.csv`, `scores_per_batch.csv` and plots. Its tuning script also saves per-pair MSE in `scores_per_pair.csv`. RxRx1 writes per-pair `scores.csv` and overall `summary.csv`. Both tuning scripts save `inner_scores.csv` and `selected.csv`. Coverage plots are under `plots/by_training_batches/batch_<label>/`. Model weights are not saved by these entry points. Use each run's `.hydra/config.yaml` and logs to interpret archived results; older runs can differ in preprocessing, scaling and validation splits.

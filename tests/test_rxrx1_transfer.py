@@ -8,21 +8,23 @@ import pytest
 from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 
+from genetic_perturbation_playground.config import register_configs
 from genetic_perturbation_playground.utils.standardisation import (
     Standardised,
 )
 
 ROOT = Path(__file__).parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
-import train_batch_transfer_rxrx1 as mod  # noqa: E402
-import tune_bridges_rxrx1 as tune  # noqa: E402
+import train_rxrx1_transfer as mod  # noqa: E402
+import tune_rxrx1_transfer as tune  # noqa: E402
 
 
 def cfg(**overrides):
     """The script's config with `overrides`, in struct mode as Hydra hands it over."""
-    config = OmegaConf.load(ROOT / "configs" / "train_batch_transfer_rxrx1.yaml")
-    OmegaConf.set_struct(config, True)
-    return OmegaConf.merge(config, {"name": "test", "wandb_mode": "disabled"}, overrides)
+    register_configs()
+    with initialize_config_dir(str(ROOT / "configs"), version_base=None):
+        config = compose("train_rxrx1_transfer", ["name=test", "wandb_mode=disabled"])
+    return OmegaConf.merge(config, overrides)
 
 
 @pytest.fixture
@@ -141,7 +143,7 @@ def test_cross_validate_fits_the_neural_bridge(tiny_rxrx1):
 
 def test_nested_cv_tunes_on_inner_validation_and_scores_the_outer_folds(tiny_rxrx1):
     with initialize_config_dir(str(ROOT / "configs"), version_base=None):
-        config = compose("tune_bridges_rxrx1", ["name=test", "wandb_mode=disabled"])
+        config = compose("tune_rxrx1_transfer", ["name=test", "wandb_mode=disabled"])
     config = OmegaConf.merge(
         config,
         {
@@ -245,8 +247,8 @@ def test_fit_models_standardises_linear_and_bridge_inputs(tiny_rxrx1):
 
 def test_training_config_controls_linear_ridge(tiny_rxrx1):
     data = mod.select_cell_type(tiny_rxrx1, "HUVEC")
-    ordinary = mod.fit_models(data, cfg(bridges=[], linear_reg=0.0))
-    penalised = mod.fit_models(data, cfg(bridges=[], linear_reg=2.0))
+    ordinary = mod.fit_models(data, cfg(bridges=[], linear={"reg": 0.0}))
+    penalised = mod.fit_models(data, cfg(bridges=[], linear={"reg": 2.0}))
     assert penalised["transfer (fit b)"].reg == 2.0
     assert np.all(
         np.abs(penalised["transfer (fit b)"].coef_) < np.abs(ordinary["transfer (fit b)"].coef_)

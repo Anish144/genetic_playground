@@ -8,6 +8,7 @@ LinearRidgeSolver fits one control slope per output.
 import anndata as ad
 import numpy as np
 
+from genetic_perturbation_playground.config import LinearConfig
 from genetic_perturbation_playground.data.transfer import (
     as_dense,
     is_control,
@@ -83,7 +84,11 @@ class LinearTransfer:
     """
 
     def __init__(
-        self, slope: float | None = None, standardise_w: bool = True, *, reg: float = 1e-3
+        self,
+        slope: float | None = LinearConfig.slope,
+        standardise_w: bool = LinearConfig.standardise_w,
+        *,
+        reg: float = LinearConfig.reg,
     ):
         self.slope = slope
         self.standardise_w = standardise_w

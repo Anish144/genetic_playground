@@ -1,5 +1,5 @@
 defaults:  # validation batches, cell type, proxies, scoring and neural settings from training
-  - train_batch_transfer_rxrx1
+  - train_rxrx1_transfer
   - _self_
 
 inner_folds: 3       # K-fold over each outer fold's training experiments; settings picked by mean mse

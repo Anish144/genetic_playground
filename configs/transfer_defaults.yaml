@@ -1,0 +1,23 @@
+defaults:
+  - linear: default
+  - kernel: default
+  - neural: per_x
+  - _self_
+
+seed: 0
+bridges: [kernel, neural]
+standardise_w: true
+weight_by_cells: true
+linear:
+  standardise_w: ${standardise_w}
+kernel:
+  weight_by_cells: ${weight_by_cells}
+neural:
+  weight_by_cells: ${weight_by_cells}
+  seed: ${seed}
+  n_features_w: 32
+  reg: 1.0e-6
+  weight_decay: 1.0e-2
+  n_steps: 200
+  cross_fit_folds: 5
+  device: cuda

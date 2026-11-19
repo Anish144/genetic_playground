@@ -45,6 +45,7 @@ import wandb
 from torch import nn
 from tqdm import trange
 
+from genetic_perturbation_playground.config import HybridConfig, PerXConfig, Shared2NNConfig
 from genetic_perturbation_playground.data.neural import GroupedRidgeData
 from genetic_perturbation_playground.utils.neural import as_tensor, checkpointed_sse, control_mlp
 from genetic_perturbation_playground.utils.ridge import NeuralRidgeSolver
@@ -72,7 +73,7 @@ class NeuralPerXEmbeddingBridge:
         Number q of learned features per control network.
     width_w : int, default=64
         Number of units in each hidden layer.
-    depth : int, default=2
+    depth : int, default=1
         Number of SwiGLU hidden layers. Zero gives a linear network.
     reg : float, default=1e-3
         Coefficient penalty before multiplying by the total training count N.
@@ -121,18 +122,18 @@ class NeuralPerXEmbeddingBridge:
     torch.Size([2, 2, 1])
     """
 
-    n_features_w: int = 16
-    width_w: int = 64
-    depth: int = 2
-    reg: float = 1e-3
-    lr: float = 1e-3
-    weight_decay: float = 0.0
-    n_steps: int = 2000
-    cross_fit_folds: int = 0
-    seed: int = 0
-    device: str = "cpu"
-    log_key: str | None = None
-    gene_block_size: int = 256
+    n_features_w: int = PerXConfig.n_features_w
+    width_w: int = PerXConfig.width_w
+    depth: int = PerXConfig.depth
+    reg: float = PerXConfig.reg
+    lr: float = PerXConfig.lr
+    weight_decay: float = PerXConfig.weight_decay
+    n_steps: int = PerXConfig.n_steps
+    cross_fit_folds: int = PerXConfig.cross_fit_folds
+    seed: int = PerXConfig.seed
+    device: str = PerXConfig.device
+    log_key: str | None = PerXConfig.log_key
+    gene_block_size: int = PerXConfig.gene_block_size
 
     def __post_init__(self):
         """Require a positive output block size."""
@@ -411,7 +412,7 @@ class NeuralSharedEmbeddingBridge(NeuralPerXEmbeddingBridge):
     torch.Size([2, 1])
     """
 
-    deviation_reg: float | None = None
+    deviation_reg: float | None = Shared2NNConfig.deviation_reg
 
     def __post_init__(self):
         """Default deviation_reg to reg and require finite, positive penalties."""
@@ -556,7 +557,7 @@ class NeuralHybridEmbeddingBridge(NeuralSharedEmbeddingBridge):
     torch.Size([1])
     """
 
-    linear_reg: float = 1e-3
+    linear_reg: float = HybridConfig.linear_reg
 
     def __post_init__(self):
         """Check neural penalties and require linear_reg >= 0; infinity disables it."""
