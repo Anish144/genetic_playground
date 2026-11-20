@@ -54,9 +54,9 @@ def test_sample_configs_draws_distinct_grid_points():
     assert len({tuple(c.items()) for c in drawn}) == 4
 
 
-def test_per_x_grid_varies_hidden_width_independently_of_output_dimension():
+def test_replogle_grid_varies_hidden_width_independently_of_output_dimension():
     with initialize_config_dir(str(ROOT / "configs"), version_base=None):
-        config = compose("tune_replogle_transfer_perx", ["name=test"])
+        config = compose("tune_replogle_transfer", ["name=test"])
     drawn = tuning.sample_configs(config.neural_grid, config.n_configs, config.seed)
     assert len(drawn) == config.n_configs
     for settings in drawn:
@@ -164,7 +164,7 @@ def test_replogle_validation_trains_on_all_other_batches(monkeypatch, n):
 
 def test_replogle_nested_cv_tunes_on_inner_folds_and_scores_selected_batches():
     with initialize_config_dir(str(ROOT / "configs"), version_base=None):
-        config = compose("tune_replogle_transfer", ["name=test", "+neural_grid.width_w=[4]"])
+        config = compose("tune_replogle_transfer", ["name=test", "neural_grid.width_w=[4]"])
     config = OmegaConf.merge(
         config,
         {
@@ -172,7 +172,12 @@ def test_replogle_nested_cv_tunes_on_inner_folds_and_scores_selected_batches():
             "inner_folds": 2,
             "n_configs": 2,
             "kernel_grid": {"reg": [1e-3, 1e-2], "lengthscale_scale": [1]},
-            "neural_grid": {"reg": [1e-3], "weight_decay": [0.0], "psi_size": [3]},
+            "neural_grid": {
+                "lr": [7.5e-4],
+                "reg": [1e-3],
+                "weight_decay": [0.0],
+                "psi_size": [3],
+            },
             "neural_checkpoints": [1, 2],
             "neural": {"device": "cpu", "cross_fit_folds": 0},
         },

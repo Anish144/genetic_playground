@@ -1,4 +1,4 @@
-"""Nested cross-validation tuning of the kernel and neural bridges on Replogle K562.
+"""Tune kernel and neural bridges on held-out Replogle K562 batches.
 
 Select n_validation_batches distinct outer batches using seed, as in train_replogle_transfer.
 Each is held out separately; all remaining batches are split into inner_folds folds for tuning.
@@ -8,11 +8,11 @@ folds too, as a reference only. The outer batch never enters tuning. n_validatio
 outer evaluations; the inner tuning fits and final refits are additional training runs.
 
 Config: configs/tune_replogle_transfer.yaml (grids; everything else from train_replogle_transfer.yaml).
+Choose one neural model with neural=per_x (default), neural=shared_2nn,
+or neural=hybrid.
 Usage:
 
     sbatch -J tune --time=2-00:00:00 hpc/run.sbatch scripts/tune_replogle_transfer.py name=tune
-    sbatch -J perx --time=2-00:00:00 hpc/run.sbatch scripts/tune_replogle_transfer.py \
-        --config-name tune_replogle_transfer_perx name=perx
 
 Writes inner_scores.csv (every configuration on every inner fold), selected.csv (winner per outer
 fold and bridge), scores_per_perturbation.csv, scores_per_batch.csv, scores_per_pair.csv (each

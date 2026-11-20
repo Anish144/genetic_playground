@@ -126,7 +126,6 @@ TRANSFER_CONFIGS = [
     "train_rxrx1_transfer",
     "tune_replogle_transfer",
     "tune_rxrx1_transfer",
-    "tune_replogle_transfer_perx",
 ]
 
 
@@ -252,8 +251,8 @@ def test_root_switches_and_model_penalties_resolve_independently():
 
 
 def test_tuning_grid_can_add_a_declared_model_field():
-    config = compose_config("tune_replogle_transfer", "+neural_grid.width_w=[4]")
-    assert list(config.neural_grid.width_w) == [4]
+    config = compose_config("tune_replogle_transfer", "+neural_grid.depth=[1]")
+    assert list(config.neural_grid.depth) == [1]
 
 
 @pytest.mark.parametrize("dataset", ["replogle", "rxrx1"])

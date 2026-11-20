@@ -3,14 +3,16 @@ defaults:  # control split, scoring and neural settings as in train_replogle_tra
   - _self_
 
 inner_folds: 3       # K-fold over each outer fold's training batches; settings picked by mean mse
-n_configs: 8         # per bridge, drawn at random from its grid (all of them if n_configs covers it)
+n_configs: 16        # all neural configurations; also covers the six kernel configurations
 # Inputs use training-control statistics; expression targets stay unscaled.
-# Narrowed using the inner scores of an earlier run (shared phi) on 5,000 highly variable genes, not all 8,563.
+# Kernel grid narrowed using inner scores on 5,000 highly variable genes, not all 8,563.
 kernel_grid:         # 6 configurations
   reg: [1.0e-4, 1.0e-3]
   lengthscale_scale: [1, 2, 4]  # multiples of the median-heuristic lengthscale
-neural_grid:         # 4 configurations; the rest (depth, lr, cross_fit_folds, ...) from neural
-  reg: [1.0e-6, 1.0e-5]
-  weight_decay: [1.0e-2, 1.0e-1]
-  psi_size: [16]       # psi's hidden width and output dimension q
-neural_checkpoints: [100, 200, 400]  # steps scored in one training run
+neural_grid:         # 16 configurations; depth and cross-fitting settings come from neural
+  lr: [1.0e-4, 7.5e-4]
+  reg: [1.0e-5, 1.0e-4]
+  weight_decay: [1.0e-4]
+  width_w: [32, 64]    # psi hidden width
+  psi_size: [8, 16]    # psi output dimension q
+neural_checkpoints: [0, 1, 2, 4, 8, 16, 32, 50]  # steps scored in one training run

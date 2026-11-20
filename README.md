@@ -323,10 +323,12 @@ uv sync
 uv run python scripts/train_replogle_transfer.py name=replogle
 uv run python scripts/train_replogle_transfer.py name=replogle_shared neural=shared_2nn
 uv run python scripts/tune_replogle_transfer.py name=replogle_tuned
-uv run python scripts/tune_replogle_transfer.py --config-name tune_replogle_transfer_perx name=replogle_perx
+uv run python scripts/tune_replogle_transfer.py name=replogle_shared_tuned neural=shared_2nn
 ```
 
-For linear models plus the kernel bridge on CPU, append `'bridges=[kernel]'` to a **training** command; `'bridges=[]'` runs only linear models. Tuning scripts always tune both bridges. A fixed per-$x$ Replogle run uses the default `neural=per_x`.
+For linear models plus the kernel bridge on CPU, append `'bridges=[kernel]'` to a **training** command; `'bridges=[]'` runs only linear models. Tuning scripts always tune a kernel bridge and one neural variant: `neural=per_x` (default), `neural=shared_2nn` or `neural=hybrid`.
+
+Replogle tuning uses `configs/tune_replogle_transfer.yaml` for all neural variants. It evaluates all 16 neural configurations, with hidden widths 32/64, output dimensions 8/16 and checkpoints from 0 to 50 steps, plus all six kernel configurations.
 
 **RxRx1:** download the images and metadata from the [dataset page](https://www.rxrx.ai/rxrx1). Arrange them as:
 
@@ -360,7 +362,7 @@ For an embedding smoke run, `experiments='[HEPG2-01]'` limits the input. The out
 ```bash
 mkdir -p outputs
 sbatch -J replogle hpc/run.sbatch scripts/train_replogle_transfer.py name=replogle
-sbatch -J perx --time=2-00:00:00 hpc/run.sbatch scripts/tune_replogle_transfer.py --config-name tune_replogle_transfer_perx name=perx
+sbatch -J replogle_tune --time=2-00:00:00 hpc/run.sbatch scripts/tune_replogle_transfer.py name=replogle_tuned
 ```
 
 **Results:** Replogle writes `scores_per_perturbation.csv`, `scores_per_batch.csv` and plots. Its tuning script also saves per-pair MSE in `scores_per_pair.csv`. RxRx1 writes per-pair `scores.csv` and overall `summary.csv`. Both tuning scripts save `inner_scores.csv` and `selected.csv`. Coverage plots are under `plots/by_training_batches/batch_<label>/`. Model weights are not saved by these entry points. Use each run's `.hydra/config.yaml` and logs to interpret archived results; older runs can differ in preprocessing, scaling and validation splits.
