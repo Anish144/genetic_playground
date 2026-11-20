@@ -10,6 +10,7 @@ configuration with the lowest validation mse averaged over the inner folds is se
 import itertools
 from collections.abc import Callable, Collection, Iterable
 from dataclasses import asdict, replace
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -17,6 +18,11 @@ import scanpy as sc
 from omegaconf import DictConfig
 
 from genetic_perturbation_playground.config import resolve_model_config
+from genetic_perturbation_playground.experiments.checkpoints import (
+    fingerprint_settings,
+    read_json,
+    write_json,
+)
 from genetic_perturbation_playground.model.batch_transfer import (
     build_kernel,
     build_neural,
@@ -207,3 +213,185 @@ def fit_selected(train: sc.AnnData, selected: dict, cfg: DictConfig, log_key=Non
     kernel = make_kernel(selected["kernel"], cfg)
     neural = make_neural(selected["neural"] | {"log_key": log_key}, cfg)
     return {"kernel bridge (tuned)": kernel.fit(train), "neural bridge (tuned)": neural.fit(train)}
+
+
+def candidate_configs(cfg: DictConfig) -> dict[str, list[dict]]:
+    """Sample the kernel and selected neural grids once using the base seed.
+
+    Parameters
+    ----------
+    cfg : omegaconf.DictConfig
+        Tuning grids, positive n_configs and the base seed.
+
+    Returns
+    -------
+    dict of str to list of dict
+        Ordered, distinct candidates per bridge, capped by each grid's size.
+    """
+    if not isinstance(cfg.n_configs, int) or isinstance(cfg.n_configs, bool) or cfg.n_configs < 1:
+        raise ValueError("n_configs must be a positive integer.")
+    grids = {"kernel": cfg.kernel_grid, "neural": _neural_grid(cfg)}
+    result = {}
+    for bridge, grid in grids.items():
+        if not grid or any(not values for values in grid.values()):
+            raise ValueError(f"The {bridge} tuning grid must be nonempty.")
+        if any(
+            len({fingerprint_settings({"value": v}) for v in values}) != len(values)
+            for values in grid.values()
+        ):
+            raise ValueError(f"The {bridge} tuning grid contains duplicate values.")
+        result[bridge] = sample_configs(grid, cfg.n_configs, cfg.seed)
+    return result
+
+
+def tune_resumable(
+    folds: Iterable[tuple[sc.AnnData, Evaluate]],
+    cfg: DictConfig,
+    *,
+    directory: Path,
+    candidates: dict[str, list[dict]],
+) -> tuple[pd.DataFrame, dict, pd.DataFrame]:
+    """Tune both bridges, committing each completed candidate/fold trial.
+
+    Parameters
+    ----------
+    folds : iterable of tuple
+        Training data and retained-only validation evaluator for each fold.
+    cfg : omegaconf.DictConfig
+        Effective settings for this seed, including neural_checkpoints.
+    directory : pathlib.Path
+        Trial storage, owned by a locked run with validated data/config identity.
+    candidates : dict of str to list of dict
+        Persisted kernel and neural draws; reused across seeds and k values.
+
+    Returns
+    -------
+    tuple of (pandas.DataFrame, dict, pandas.DataFrame)
+        Inner scores, selected settings and mean validation scores of winners.
+        Ties use candidate order, then the smallest neural checkpoint.
+
+    Notes
+    -----
+    Partial neural progress is saved at each scoring checkpoint, but only a
+    successfully returned fit is committed. An interrupted trial restarts.
+    The caller must validate data identity before reusing this directory.
+    """
+    checkpoints = list(cfg.neural_checkpoints)
+    if (
+        not checkpoints
+        or any(type(step) is not int or step < 0 for step in checkpoints)
+        or len(set(checkpoints)) != len(checkpoints)
+    ):
+        raise ValueError("neural_checkpoints must be distinct nonnegative integers.")
+    checkpoints.sort()
+    if set(candidates) != {"kernel", "neural"} or any(not v for v in candidates.values()):
+        raise ValueError("Tuning needs nonempty kernel and neural candidates.")
+    rows = []
+    for fold, (train, evaluate) in enumerate(folds):
+        for bridge in ("kernel", "neural"):
+            for index, config in enumerate(candidates[bridge]):
+                candidate_id = fingerprint_settings(config)
+                path = directory / f"fold_{fold}" / bridge / f"{candidate_id}.json"
+                settings = (
+                    config
+                    if bridge == "kernel"
+                    else _network_sizes(config) | {"n_steps": max(checkpoints)}
+                )
+                identity = {
+                    "inner_fold": fold,
+                    "bridge": bridge,
+                    "config": config,
+                    "model": asdict(resolve_model_config(cfg, bridge, settings)),
+                    "standardise_w": bool(cfg.standardise_w),
+                    "checkpoints": checkpoints if bridge == "neural" else [None],
+                }
+                scores = _resumable_trial(path, identity, train, evaluate, cfg)
+                rows.extend(
+                    {
+                        "inner_fold": fold,
+                        "bridge": bridge,
+                        **config,
+                        "candidate_id": candidate_id,
+                        "candidate_index": index,
+                        **score,
+                    }
+                    for score in scores
+                )
+    if not rows:
+        raise ValueError("Tuning requires at least one inner fold.")
+    inner = pd.DataFrame(rows).sort_index(axis=1)
+    averaged = mean_over_inner_folds(inner).sort_values(
+        ["candidate_index", "n_steps"], kind="stable", na_position="first"
+    )
+    selected = select(averaged, cfg)
+    return inner, selected, _winners(averaged)
+
+
+def _resumable_trial(path, identity, train, evaluate, cfg):
+    if path.exists():
+        record = read_json(path)
+        _validate_trial(record, identity, path)
+        print(f"  skip completed trial: {path.relative_to(path.parents[2])}", flush=True)
+        return record["rows"]
+    rows = []
+    partial_path = path.with_suffix(".partial.json")
+    bridge, config = identity["bridge"], identity["config"]
+    steps = identity["checkpoints"]
+    model = (
+        make_kernel(config, cfg)
+        if bridge == "kernel"
+        else make_neural(config | {"n_steps": max(steps)}, cfg)
+    )
+
+    def record_score(step):
+        score = float(evaluate(model)["mse"])
+        if not np.isfinite(score) or score < 0:
+            raise ValueError(f"Trial {path} must produce finite, nonnegative MSE.")
+        rows.append({"n_steps": step, "mse": score})
+        if bridge == "neural":
+            write_json(partial_path, {"identity": identity, "rows": rows})
+        print(
+            f"  {bridge} fold {identity['inner_fold']} checkpoint {step}: mse {score:.6g}",
+            flush=True,
+        )
+
+    if bridge == "kernel":
+        model.fit(train)
+        record_score(None)
+    else:
+        model.fit(train, steps, record_score)
+    record = {
+        "schema_version": 1,
+        "identity": identity,
+        "rows": rows,
+        "rows_digest": fingerprint_settings({"rows": rows}),
+    }
+    _validate_trial(record, identity, path)
+    write_json(path, record)
+    partial_path.unlink(missing_ok=True)
+    return rows
+
+
+def _validate_trial(record, identity, path):
+    rows = record.get("rows")
+    valid = (
+        record.get("schema_version") == 1
+        and record.get("identity") == identity
+        and isinstance(rows, list)
+        and all(isinstance(row, dict) for row in rows)
+    )
+    if valid:
+        valid = (
+            [row.get("n_steps") for row in rows] == identity["checkpoints"]
+            and all(
+                isinstance(row.get("mse"), int | float)
+                and np.isfinite(row["mse"])
+                and row["mse"] >= 0
+                for row in rows
+            )
+            and record.get("rows_digest") == fingerprint_settings({"rows": rows})
+        )
+    if not valid:
+        raise ValueError(
+            f"Invalid trial checkpoint {path}; restore it or use a fresh output directory."
+        )
