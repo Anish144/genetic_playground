@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 from hydra import compose, initialize_config_dir
+from hydra.errors import ConfigCompositionException
 from omegaconf import OmegaConf
 
 from genetic_perturbation_playground.config import register_configs
@@ -24,7 +25,7 @@ def cfg(**overrides):
     register_configs()
     with initialize_config_dir(str(ROOT / "configs"), version_base=None):
         config = compose("train_rxrx1_transfer", ["name=test", "wandb_mode=disabled"])
-    return OmegaConf.merge(config, overrides)
+    return OmegaConf.merge(config, {"batch_unit": "experiment"}, overrides)
 
 
 @pytest.fixture
@@ -42,6 +43,7 @@ def tiny_rxrx1():
             rows += [(label, batch, batch.split("-")[0], well_type.get(label, "treatment"))] * n
     obs = pd.DataFrame(rows, columns=["perturbation", "batch", "cell_type", "well_type"])
     obs.index = obs.index.astype(str)
+    obs["plate"] = np.tile([1, 2], len(obs) // 2)
     return ad.AnnData(np.vstack(X), obs=obs)
 
 
@@ -58,10 +60,62 @@ def test_all_cell_types_make_each_cell_type_and_sirna_one_perturbation(tiny_rxrx
     }
 
 
-def test_folds_over_all_cell_types_keep_every_cell_type_in_training():
+@pytest.mark.parametrize("unit", ["experiment", "plate"])
+def test_folds_over_all_cell_types_keep_every_cell_type_in_training(unit):
     batches = [f"{c}-{i}" for c, n in [("HUVEC", 6), ("U2OS", 2)] for i in range(n)]
-    folds = mod.experiment_folds(np.array(batches), 2, np.random.default_rng(0), cell_type=None)
-    assert [sorted(b.split("-")[0] for b in f) for f in folds] == [["HUVEC"] * 3 + ["U2OS"]] * 2
+    if unit == "plate":
+        batches = [f"{batch}|plate_{plate}" for batch in batches for plate in [1, 2]]
+    folds = mod.cell_type_folds(np.array(batches), 2, np.random.default_rng(0), cell_type=None)
+    multiplier = 2 if unit == "plate" else 1
+    assert [sorted(b.split("-")[0] for b in f) for f in folds] == [
+        ["HUVEC"] * (3 * multiplier) + ["U2OS"] * multiplier
+    ] * 2
+
+
+def test_plate_batches_are_unique_by_experiment_and_preserve_input(tiny_rxrx1):
+    original = tiny_rxrx1.obs.copy()
+    plates = mod.select_batch_unit(tiny_rxrx1, "plate")
+    assert set(plates.obs["batch"]) == {
+        f"{experiment}|plate_{plate}"
+        for experiment in ["HUVEC-1", "HUVEC-2", "HUVEC-3", "HEPG2-1"]
+        for plate in [1, 2]
+    }
+    assert (plates.obs.groupby("batch").size() == 30).all()
+    assert plates.obs["experiment_batch"].tolist() == original["batch"].tolist()
+    np.testing.assert_array_equal(plates.X, tiny_rxrx1.X)
+    pd.testing.assert_frame_equal(tiny_rxrx1.obs, original)
+    repeated = mod.select_batch_unit(plates, "plate")
+    pd.testing.assert_frame_equal(repeated.obs, plates.obs)
+    experiments = mod.select_batch_unit(plates, "experiment")
+    pd.testing.assert_frame_equal(experiments.obs[original.columns], original)
+
+
+@pytest.mark.parametrize("unit", ["well", None])
+def test_batch_selection_rejects_unknown_units(tiny_rxrx1, unit):
+    with pytest.raises(ValueError, match="batch_unit"):
+        mod.select_batch_unit(tiny_rxrx1, unit)
+
+
+@pytest.mark.parametrize("missing_column", [True, False])
+def test_plate_batches_require_plate_metadata(tiny_rxrx1, missing_column):
+    data = tiny_rxrx1.copy()
+    if missing_column:
+        del data.obs["plate"]
+    else:
+        data.obs["plate"] = data.obs["plate"].astype(float)
+        data.obs.loc[data.obs_names[0], "plate"] = np.nan
+    with pytest.raises(ValueError, match="plate"):
+        mod.select_batch_unit(data, "plate")
+    pd.testing.assert_frame_equal(mod.select_batch_unit(data, "experiment").obs, data.obs)
+
+
+@pytest.mark.parametrize("entrypoint", ["train", "tune"])
+def test_removed_proxy_flag_is_rejected(entrypoint):
+    with (
+        initialize_config_dir(str(ROOT / "configs"), version_base=None),
+        pytest.raises(ConfigCompositionException, match="positive_controls_as_proxies"),
+    ):
+        compose(f"{entrypoint}_rxrx1_transfer", ["name=test", "positive_controls_as_proxies=true"])
 
 
 def test_mse_of_perfect_prediction_is_zero(tiny_rxrx1):
@@ -102,6 +156,174 @@ def test_positive_controls_join_the_proxies(tiny_rxrx1):
     assert set(adata.obs.loc[adata.obs["well_type"] == "treatment", "perturbation"]) == {"s1", "s2"}
 
 
+@pytest.mark.parametrize("cell_type", ["HUVEC", None])
+@pytest.mark.parametrize(
+    "mode,proxy_types,rows_per_batch",
+    [
+        ("negative", {"negative_control"}, 60),
+        ("positive", {"positive_control"}, 30),
+        ("both", {"negative_control", "positive_control"}, 60),
+    ],
+)
+def test_proxy_selection_preserves_treatments_and_input(
+    tiny_rxrx1, cell_type, mode, proxy_types, rows_per_batch
+):
+    data = mod.select_cell_type(tiny_rxrx1, cell_type)
+    original_obs = data.obs.copy()
+    original_X = data.X.copy()
+    selected = mod.select_proxy_controls(data, OmegaConf.create({"proxy_controls": mode}))
+    proxies = selected.obs[mod.is_control(selected)]
+    assert set(proxies["well_type"]) == proxy_types
+    assert (selected.obs.groupby("batch").size() == rows_per_batch).all()
+    treatment_rows = data.obs["well_type"] == "treatment"
+    pd.testing.assert_frame_equal(
+        selected.obs.loc[data.obs_names[treatment_rows]], data.obs[treatment_rows]
+    )
+    np.testing.assert_array_equal(
+        selected[data.obs_names[treatment_rows]].X, data.X[treatment_rows]
+    )
+    if mode == "negative":
+        positive_labels = selected.obs.loc[
+            selected.obs["well_type"] == "positive_control", "perturbation"
+        ]
+        assert set(positive_labels) == ({"p1"} if cell_type else {"HUVEC|p1", "HEPG2|p1"})
+    else:
+        assert set(selected.obs.loc[~mod.is_control(selected), "well_type"]) == {"treatment"}
+    pd.testing.assert_frame_equal(data.obs, original_obs)
+    np.testing.assert_array_equal(data.X, original_X)
+
+
+def test_proxy_selection_defaults_to_positive_only(tiny_rxrx1):
+    selected = mod.select_proxy_controls(tiny_rxrx1, OmegaConf.create({}))
+    assert set(selected.obs.loc[mod.is_control(selected), "well_type"]) == {"positive_control"}
+    assert "negative_control" not in set(selected.obs["well_type"])
+
+
+@pytest.mark.parametrize("mode", ["positve", None])
+def test_proxy_selection_rejects_unknown_mode(tiny_rxrx1, mode):
+    with pytest.raises(ValueError, match="proxy_controls"):
+        mod.select_proxy_controls(tiny_rxrx1, OmegaConf.create({"proxy_controls": mode}))
+
+
+@pytest.mark.parametrize("mode", ["negative", "positive", "both"])
+def test_proxy_selection_rejects_experiments_without_selected_controls(tiny_rxrx1, mode):
+    well_types = ["negative_control", "positive_control"] if mode == "both" else [f"{mode}_control"]
+    remove = (tiny_rxrx1.obs["batch"] == "HUVEC-2") & tiny_rxrx1.obs["well_type"].isin(well_types)
+    with pytest.raises(ValueError, match="HUVEC-2"):
+        mod.select_proxy_controls(tiny_rxrx1[~remove], OmegaConf.create({"proxy_controls": mode}))
+
+
+@pytest.mark.parametrize("entrypoint", ["train", "tune"])
+@pytest.mark.parametrize(
+    "unit,mode",
+    [(unit, mode) for unit in ["experiment", "plate"] for mode in ["negative", "positive", "both"]]
+    + [(None, None)],
+)
+def test_batch_and_proxy_selection_are_used_for_training_and_prediction(
+    tiny_rxrx1, entrypoint, unit, mode
+):
+    overrides = ["name=test", "wandb_mode=disabled", "bridges=[]"]
+    if unit is not None:
+        overrides += [f"batch_unit={unit}", f"proxy_controls={mode}"]
+    with initialize_config_dir(str(ROOT / "configs"), version_base=None):
+        config = compose(f"{entrypoint}_rxrx1_transfer", overrides)
+    config.n_validation_batches = 1
+    if entrypoint == "tune":
+        config.inner_folds = 2
+        config.n_configs = 1
+        config.kernel_grid = {"reg": [1e-3], "lengthscale_scale": [1]}
+        config.neural_grid = {"reg": [1e-3], "weight_decay": [0.0], "psi_size": [2]}
+        config.neural_checkpoints = [1]
+        config.neural.device = "cpu"
+        config.neural.cross_fit_folds = 0
+        config.neural.width_w = 4
+    data = mod.select_cell_type(tiny_rxrx1, "HUVEC")
+    if entrypoint == "train":
+        [scores] = list(mod.cross_validate(data, config))
+    else:
+        [(_, _, scores)] = list(tune.nested_cv(data, config))
+    held_out = scores["batch"].unique().item()
+    if unit in ("plate", None):
+        batches = data.obs["batch"].astype(str) + "|plate_" + data.obs["plate"].astype(str)
+        assert (scores["n_training_batches"] == 5).all()
+    else:
+        batches = data.obs["batch"]
+        assert (scores["n_training_batches"] == 2).all()
+    assert held_out in set(batches)
+    train_rows = (batches != held_out).to_numpy()
+    mode = mode or "positive"
+    proxy_types = (
+        ["negative_control", "positive_control"] if mode == "both" else [f"{mode}_control"]
+    )
+    proxy_rows = data.obs["well_type"].isin(proxy_types).to_numpy()
+    train_control_mean = data.X[train_rows & proxy_rows].mean(0)
+    test_control_mean = data.X[~train_rows & proxy_rows].mean(0)
+    shift_scores = scores[scores["model"] == "shift (b=1)"].set_index("perturbation")
+    assert set(scores["perturbation"]) == {"s1", "s2"}
+    for label in ["s1", "s2"]:
+        response_rows = (data.obs["perturbation"] == label).to_numpy()
+        predicted = (
+            data.X[train_rows & response_rows].mean(0) - train_control_mean + test_control_mean
+        )
+        observed = data.X[~train_rows & response_rows].mean(0)
+        assert shift_scores.loc[label, "value"] == pytest.approx(
+            np.mean((predicted - observed) ** 2)
+        )
+
+
+@pytest.mark.parametrize("entrypoint", ["train", "tune"])
+def test_plate_batches_check_proxies_per_plate(tiny_rxrx1, entrypoint):
+    remove = (
+        (tiny_rxrx1.obs["batch"] == "HUVEC-2")
+        & (tiny_rxrx1.obs["plate"] == 1)
+        & (tiny_rxrx1.obs["well_type"] == "positive_control")
+    )
+    with initialize_config_dir(str(ROOT / "configs"), version_base=None):
+        config = compose(f"{entrypoint}_rxrx1_transfer", ["name=test", "wandb_mode=disabled"])
+    run = mod.cross_validate if entrypoint == "train" else tune.nested_cv
+    with pytest.raises(ValueError, match=r"HUVEC-2\|plate_1"):
+        next(run(tiny_rxrx1[~remove], config))
+
+
+@pytest.fixture
+def disjoint_plate_treatments(tiny_rxrx1):
+    obs = tiny_rxrx1.obs
+    remove = ((obs["perturbation"] == "s1") & (obs["plate"] == 2)) | (
+        (obs["perturbation"] == "s2") & (obs["plate"] == 1)
+    )
+    return mod.select_cell_type(tiny_rxrx1[~remove], "HUVEC")
+
+
+@pytest.mark.parametrize("entrypoint", ["train", "tune"])
+def test_outer_plate_splits_reject_unseen_treatments_before_fitting(
+    disjoint_plate_treatments, entrypoint, monkeypatch
+):
+    def unexpected_fit(*args, **kwargs):
+        pytest.fail("Unevaluable batches must be rejected before fitting")
+
+    monkeypatch.setattr(mod, "fit_models", unexpected_fit)
+    monkeypatch.setattr(tune.tuning, "tune", unexpected_fit)
+    data = disjoint_plate_treatments
+    data = data[data.obs["batch"] == "HUVEC-1"]
+    with initialize_config_dir(str(ROOT / "configs"), version_base=None):
+        config = compose(f"{entrypoint}_rxrx1_transfer", ["name=test", "n_validation_batches=1"])
+    run = mod.cross_validate if entrypoint == "train" else tune.nested_cv
+    with pytest.raises(ValueError, match=r"No treatment.*HUVEC-1\|plate_"):
+        next(run(data, config))
+
+
+def test_inner_plate_splits_reject_unseen_treatments(disjoint_plate_treatments):
+    config = OmegaConf.create(
+        {"cell_type": "HUVEC", "inner_folds": 2, "proxy_controls": "positive"}
+    )
+    data = mod.select_proxy_controls(
+        mod.select_batch_unit(disjoint_plate_treatments, "plate"), config
+    )
+    train_batches = np.setdiff1d(mod.batch_labels(data), "HUVEC-2|plate_1")
+    with pytest.raises(ValueError, match=r"No treatment.*plate_2"):
+        list(tune.inner_folds(data, train_batches, config, seed=3))
+
+
 @pytest.mark.parametrize("n", [1, 2, 3])
 def test_cross_validate_trains_on_all_other_experiments(tiny_rxrx1, monkeypatch, n):
     huvec = mod.select_cell_type(tiny_rxrx1, "HUVEC")
@@ -115,9 +337,7 @@ def test_cross_validate_trains_on_all_other_experiments(tiny_rxrx1, monkeypatch,
 
     monkeypatch.setattr(mod, "fit_models", record_fit)
     folds = list(
-        mod.cross_validate(
-            huvec, cfg(n_validation_batches=n, bridges=[], positive_controls_as_proxies=True)
-        )
+        mod.cross_validate(huvec, cfg(n_validation_batches=n, bridges=[], proxy_controls="both"))
     )
     assert len(folds) == len(training_batches) == n
     held_out = [scores["batch"].unique().item() for scores in folds]
@@ -143,7 +363,9 @@ def test_cross_validate_fits_the_neural_bridge(tiny_rxrx1):
 
 def test_nested_cv_tunes_on_inner_validation_and_scores_the_outer_folds(tiny_rxrx1):
     with initialize_config_dir(str(ROOT / "configs"), version_base=None):
-        config = compose("tune_rxrx1_transfer", ["name=test", "wandb_mode=disabled"])
+        config = compose(
+            "tune_rxrx1_transfer", ["name=test", "wandb_mode=disabled", "batch_unit=experiment"]
+        )
     config = OmegaConf.merge(
         config,
         {

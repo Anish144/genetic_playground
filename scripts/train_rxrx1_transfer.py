@@ -1,27 +1,29 @@
-"""Train and evaluate transfer models on held-out RxRx1 experiments.
+"""Train and evaluate transfer models on held-out RxRx1 batches.
 
 - Data: data/rxrx1_phenom_4x4.h5ad (scripts/embed_rxrx1.py), crops of cfg.cell_type only.
-- Batch = experiment; treatment = siRNA; proxy W = the experiment's negative-control crops, plus
-  its positive-control crops if cfg.positive_controls_as_proxies.
+- Batch = plate within experiment (default), or experiment, selected by cfg.batch_unit.
+- Treatment = siRNA; proxy W = the batch's positive-control crops (default), negative-control
+  crops, or both, selected by cfg.proxy_controls.
 - Models: the linear ones and the bridges of train_replogle_transfer, with scaled inputs
-  and unscaled targets; a held-out experiment is predicted from its proxy crops alone.
-- Validation: select n_validation_batches distinct experiments without replacement using seed.
-  Hold out each one separately and fit each model on every other experiment, for
-  n_validation_batches fits per model. Scores per (treatment siRNA, held-out experiment), on means:
+  and unscaled targets; a held-out batch is predicted from its proxy crops alone.
+- Validation: select n_validation_batches distinct batches without replacement using seed.
+  Hold out each one separately and fit each model on every other batch, for
+  n_validation_batches fits per model. Scores per (treatment siRNA, held-out batch), on means:
   mse      squared error in Phenom coordinates
 
 Config: configs/train_rxrx1_transfer.yaml. Usage:
 
     uv run python scripts/train_rxrx1_transfer.py name=huvec 'bridges=[kernel]'
     uv run python scripts/train_rxrx1_transfer.py name=hybrid neural=hybrid
+    uv run python scripts/train_rxrx1_transfer.py name=experiments batch_unit=experiment
     sbatch -J huvec hpc/run.sbatch scripts/train_rxrx1_transfer.py name=huvec
 
 Prints each validation run's mean per (metric, model) as it finishes. In the Hydra run dir,
-scores.csv is rewritten after each run and summary.csv averages over the selected experiments.
-The existing "fold" column and W&B keys identify the leave-one-experiment-out runs.
-Scores include n_training_batches, counting training experiments containing each siRNA.
+scores.csv is rewritten after each run and summary.csv averages over the selected batches.
+The existing "fold" column and W&B keys identify the leave-one-batch-out runs.
+Scores include n_training_batches, counting training batches containing each siRNA.
 plots/by_training_batches/batch_<label>/ contains a separate scatter plot per metric and
-per_perturbation.csv for each held-out experiment, using that experiment's scores directly.
+per_perturbation.csv for each held-out batch, using that batch's scores directly.
 """
 
 import time
@@ -69,9 +71,30 @@ def select_cell_type(adata: sc.AnnData, cell_type: str | None) -> sc.AnnData:
     return adata[keep]
 
 
-def experiment_folds(batches: np.ndarray, n_folds: int, rng, cell_type: str | None) -> list:
-    """Inner tuning folds over experiments. Over all cell types (cell_type None), each cell type's
-    experiments, named <cell type>-<nn>, are dealt round the folds so every fold trains on each."""
+def select_batch_unit(adata: sc.AnnData, unit: str) -> sc.AnnData:
+    """Use experiments or (experiment, plate) pairs as batches without changing the input.
+
+    Embeddings store the experiment in batch. Preserve it as experiment_batch when relabelling
+    so repeated calls do not append plate suffixes and experiment batches can be restored.
+    """
+    if unit not in ("experiment", "plate"):
+        raise ValueError("batch_unit must be 'experiment' or 'plate'")
+    if unit == "experiment" and "experiment_batch" not in adata.obs:
+        return adata
+    if unit == "plate" and ("plate" not in adata.obs or adata.obs["plate"].isna().any()):
+        raise ValueError("batch_unit=plate requires non-missing obs['plate'] for every crop")
+    adata = adata.copy()
+    experiment = adata.obs.get("experiment_batch", adata.obs["batch"]).astype(str)
+    adata.obs["experiment_batch"] = experiment
+    adata.obs["batch"] = (
+        experiment + "|plate_" + adata.obs["plate"].astype(str) if unit == "plate" else experiment
+    )
+    return adata
+
+
+def cell_type_folds(batches: np.ndarray, n_folds: int, rng, cell_type: str | None) -> list:
+    """Inner tuning folds over batches. When pooling cell types, deal each type's batches
+    round the folds. Experiment and plate labels both start with <cell type>-<nn>."""
     if cell_type is not None:
         return batch_folds(batches, n_folds, rng)
     dealt = sorted(rng.permutation(np.unique(batches)), key=lambda b: b.split("-")[0])
@@ -86,8 +109,43 @@ def add_positive_controls_to_proxies(adata: sc.AnnData) -> sc.AnnData:
     return adata
 
 
+def select_proxy_controls(adata: sc.AnnData, cfg: DictConfig) -> sc.AnnData:
+    """Choose negative, positive or both control types without changing the input.
+
+    In positive-only mode negative controls are excluded; in negative-only mode positive
+    controls retain their siRNA labels as training perturbations.
+    """
+    mode = cfg.get("proxy_controls", "positive")
+    if mode not in ("negative", "positive", "both"):
+        raise ValueError("proxy_controls must be 'negative', 'positive' or 'both'")
+    negative, positive = _wells(adata, "negative_control"), _wells(adata, "positive_control")
+    proxies = {"negative": negative, "positive": positive, "both": negative | positive}[mode]
+    batch = batch_labels(adata)
+    missing = np.setdiff1d(batch, batch[proxies])
+    if len(missing):
+        raise ValueError(f"No {mode} proxy controls in batches: {', '.join(missing)}")
+    if mode == "negative":
+        return adata
+    if mode == "positive":
+        adata = adata[~negative]
+    return add_positive_controls_to_proxies(adata)
+
+
+def validate_treatment_overlap(train: sc.AnnData, val: sc.AnnData) -> None:
+    """Require at least one treatment with a training label in every validation batch."""
+    known = np.unique(perturbation_labels(train))
+    scorable = _wells(val, "treatment") & np.isin(perturbation_labels(val), known)
+    batch = batch_labels(val)
+    missing = np.setdiff1d(batch, batch[scorable])
+    if len(missing):
+        raise ValueError(
+            f"No treatment siRNAs shared with training for validation batches: {', '.join(missing)}. "
+            "Use more training batches or different validation splits (seed/inner_folds)."
+        )
+
+
 def score_batch(models: dict, test: sc.AnnData) -> pd.DataFrame:
-    """Scores of each model on one held-out experiment: (perturbation, metric, model, value)."""
+    """Scores of each model on one held-out batch: (perturbation, metric, model, value)."""
     labels = perturbation_labels(test)
     present = np.unique(labels[_wells(test, "treatment")])
     perts = np.intersect1d(present, next(iter(models.values())).perturbations_)
@@ -119,19 +177,20 @@ def _long(perts: np.ndarray, model: str, metric: str, values: np.ndarray) -> pd.
 
 
 def cross_validate(adata: sc.AnnData, cfg: DictConfig) -> Iterator[pd.DataFrame]:
-    """Hold out n_validation_batches distinct experiments one at a time, selected using cfg.seed.
+    """Hold out n_validation_batches distinct batches one at a time, selected using cfg.seed.
 
-    Each model is fit on every other experiment, including those held out in other runs.
+    Each model is fit on every other batch, including those held out in other runs.
     Yield each run's scores immediately; "fold" is the zero-based run index.
     """
-    if cfg.positive_controls_as_proxies:
-        adata = add_positive_controls_to_proxies(adata)
+    adata = select_batch_unit(adata, cfg.batch_unit)
+    adata = select_proxy_controls(adata, cfg)
     print(f"proxy crops: {is_control(adata).sum():,} of {adata.n_obs:,}", flush=True)
     batch = batch_labels(adata)
     selected = validation_batches(batch, cfg.n_validation_batches, np.random.default_rng(cfg.seed))
     for i, held_out in enumerate(selected):
         print(f"validation {i + 1}/{len(selected)}: holding out {held_out}", flush=True)
         train = adata[batch != held_out]
+        validate_treatment_overlap(train, adata[batch == held_out])
         fold_cfg = OmegaConf.merge(cfg, {"neural": {"log_key": f"fold {i + 1}/neural bridge"}})
         start = time.perf_counter()
         models = fit_models(train, fold_cfg)
@@ -142,7 +201,7 @@ def cross_validate(adata: sc.AnnData, cfg: DictConfig) -> Iterator[pd.DataFrame]
 
 
 def summary(scores: pd.DataFrame) -> pd.DataFrame:
-    """Mean per (model, metric): siRNAs averaged within each experiment, then experiments."""
+    """Mean per (model, metric): siRNAs averaged within each batch, then batches."""
     per_batch = scores.groupby(["metric", "model", "batch"])["value"].mean()
     return per_batch.groupby(["metric", "model"]).mean().unstack("metric")
 

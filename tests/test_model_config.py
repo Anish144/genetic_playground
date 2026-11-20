@@ -275,6 +275,8 @@ def test_transfer_entry_points_run_each_neural_group(cells, monkeypatch, dataset
     )
     if dataset == "rxrx1":
         config.wandb_mode = "disabled"
+        config.batch_unit = "experiment"
+        config.proxy_controls = "negative"
     else:
         config.top_k = 2
     if action == "train":

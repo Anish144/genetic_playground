@@ -2,7 +2,7 @@ defaults:  # validation batches, cell type, proxies, scoring and neural settings
   - train_rxrx1_transfer
   - _self_
 
-inner_folds: 3       # K-fold over each outer fold's training experiments; settings picked by mean mse
+inner_folds: 3       # K-fold over each outer fold's training batches; settings picked by mean mse
 n_configs: 20        # per bridge, drawn at random from its grid (the same draw in every outer fold)
 # Inputs use training-control statistics; embedding targets stay unscaled.
 kernel_grid:         # 36 configurations

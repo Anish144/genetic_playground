@@ -1,12 +1,13 @@
 """Nested cross-validation tuning of the kernel and neural bridges on RxRx1, one cell type.
 
-Select n_validation_batches distinct outer experiments using seed, as in train_rxrx1_transfer.
-Each is held out separately; all remaining experiments are split into inner_folds folds for tuning.
-The outer experiment never enters tuning. n_configs configurations per bridge, drawn from its grid
+Select n_validation_batches distinct outer batches using seed, as in train_rxrx1_transfer.
+Batch = plate within experiment (default) or experiment, selected by cfg.batch_unit.
+Each is held out separately; all remaining batches are split into inner_folds folds for tuning.
+The outer batch never enters tuning. n_configs configurations per bridge, drawn from its grid
 (the same draw in every outer fold), are fit on the other inner folds and scored on the held-out
 one; each neural configuration is trained once per inner fold to the last of neural_checkpoints
 and scored at each. The configuration with the lowest validation mse averaged over the inner
-folds is refit on all training experiments and scored on the outer fold, next to the linear
+folds is refit on all training batches and scored on the outer fold, next to the linear
 models. shift (b=1) is scored on the inner folds too, as a reference only.
 n_validation_batches counts outer evaluations; inner tuning fits and final refits are additional.
 W&B: one run per job, named name. Per outer fold k: the selected settings (fold k/selected/...),
@@ -18,13 +19,13 @@ outer scores (fold k/<model>/<metric>); at the end, the means over all folds
 Config: configs/tune_rxrx1_transfer.yaml. Usage:
 
     sbatch -J tune_huvec --time=24:00:00 hpc/run.sbatch scripts/tune_rxrx1_transfer.py \
-        name=tune_huvec positive_controls_as_proxies=true
+        name=tune_huvec batch_unit=plate proxy_controls=positive
 
 Writes inner_scores.csv (every configuration on every inner fold), selected.csv (winner per fold
 and bridge) and scores.csv (outer scores) after every fold, and summary.csv at the end, to the
 Hydra run dir. Scores include n_training_batches from the outer refit. The folder
 plots/by_training_batches/batch_<label>/ contains a separate scatter plot per metric and
-per_perturbation.csv for each held-out experiment, using that experiment's scores directly.
+per_perturbation.csv for each held-out batch, using that batch's scores directly.
 """
 
 from collections.abc import Iterator
@@ -40,12 +41,14 @@ from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf
 from train_replogle_transfer import _fit_linear
 from train_rxrx1_transfer import (
-    add_positive_controls_to_proxies,
-    experiment_folds,
+    cell_type_folds,
     log_summary,
     score_batches,
+    select_batch_unit,
     select_cell_type,
+    select_proxy_controls,
     summary,
+    validate_treatment_overlap,
 )
 
 from genetic_perturbation_playground import tuning
@@ -61,7 +64,7 @@ register_configs()
 
 
 def validation_scores(model, val: sc.AnnData) -> dict:
-    """mse of `model` on `val`: siRNAs averaged within each experiment, then experiments."""
+    """mse of `model` on `val`: siRNAs averaged within each batch, then batches."""
     scores = score_batches({"bridge": model}, val, np.unique(batch_labels(val)))
     return summary(scores).loc["bridge"].to_dict()
 
@@ -71,9 +74,11 @@ def inner_folds(adata: sc.AnnData, train_batches: np.ndarray, cfg: DictConfig, s
     other folds."""
     batch = batch_labels(adata)
     rng = np.random.default_rng(seed)
-    for val_batches in experiment_folds(train_batches, cfg.inner_folds, rng, cfg.cell_type):
+    for val_batches in cell_type_folds(train_batches, cfg.inner_folds, rng, cfg.cell_type):
         train = adata[np.isin(batch, np.setdiff1d(train_batches, val_batches))]
-        yield train, partial(validation_scores, val=adata[np.isin(batch, val_batches)])
+        val = adata[np.isin(batch, val_batches)]
+        validate_treatment_overlap(train, val)
+        yield train, partial(validation_scores, val=val)
 
 
 def log_selected(fold: int, selected: dict) -> None:
@@ -85,14 +90,14 @@ def log_selected(fold: int, selected: dict) -> None:
 
 
 def nested_cv(adata: sc.AnnData, cfg: DictConfig) -> Iterator[tuple]:
-    """Tune on all but one experiment and evaluate on that experiment, n_validation_batches times.
+    """Tune on all but one batch and evaluate on that batch, n_validation_batches times.
 
-    Select distinct outer experiments using cfg.seed. Inner tuning retains cfg.inner_folds
-    K-fold splits of the remaining experiments. Yield (inner scores, settings, outer scores)
+    Select distinct outer batches using cfg.seed. Inner tuning retains cfg.inner_folds
+    K-fold splits of the remaining batches. Yield (inner scores, settings, outer scores)
     after each run; "fold" is the zero-based outer run index.
     """
-    if cfg.positive_controls_as_proxies:
-        adata = add_positive_controls_to_proxies(adata)
+    adata = select_batch_unit(adata, cfg.batch_unit)
+    adata = select_proxy_controls(adata, cfg)
     batch = batch_labels(adata)
     selected_batches = tuning.validation_batches(
         batch, cfg.n_validation_batches, np.random.default_rng(cfg.seed)
@@ -103,12 +108,13 @@ def nested_cv(adata: sc.AnnData, cfg: DictConfig) -> Iterator[tuple]:
             flush=True,
         )
         train_batches = np.setdiff1d(np.unique(batch), held_out)
+        train = adata[np.isin(batch, train_batches)]
+        validate_treatment_overlap(train, adata[batch == held_out])
         inner, selected, winners = tuning.tune(
             inner_folds(adata, train_batches, cfg, [cfg.seed, i]), cfg
         )
         log_selected(i + 1, selected)
         log_summary(f"fold {i + 1}/validation", winners)
-        train = adata[np.isin(batch, train_batches)]
         models = _fit_linear(train, resolve_model_config(cfg, "linear"))
         models |= tuning.fit_selected(train, selected, cfg, f"fold {i + 1}/neural bridge")
         scores = score_batches(models, adata, [held_out]).assign(fold=i)

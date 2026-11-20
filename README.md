@@ -32,9 +32,9 @@ The current pipeline keeps all 8,563 retained genes. Older runs used 5,000 highl
 
 RxRx1 contains 125,510 microscopy sites, each with six 512 × 512, 8-bit channels stored as separate PNGs. There are two sites per well. These are images of cell populations; the pipeline does not segment or count individual cells. See the [dataset documentation](https://github.com/recursionpharma/rxrx-datasets/blob/trunk/rxrx1/README.md).
 
-A **batch is one experiment**, such as `HUVEC-01`. Each experiment contains one cell type and four 384-well plates, with 308 usable wells per plate. Plates, sites and crops stay within their experiment when splitting data. There are **51 batches**: 24 HUVEC, 11 HEPG2, 11 RPE and 5 U2OS. The design has **1,108 treatment siRNAs**, **30 positive-control siRNAs**, and untreated negative controls (`EMPTY`). Each treatment appears once per experiment; each positive control appears on every plate. Some intended treatments are missing or relabelled `EMPTY`. See the [RxRx1 paper](https://arxiv.org/html/2301.05768v1#S2).
+A **batch is one plate within an experiment** by default (`batch_unit=plate`), labelled for example `HUVEC-01|plate_1`. With `batch_unit=experiment`, all plates in an experiment form one batch, such as `HUVEC-01`. The choice controls proxy pools, response means, validation splits and training-batch counts in both training and tuning. Plate validation can train on other plates from the same experiment; experiment validation holds out all its plates together. All sites and crops from a plate stay together. Each experiment contains one cell type and four 384-well plates, with 308 usable wells per plate. There are **51 experiments**: 24 HUVEC, 11 HEPG2, 11 RPE and 5 U2OS. The design has **1,108 treatment siRNAs**, **30 positive-control siRNAs**, and untreated negative controls (`EMPTY`). Each treatment appears once per experiment; each positive control appears on every plate. Some intended treatments are missing or relabelled `EMPTY`. See the [RxRx1 paper](https://arxiv.org/html/2301.05768v1#S2).
 
-A perturbation is the **(cell type, siRNA) tuple**. With `cell_type=null`, the code labels it `<cell_type>|<siRNA>`. The full design gives 4,432 treatment tuples and 120 positive-control tuples. With the default `cell_type=HUVEC`, cell type is fixed and labels contain only the siRNA. Negative controls share the label `control`, but their proxy distributions remain separate by batch.
+A perturbation is the **(cell type, siRNA) tuple**. With `cell_type=null`, the code labels it `<cell_type>|<siRNA>`. The full design gives 4,432 treatment tuples and 120 positive-control tuples. With the default `cell_type=HUVEC`, cell type is fixed and labels contain only the siRNA. Selected proxies share the label `control`, but their distributions remain separate by batch.
 
 Preprocessing in `scripts/embed_rxrx1.py` is:
 
@@ -266,7 +266,15 @@ $$
 
 Subtracting the same control vector from prediction and truth leaves MSE unchanged, so model MSE also equals mean-expression MSE. Pearson correlations and top-gene selection depend on the differential-expression vectors.
 
-RxRx1 uses all negative-control crops as proxies, with no half split. Positive controls are training perturbations by default but are never scored. `positive_controls_as_proxies=true` moves them into the proxy pool instead. Only treatment wells are evaluated. Each response mean averages all crops for that perturbation in that experiment.
+RxRx1 selects proxies with `proxy_controls=negative|positive|both` in both training and tuning, with no half split. The selection applies to training, inner-validation and held-out batches:
+
+- `proxy_controls=negative`: only negative-control crops are proxies. Positive controls remain training perturbations.
+- `proxy_controls=positive` (default): only positive-control crops are proxies. Negative-control crops are excluded from the model data.
+- `proxy_controls=both`: negative- and positive-control crops are pooled as proxies.
+
+Only treatment wells are evaluated; positive controls are never scored. Each response mean averages all crops for that perturbation in that batch. Batches without any selected proxy controls are rejected. Both scripts default to `batch_unit=plate proxy_controls=positive`; use `batch_unit=experiment proxy_controls=negative` for experiment batches with negative-only proxies. Existing embeddings already contain plate metadata, so switching batch units does not require embedding again.
+
+Every validation batch must contain at least one treatment also present in its training split. Outer and inner splits that violate this are rejected before fitting that split, with the affected batch IDs; use more training batches or adjust the validation seed/folds.
 
 **Aggregation:** first compute one metric across features for each observed perturbation–batch pair. Then take arithmetic means, without cell/crop weighting:
 
@@ -275,7 +283,7 @@ RxRx1 uses all negative-control crops as proxies, with no half split. Positive c
 
 Cell counts in score tables describe coverage; they do not weight evaluation averages. `n_training_batches` counts training batches containing each perturbation and is used in coverage plots. Undefined Pearson values are NaN and are skipped by pandas averages.
 
-**Tuning:** nested cross-validation keeps the outer batch out of tuning. Split the remaining batches into three inner folds. Randomly sample bridge settings from the YAML grids and score neural training checkpoints. Select the lowest mean inner MSE: average over perturbations within each batch, then batches within an inner fold, then inner folds equally. Refit on all outer-training batches. The same candidate draw is reused across outer evaluations. When pooling RxRx1 cell types, inner folds distribute experiments by cell type. These inner folds are separate from neural cross-fitting.
+**Tuning:** nested cross-validation keeps the outer batch out of tuning. Split the remaining batches into three inner folds. Randomly sample bridge settings from the YAML grids and score neural training checkpoints. Select the lowest mean inner MSE: average over perturbations within each batch, then batches within an inner fold, then inner folds equally. Refit on all outer-training batches. The same candidate draw is reused across outer evaluations. When pooling RxRx1 cell types, inner folds distribute batches by cell type. These inner folds are separate from neural cross-fitting.
 
 # Paths and how to run the experiments
 
@@ -333,6 +341,7 @@ The embedding script downloads OpenPhenom code and weights into `data/OpenPhenom
 uv run python scripts/embed_rxrx1.py grid=4
 uv run python scripts/train_rxrx1_transfer.py name=huvec wandb_mode=disabled
 uv run python scripts/train_rxrx1_transfer.py name=huvec_hybrid neural=hybrid wandb_mode=disabled
+uv run python scripts/train_rxrx1_transfer.py name=huvec_experiment batch_unit=experiment proxy_controls=negative wandb_mode=disabled
 uv run python scripts/tune_rxrx1_transfer.py name=all_types_tuned cell_type=null wandb_mode=disabled
 ```
 
