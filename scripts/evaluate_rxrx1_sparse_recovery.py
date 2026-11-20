@@ -10,6 +10,10 @@ the eight sampled configurations per bridge are reused across seeds/k, while
 fitting, validation and selection are repeated for each seed/k. Completed
 trials and seeds are reused from the stable output directory. An interrupted
 neural trial restarts; its optimizer state is not saved.
+
+Use bridges=[neural] to omit the kernel and include_linear=true to add the
+pooled, shift and fitted-slope models. Select one neural variant per run with
+neural=per_x, neural=shared_2nn or neural=hybrid, using distinct output names.
 """
 
 import subprocess
@@ -22,10 +26,11 @@ import pandas as pd
 import wandb
 from hydra.utils import to_absolute_path
 from omegaconf import DictConfig, OmegaConf
+from train_replogle_transfer import MODELS, _fit_linear
 from train_rxrx1_transfer import select_batch_unit, select_cell_type, select_proxy_controls
 
 from genetic_perturbation_playground import tuning
-from genetic_perturbation_playground.config import register_configs
+from genetic_perturbation_playground.config import register_configs, resolve_model_config
 from genetic_perturbation_playground.data.rxrx1 import load_rxrx1, rxrx1_path
 from genetic_perturbation_playground.data.transfer import is_control
 from genetic_perturbation_playground.experiments import checkpoints as state
@@ -80,8 +85,9 @@ def _validate_config(cfg):
         raise ValueError(
             "cell_type must name a single cell type; pooled cell_type=null is unsupported."
         )
-    if list(cfg.bridges) != ["kernel", "neural"]:
-        raise ValueError("This experiment tunes both bridges; use bridges=[kernel,neural].")
+    bridges = list(cfg.bridges)
+    if not bridges or len(set(bridges)) != len(bridges) or not set(bridges) <= {"kernel", "neural"}:
+        raise ValueError("bridges must be a nonempty, distinct subset of [kernel,neural].")
     ks = list(cfg.k_values)
     if (
         not ks
@@ -193,9 +199,10 @@ def _print_workload(cfg, candidates):
     folds = cfg.n_seeds * sum(cfg.k_values)
     trials = {bridge: folds * len(configs) for bridge, configs in candidates.items()}
     print(
-        f"Planned workload: {trials['kernel']} kernel tuning fits, {trials['neural']} neural tuning runs, "
+        f"Planned workload: {trials.get('kernel', 0)} kernel tuning fits, {trials.get('neural', 0)} neural tuning runs, "
         f"{cfg.n_seeds * len(cfg.k_values)} final refits per bridge; "
-        f"{trials['neural'] * max(cfg.neural_checkpoints)} neural tuning updates. "
+        f"{trials.get('neural', 0) * max(cfg.neural_checkpoints)} neural tuning updates. "
+        f"{cfg.n_seeds * len(cfg.k_values) * len(MODELS) if cfg.include_linear else 0} linear fits. "
         "Completed work will be skipped.",
         flush=True,
     )
@@ -215,7 +222,8 @@ def run_experiment(
     data : anndata.AnnData
         Unmasked RxRx1 embeddings and original metadata. Input is not mutated.
     cfg : omegaconf.DictConfig
-        Experiment preset, including the base seed and requested seed count.
+        Experiment preset, including the base seed, requested seed count,
+        bridge subset and optional inclusion of the three linear models.
     output_dir : pathlib.Path
         Persistent result directory; one writer is permitted at a time.
     input_fingerprint : str
@@ -320,6 +328,9 @@ def _run_pair(data, pairs, coverage, order, cfg, candidates, directory, k, run_i
     )
     train = recovery.retained_data(data, order, k)
     models = tuning.fit_selected(train, selected, cfg, f"seed {cfg.seed}/k {k}/neural bridge")
+    estimates = {f"{bridge}_virtual": models[f"{bridge} bridge (tuned)"] for bridge in cfg.bridges}
+    if cfg.include_linear:
+        estimates.update(_fit_linear(train, resolve_model_config(cfg, "linear")))
     eligible = coverage[(coverage.k == k) & coverage.eligible]
     labels = eligible.perturbation.tolist()
     reference = pairs[pairs.perturbation.isin(labels)]
@@ -327,10 +338,8 @@ def _run_pair(data, pairs, coverage, order, cfg, candidates, directory, k, run_i
     full = recovery.observed_average(data, labels)
     retained = recovery.observed_average(train, labels)
     virtual = {
-        f"{bridge}_virtual": recovery.virtual_average(
-            models[f"{bridge} bridge (tuned)"], controls, reference
-        ).loc[labels]
-        for bridge in ("kernel", "neural")
+        name: recovery.virtual_average(model, controls, reference).loc[labels]
+        for name, model in estimates.items()
     }
     scores = recovery.score_estimates(full, retained, virtual, eligible, seed=cfg.seed, k=k)
     per_seed, _ = recovery.summarize_scores(scores)

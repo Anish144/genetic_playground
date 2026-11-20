@@ -258,7 +258,9 @@ def test_config_subsamples_without_changing_existing_tuning_defaults():
     "override",
     [
         {"cell_type": None},
-        {"bridges": ["kernel"]},
+        {"bridges": []},
+        {"bridges": ["unknown"]},
+        {"bridges": ["neural", "neural"]},
         {"k_values": [2, 2]},
         {"k_values": [1]},
         {"k_values": []},
@@ -285,6 +287,39 @@ def test_runner_rejects_empty_requested_cohort_before_fitting(
     monkeypatch.setattr(tuning, "make_kernel", lambda *args: pytest.fail("fitted an empty cohort"))
     with pytest.raises(ValueError, match="eligible|coverage"):
         run(runner, data, runner_config(k_values=[2, 3, 4]), tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("bridge", "variant"),
+    [("neural", "per_x"), ("neural", "shared_2nn"), ("neural", "hybrid"), ("kernel", "per_x")],
+)
+def test_single_bridge_with_linear_models_completes_and_resumes(
+    runner, recovery_data, tmp_path, monkeypatch, bridge, variant
+):
+    cfg = runner_config(variant=variant, bridges=[bridge], include_linear=True)
+    omitted = "kernel" if bridge == "neural" else "neural"
+    monkeypatch.setattr(
+        tuning, f"make_{omitted}", lambda *args: pytest.fail("fitted omitted bridge")
+    )
+    expected = run(runner, recovery_data, cfg, tmp_path)
+    assert set(expected.model) == {
+        "retained_mean",
+        f"{bridge}_virtual",
+        "pooled (b=0)",
+        "shift (b=1)",
+        "transfer (fit b)",
+    }
+    assert np.isfinite(expected.value).all()
+    assert set(read_json(tmp_path / "manifest.json")["identity"]["candidates"]) == {bridge}
+    assert set(read_json(tmp_path / "seeds/seed_0/k_2/selected.json")["selected"]) == {bridge}
+    assert (tmp_path / "seeds/seed_0/complete.json").exists()
+    monkeypatch.setattr(
+        tuning, f"make_{bridge}", lambda *args: pytest.fail("refitted completed seed")
+    )
+    monkeypatch.setattr(
+        runner, "_fit_linear", lambda *args: pytest.fail("refitted completed linear models")
+    )
+    pd.testing.assert_frame_equal(run(runner, recovery_data, cfg, tmp_path), expected)
 
 
 @pytest.mark.parametrize("grid", ["neural_grid", "neural_variant_grids.hybrid"])
@@ -421,7 +456,7 @@ def test_completed_seed_resume_and_extension(runner, recovery_data, tmp_path, mo
 def test_poisoned_removed_outcomes_do_not_change_selection_or_predictions(
     runner, sparse, recovery_data, tmp_path
 ):
-    cfg = runner_config()
+    cfg = runner_config(include_linear=True)
     original = tmp_path / "original"
     altered = tmp_path / "altered"
     run(runner, recovery_data, cfg, original)
@@ -433,7 +468,14 @@ def test_poisoned_removed_outcomes_do_not_change_selection_or_predictions(
     left, right = original / "seeds/seed_0/k_2", altered / "seeds/seed_0/k_2"
     assert read_json(left / "selected.json") == read_json(right / "selected.json")
     with np.load(left / "estimates.npz") as a, np.load(right / "estimates.npz") as b:
-        for key in ["retained_mean", "kernel_virtual", "neural_virtual"]:
+        for key in [
+            "retained_mean",
+            "kernel_virtual",
+            "neural_virtual",
+            "pooled (b=0)",
+            "shift (b=1)",
+            "transfer (fit b)",
+        ]:
             np.testing.assert_allclose(a[key], b[key], rtol=0, atol=0)
         assert not np.allclose(a["full_mean"], b["full_mean"])
 

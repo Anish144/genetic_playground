@@ -261,6 +261,20 @@ uv run python scripts/evaluate_rxrx1_sparse_recovery.py name=huvec_sparse n_seed
 # Repeat the identical command to resume. Increase n_seeds to append new seeds.
 ```
 
+To omit the kernel, use `bridges=[neural]`. Add `include_linear=true` to fit the existing pooled (`b=0`), shift (`b=1`) and fitted-slope linear models on retained responses and average their predictions over the same original reference batches. The fitted-slope model uses the configured `linear.reg` (default `1e-3`); this baseline penalty is fixed, not tuned.
+
+Run the shared and hybrid neural variants with **10 sampled configurations per variant** and the linear comparisons:
+
+```bash
+for variant in shared_2nn hybrid; do
+  uv run python scripts/evaluate_rxrx1_sparse_recovery.py \
+    name="huvec_sparse_${variant}" neural="$variant" \
+    'bridges=[neural]' include_linear=true n_configs=10
+done
+```
+
+Each variant has its own resumable result directory and the same retained-batch draws. Each schedules 900 neural tuning runs, 30 neural final refits and 90 linear fits for 10 seeds and k=2/3/4. Linear comparisons are repeated in each variant's output. Changing the model set or tuning budget requires a fresh name/output directory.
+
 Results live in the stable folder `outputs/rxrx1_sparse_recovery/huvec_sparse/`; override `output_dir` to choose another location. Invocation logs have timestamped subfolders. The runner saves each completed candidate/fold trial, partial neural scores at every scoring checkpoint, each completed seed/k result, and each completed seed. Resume skips completed trials and stages; an interrupted neural trial restarts from the beginning. An interrupted final refit reuses completed tuning. There is no optimizer-state checkpoint. A lock prevents concurrent writers, and content hashes reject changed inputs, relevant source dependencies or scientific settings. `resume=false` rejects existing results. Reducing `n_seeds` preserves earlier completed results in the combined tables.
 
 The hybrid's documented `linear_reg=inf` setting is supported in grids and configuration. Saved settings encode it as `{"__float__":"+inf"}`; use `genetic_perturbation_playground.experiments.checkpoints.decode_settings` after reading JSON to restore it. Scores must always be finite. The experiment seed controls both retention and neural initialization; independent `neural.seed` values and `seed` entries in the active neural grid are rejected.

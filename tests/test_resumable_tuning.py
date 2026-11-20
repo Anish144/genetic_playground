@@ -173,3 +173,15 @@ def test_candidates_subsample_both_grids_without_replacement():
     small = tiny_config()
     small.n_configs = 8
     assert all(len(values) == 1 for values in tuning.candidate_configs(small).values())
+
+
+def test_omitting_kernel_preserves_the_ten_sampled_neural_candidates():
+    register_configs()
+    with initialize_config_dir(str(ROOT / "configs"), version_base=None):
+        cfg = compose("evaluate_rxrx1_sparse_recovery", ["name=test", "n_configs=10"])
+    original = tuning.candidate_configs(cfg)["neural"]
+    cfg.bridges = ["neural"]
+    candidates = tuning.candidate_configs(cfg)
+    assert set(candidates) == {"neural"}
+    assert len(candidates["neural"]) == 10
+    assert candidates["neural"] == original

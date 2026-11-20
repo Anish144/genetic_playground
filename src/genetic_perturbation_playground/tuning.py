@@ -184,6 +184,7 @@ def select(averaged: pd.DataFrame, cfg: DictConfig) -> dict:
     return {
         bridge: _best(averaged[averaged["bridge"] == bridge], names)
         for bridge, names in settings.items()
+        if bridge in set(averaged["bridge"])
     }
 
 
@@ -209,20 +210,42 @@ def _best(rows: pd.DataFrame, setting_names: Collection[str]) -> dict:
 
 
 def fit_selected(train: sc.AnnData, selected: dict, cfg: DictConfig, log_key=None) -> dict:
-    """Both bridges in their selected configurations, fit on `train`; the neural bridge logs its
-    loss to W&B under `log_key` if one is given."""
-    kernel = make_kernel(selected["kernel"], cfg)
-    neural = make_neural(selected["neural"] | {"log_key": log_key}, cfg)
-    return {"kernel bridge (tuned)": kernel.fit(train), "neural bridge (tuned)": neural.fit(train)}
+    """Fit only the bridges with selected configurations.
+
+    Parameters
+    ----------
+    train : anndata.AnnData
+        Retained training responses and available proxy controls.
+    selected : dict
+        Winning settings keyed by kernel, neural, or both.
+    cfg : omegaconf.DictConfig
+        Base model settings and input standardisation.
+    log_key : str or None, default=None
+        W&B loss key for the neural fit. None disables loss logging.
+
+    Returns
+    -------
+    dict
+        Fitted models keyed as '<bridge> bridge (tuned)'.
+    """
+    models = {}
+    for bridge, settings in selected.items():
+        model = (
+            make_kernel(settings, cfg)
+            if bridge == "kernel"
+            else make_neural(settings | {"log_key": log_key}, cfg)
+        )
+        models[f"{bridge} bridge (tuned)"] = model.fit(train)
+    return models
 
 
 def candidate_configs(cfg: DictConfig) -> dict[str, list[dict]]:
-    """Sample the kernel and selected neural grids once using the base seed.
+    """Sample each requested bridge's grid once using the base seed.
 
     Parameters
     ----------
     cfg : omegaconf.DictConfig
-        Tuning grids, positive n_configs and the base seed.
+        Tuning grids, positive n_configs, base seed and bridges to include.
 
     Returns
     -------
@@ -231,8 +254,9 @@ def candidate_configs(cfg: DictConfig) -> dict[str, list[dict]]:
     """
     if not isinstance(cfg.n_configs, int) or isinstance(cfg.n_configs, bool) or cfg.n_configs < 1:
         raise ValueError("n_configs must be a positive integer.")
-    grids = {"kernel": cfg.kernel_grid, "neural": _neural_grid(cfg)}
-    if "seed" in grids["neural"]:
+    available = {"kernel": cfg.kernel_grid, "neural": _neural_grid(cfg)}
+    grids = {bridge: available[bridge] for bridge in cfg.get("bridges", available)}
+    if "seed" in grids.get("neural", {}):
         raise ValueError(
             "The active neural tuning grid cannot override seed; use the experiment seed."
         )
@@ -256,7 +280,7 @@ def tune_resumable(
     directory: Path,
     candidates: dict[str, list[dict]],
 ) -> tuple[pd.DataFrame, dict, pd.DataFrame]:
-    """Tune both bridges, committing each completed candidate/fold trial.
+    """Tune requested bridges, committing each completed candidate/fold trial.
 
     Parameters
     ----------
@@ -267,7 +291,7 @@ def tune_resumable(
     directory : pathlib.Path
         Trial storage, owned by a locked run with validated data/config identity.
     candidates : dict of str to list of dict
-        Persisted kernel and neural draws; reused across seeds and k values.
+        Persisted draws for kernel, neural, or both; reused across seeds and k.
 
     Returns
     -------
@@ -289,12 +313,16 @@ def tune_resumable(
     ):
         raise ValueError("neural_checkpoints must be distinct nonnegative integers.")
     checkpoints.sort()
-    if set(candidates) != {"kernel", "neural"} or any(not v for v in candidates.values()):
-        raise ValueError("Tuning needs nonempty kernel and neural candidates.")
+    if (
+        not candidates
+        or not set(candidates) <= {"kernel", "neural"}
+        or any(not v for v in candidates.values())
+    ):
+        raise ValueError("Tuning needs nonempty candidates for kernel, neural, or both.")
     rows = []
     for fold, (train, evaluate) in enumerate(folds):
-        for bridge in ("kernel", "neural"):
-            for index, config in enumerate(candidates[bridge]):
+        for bridge, configs in candidates.items():
+            for index, config in enumerate(configs):
                 candidate_id = fingerprint_settings(config)
                 path = directory / f"fold_{fold}" / bridge / f"{candidate_id}.json"
                 settings = (
