@@ -6,6 +6,7 @@ import pandas as pd
 import pytest
 from scipy import sparse
 
+from genetic_perturbation_playground.data import transfer
 from genetic_perturbation_playground.data.transfer import batch_weights, matched_control_mean
 
 
@@ -53,3 +54,116 @@ def test_prediction_inputs_require_controls_in_each_response_batch(test_cells, p
 def test_prediction_inputs_reject_missing_perturbations(test_cells, label, prepare):
     with pytest.raises(ValueError, match="Unknown labels"):
         prepare(test_cells, [label])
+
+
+def test_reference_weights_aligns_named_probabilities(virtual_reference):
+    p = transfer.reference_weights(
+        virtual_reference,
+        feature_names=np.array(["g0", "g1"]),
+        environment_weights={"e1": 0.75, "e0": 0.25},
+    )
+    expected = pd.Series(
+        [0.25, 0.75], index=pd.Index(["e0", "e1"], name="batch"), name="probability"
+    )
+    pd.testing.assert_series_equal(p, expected)
+
+
+def test_reference_weights_defaults_to_uniform_environments(virtual_reference):
+    p = transfer.reference_weights(virtual_reference, feature_names=virtual_reference.var_names)
+    np.testing.assert_array_equal(p, [0.5, 0.5])
+
+
+@pytest.mark.parametrize("storage", [np.asarray, sparse.csr_matrix, sparse.csc_matrix])
+def test_reference_weights_preserves_sparse_values(virtual_reference, storage):
+    virtual_reference.X = storage(virtual_reference.X)
+    p = transfer.reference_weights(virtual_reference, feature_names=virtual_reference.var_names)
+    np.testing.assert_array_equal(p, [0.5, 0.5])
+    np.testing.assert_array_equal(transfer.as_dense(virtual_reference.X), [[0, 2], [2, 4], [5, 9]])
+
+
+@pytest.mark.parametrize(
+    "weights",
+    [
+        {"e0": 0, "e1": 0},
+        {"e0": 1, "e1": 1},
+        {"e0": 0.5, "e1": 0.5 + 2e-8},
+        {"e0": -1, "e1": 2},
+        {"e0": np.nan, "e1": 1},
+        {"e0": np.inf, "e1": 0},
+        {"e0": 1},
+        {"e0": 0.5, "wrong": 0.5},
+        {"e0": 0.5, "e1": 0.5, "extra": 0},
+    ],
+)
+def test_invalid_reference_weights_is_rejected(virtual_reference, weights):
+    with pytest.raises(ValueError, match="environment_weights"):
+        transfer.reference_weights(
+            virtual_reference,
+            feature_names=virtual_reference.var_names,
+            environment_weights=weights,
+        )
+
+
+@pytest.mark.parametrize("weights", [{"e0": 0, "e1": 1}, {"e0": 0.5, "e1": 0.5 + 5e-9}])
+def test_reference_weights_accepts_zero_and_normalizes_roundoff(virtual_reference, weights):
+    p = transfer.reference_weights(
+        virtual_reference, feature_names=virtual_reference.var_names, environment_weights=weights
+    )
+    expected = np.array(list(weights.values()))
+    np.testing.assert_array_equal(p, expected / expected.sum())
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        "empty",
+        "no_x",
+        "no_batch",
+        "no_perturbation",
+        "null_batch",
+        "null_perturbation",
+        "treated",
+        "nan",
+        "inf",
+        "sparse_nan",
+        "reordered",
+        "missing",
+        "extra",
+        "duplicate",
+        "no_features",
+    ],
+)
+def test_invalid_control_reference_is_rejected(virtual_reference, invalid):
+    reference = virtual_reference.copy()
+    if invalid == "empty":
+        reference = reference[:0].copy()
+    elif invalid == "no_x":
+        reference.X = None
+    elif invalid.startswith("no_") and invalid != "no_features":
+        del reference.obs[invalid[3:]]
+    elif invalid.startswith("null_"):
+        reference.obs.loc["r0", invalid[5:]] = None
+    elif invalid == "treated":
+        reference.obs.loc["r0", "perturbation"] = "a"
+    elif invalid in ("nan", "inf", "sparse_nan"):
+        reference.X[0, 0] = np.inf if invalid == "inf" else np.nan
+        if invalid == "sparse_nan":
+            reference.X = sparse.csr_matrix(reference.X)
+    elif invalid == "reordered":
+        reference = reference[:, ::-1].copy()
+    elif invalid == "missing":
+        reference = reference[:, :1].copy()
+    elif invalid == "extra":
+        reference = reference[:, [0, 1, 1]].copy()
+        reference.var_names = ["g0", "g1", "g2"]
+    elif invalid == "duplicate":
+        reference.var_names = ["g0", "g0"]
+    elif invalid == "no_features":
+        reference = reference[:, :0].copy()
+    with pytest.raises(ValueError):
+        transfer.reference_weights(reference, feature_names=np.array(["g0", "g1"]))
+
+
+def test_validate_features_rejects_duplicate_fitted_names(virtual_reference):
+    with pytest.raises(ValueError, match="feature"):
+        transfer.validate_features(virtual_reference, np.array(["g0", "g0"]))

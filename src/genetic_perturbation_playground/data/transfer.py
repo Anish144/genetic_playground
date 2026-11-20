@@ -6,6 +6,7 @@ G counts perturbations, D counts batches, J counts measured outputs, and P count
 observed (perturbation, batch) pairs. Missing pairs carry no response weight.
 """
 
+from collections.abc import Mapping
 from typing import NamedTuple
 
 import anndata as ad
@@ -364,3 +365,90 @@ def batch_controls(test: ad.AnnData) -> list[np.ndarray]:
     _require_controls(batch[~ctrl], batch[ctrl])
     batches, b_idx = np.unique(batch, return_inverse=True)
     return _per_batch_controls(test, ctrl, b_idx, len(batches))
+
+
+def validate_features(adata: ad.AnnData, feature_names: np.ndarray) -> None:
+    """Require the same unique feature names, in the same order, as training.
+
+    Parameters
+    ----------
+    adata : anndata.AnnData
+        Prediction or observed-response data.
+    feature_names : numpy.ndarray
+        Column names recorded during fitting.
+
+    Returns
+    -------
+    None
+        Raise ValueError when feature names are empty, duplicated or mismatched.
+    """
+    expected = pd.Index(feature_names)
+    if (
+        not len(expected)
+        or not expected.is_unique
+        or not adata.var_names.is_unique
+        or not adata.var_names.equals(expected)
+    ):
+        raise ValueError("Input feature names must be unique and match training features in order.")
+
+
+def reference_weights(
+    reference: ad.AnnData,
+    *,
+    feature_names: np.ndarray,
+    environment_weights: Mapping[str, float] | None = None,
+) -> pd.Series:
+    """Validate reference controls and align their environment probabilities.
+
+    Parameters
+    ----------
+    reference : anndata.AnnData
+        Nonempty controls only, with finite X and perturbation/batch labels in obs.
+    feature_names : numpy.ndarray
+        Unique training feature names, in training order.
+    environment_weights : mapping of str to float or None, default=None
+        Probability of every reference batch. None gives each batch equal weight,
+        regardless of its control count. Supplied probabilities must be finite,
+        nonnegative and sum to one within absolute tolerance 1e-8.
+
+    Returns
+    -------
+    pandas.Series
+        Normalized probabilities in sorted batch order, named probability,
+        with index named batch. Invalid inputs raise ValueError.
+    """
+    validate_features(reference, feature_names)
+    if not reference.n_obs:
+        raise ValueError("reference must contain control samples.")
+    for column in ("perturbation", "batch"):
+        if column not in reference.obs or reference.obs[column].isna().any():
+            raise ValueError(f"reference.obs must contain nonmissing {column} labels.")
+    if not is_control(reference).all():
+        raise ValueError("reference perturbation labels must all be control.")
+    _require_finite(reference.X, "reference.X")
+    batches = np.unique(batch_labels(reference))
+    if environment_weights is None:
+        weights = np.full(len(batches), 1 / len(batches))
+    else:
+        if not isinstance(environment_weights, Mapping) or set(environment_weights) != set(batches):
+            raise ValueError("environment_weights must name exactly the reference batches.")
+        try:
+            weights = np.array([environment_weights[b] for b in batches], dtype=float)
+        except (TypeError, ValueError) as error:
+            raise ValueError("environment_weights must contain numeric probabilities.") from error
+        if (
+            weights.shape != (len(batches),)
+            or not np.isfinite(weights).all()
+            or (weights < 0).any()
+            or not np.isclose(weights.sum(), 1, atol=1e-8, rtol=0)
+        ):
+            raise ValueError("environment_weights must be finite, nonnegative and sum to one.")
+    return pd.Series(
+        weights / weights.sum(), index=pd.Index(batches, name="batch"), name="probability"
+    )
+
+
+def _require_finite(X, name: str) -> None:
+    """Reject unavailable or nonfinite measurements without densifying sparse X."""
+    if X is None or not np.isfinite(X.data if sparse.issparse(X) else X).all():
+        raise ValueError(f"{name} must contain finite measurements.")
