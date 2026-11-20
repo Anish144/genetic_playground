@@ -1,11 +1,20 @@
 """Check weighted predictions against explicit environment calculations."""
 
+import anndata as ad
 import numpy as np
+import pandas as pd
 import pytest
 import torch
+from scipy import sparse
 
 from genetic_perturbation_playground.data.transfer import batch_controls
-from genetic_perturbation_playground.model.batch_transfer import NeuralBridgeTransfer
+from genetic_perturbation_playground.model.batch_transfer import (
+    KernelBridgeTransfer,
+    NeuralBridgeTransfer,
+)
+from genetic_perturbation_playground.model.linear_transfer import LinearTransfer
+from genetic_perturbation_playground.model.proxy_unconfounded import mean_inner
+from genetic_perturbation_playground.utils.standardisation import Standardised
 
 
 @pytest.fixture(params=["per_x", "shared_2nn", "hybrid", "hybrid_inf"])
@@ -125,3 +134,117 @@ def test_neural_mixture_rejects_invalid_inputs(virtual_train, controls, weights)
     bridge = NeuralBridgeTransfer(n_steps=0, n_features_w=2).fit(virtual_train).bridge_
     with pytest.raises(ValueError):
         bridge.predict_mixture(np.eye(2), controls, np.array(weights))
+
+
+def _single_environment(model, controls, positions):
+    """Use existing fitted coefficients, independent of the new mixture method."""
+    raw = model
+    offset = 0
+    if isinstance(model, Standardised):
+        controls = (controls - model.w_mean_) / model.w_std_
+        raw, offset = model.model, model.y_mean_
+    if isinstance(raw, LinearTransfer):
+        pred = raw.gamma_[positions] + raw.slope_ * controls.mean(0)
+    elif isinstance(raw, KernelBridgeTransfer):
+        inner = mean_inner(raw.kernel_w_, raw.ctrl_, [controls])[:, 0]
+        pred = np.concatenate(
+            [raw.bridges_[p].predict_embedded(np.zeros(1), inner) for p in positions]
+        )
+    else:
+        pred = raw.bridge_.predict(raw._onehot(np.array(positions)), controls)
+    return pred + offset
+
+
+def test_predict_environment_average_matches_explicit_environment_average(
+    transfer_model, virtual_reference
+):
+    expected = 0.25 * _single_environment(transfer_model, virtual_reference.X[:2], [1, 0, 1])
+    expected += 0.75 * _single_environment(transfer_model, virtual_reference.X[2:], [1, 0, 1])
+    actual = transfer_model.predict_environment_average(
+        ["b", "a", "b"], virtual_reference, environment_weights={"e1": 0.75, "e0": 0.25}
+    )
+    np.testing.assert_allclose(actual, expected, rtol=1e-6, atol=1e-7)
+    if isinstance(transfer_model, LinearTransfer) and transfer_model.slope == 1:
+        np.testing.assert_allclose(actual, [[34, 47.5], [14, 27.5], [34, 47.5]])
+
+
+def test_predict_environment_average_is_invariant_to_control_replication(
+    transfer_model, virtual_reference
+):
+    repeated = ad.concat([virtual_reference, virtual_reference[:2]], index_unique="-")
+    expected = transfer_model.predict_environment_average(["a"], virtual_reference)
+    np.testing.assert_allclose(
+        transfer_model.predict_environment_average(["a"], repeated), expected, rtol=1e-6, atol=1e-7
+    )
+
+
+@pytest.mark.parametrize("labels", [[], ["unknown"]])
+def test_predict_environment_average_rejects_unknown_or_empty_requests(
+    transfer_model, virtual_reference, labels
+):
+    with pytest.raises(ValueError):
+        transfer_model.predict_environment_average(labels, virtual_reference)
+
+
+@pytest.mark.parametrize(
+    "invalid", ["permutation", "duplicate", "missing_batch", "missing_perturbation", "treated"]
+)
+def test_predict_environment_average_checks_features_before_standardisation(
+    transfer_model, virtual_reference, invalid
+):
+    reference = virtual_reference.copy()
+    if invalid == "permutation":
+        reference = reference[:, ::-1].copy()
+    elif invalid == "duplicate":
+        reference.var_names = ["g0", "g0"]
+    elif invalid.startswith("missing_"):
+        del reference.obs[invalid[8:]]
+    else:
+        reference.obs.loc["r0", "perturbation"] = "a"
+    with pytest.raises(ValueError):
+        transfer_model.predict_environment_average(["a"], reference)
+
+
+@pytest.mark.parametrize("storage", [sparse.csr_matrix, sparse.csc_matrix])
+def test_predict_environment_average_accepts_sparse_reference(
+    transfer_model, virtual_reference, storage
+):
+    expected = transfer_model.predict_environment_average(["b", "a"], virtual_reference)
+    virtual_reference.X = storage(virtual_reference.X)
+    np.testing.assert_allclose(
+        transfer_model.predict_environment_average(["b", "a"], virtual_reference), expected
+    )
+
+
+def test_standardised_preserves_training_feature_names(virtual_train, virtual_reference):
+    before = virtual_reference.copy()
+    training_names = virtual_train.var_names.copy()
+    model = Standardised(LinearTransfer(slope=1)).fit(virtual_train)
+    np.testing.assert_array_equal(model.feature_names_in_, ["g0", "g1"])
+    pd.testing.assert_frame_equal(model._standardise(virtual_reference).var, virtual_reference.var)
+    model.predict_environment_average(["a"], virtual_reference)
+    np.testing.assert_array_equal(virtual_reference.X, before.X)
+    pd.testing.assert_frame_equal(virtual_reference.obs, before.obs)
+    pd.testing.assert_frame_equal(virtual_reference.var, before.var)
+    pd.testing.assert_index_equal(virtual_train.var_names, training_names)
+    virtual_train.var_names = ["changed", "names"]
+    np.testing.assert_array_equal(model.feature_names_in_, ["g0", "g1"])
+
+
+def test_feature_names_are_available_during_neural_checkpoints(virtual_train, virtual_reference):
+    model = Standardised(NeuralBridgeTransfer(n_steps=1, n_features_w=2, width_w=4))
+    results = []
+
+    def record(step):
+        results.append(model.predict_environment_average(["a"], virtual_reference))
+
+    model.fit(virtual_train, checkpoints=[0, 1], on_checkpoint=record)
+    assert len(results) == 2
+    assert all(np.isfinite(p).all() and p.shape == (1, 2) for p in results)
+
+
+def test_new_prediction_rejects_duplicate_training_feature_names(virtual_train, virtual_reference):
+    virtual_train.var_names = ["g0", "g0"]
+    model = Standardised(LinearTransfer()).fit(virtual_train)
+    with pytest.raises(ValueError, match="feature"):
+        model.predict_environment_average(["a"], virtual_reference)

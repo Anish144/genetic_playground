@@ -5,6 +5,13 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from genetic_perturbation_playground.model.batch_transfer import (
+    KernelBridgeTransfer,
+    NeuralBridgeTransfer,
+)
+from genetic_perturbation_playground.model.linear_transfer import LinearTransfer
+from genetic_perturbation_playground.utils.standardisation import Standardised
+
 
 @pytest.fixture
 def virtual_train():
@@ -24,3 +31,23 @@ def virtual_reference():
     )
     var = pd.DataFrame({"description": ["first", "second"]}, index=["g0", "g1"])
     return ad.AnnData(np.array([[0, 2], [2, 4], [5, 9]], dtype=float), obs=obs, var=var)
+
+
+@pytest.fixture(params=["linear", "zero", "shift", "kernel", "per_x", "shared_2nn", "hybrid"])
+def adapter_kind(request):
+    return request.param
+
+
+@pytest.fixture(params=[None, True, False], ids=["raw", "scaled", "centered"])
+def transfer_model(virtual_train, adapter_kind, request):
+    if adapter_kind in ("linear", "zero", "shift"):
+        model = LinearTransfer(slope={"linear": None, "zero": 0.0, "shift": 1.0}[adapter_kind])
+    elif adapter_kind == "kernel":
+        model = KernelBridgeTransfer(reg=0.1)
+    else:
+        model = NeuralBridgeTransfer(
+            variant=adapter_kind, n_steps=2, n_features_w=2, width_w=4, reg=0.1
+        )
+    if request.param is not None:
+        model = Standardised(model, w=request.param)
+    return model.fit(virtual_train)

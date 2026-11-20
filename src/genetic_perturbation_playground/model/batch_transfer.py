@@ -3,13 +3,15 @@
 Both bridges fit count-weighted means for each observed (perturbation, batch)
 pair. Predictions use test controls and response counts, without test response
 values. If a perturbation occurs in several test batches, its prediction is the
-count-weighted mean of the batch predictions.
+count-weighted mean of the batch predictions. predict_environment_average instead
+uses a common distribution supplied with reference controls.
 
 G counts perturbations, D counts source batches and J counts measured outputs.
 Input preparation lives in data.transfer. LinearTransfer and Standardised live
 in model.linear_transfer and utils.standardisation, respectively.
 """
 
+from collections.abc import Mapping
 from dataclasses import asdict
 
 import anndata as ad
@@ -27,6 +29,7 @@ from genetic_perturbation_playground.data.transfer import (
     batch_weights,
     bridge_data,
     label_positions,
+    reference_weights,
 )
 from genetic_perturbation_playground.model.proxy_unconfounded import (
     MarginalEmbeddingBridge,
@@ -60,6 +63,8 @@ class KernelBridgeTransfer:
 
     Attributes
     ----------
+    feature_names_in_ : numpy.ndarray of shape (J,)
+        Training feature names, used to validate reference controls.
     perturbations_ : numpy.ndarray of shape (G,)
         Sorted perturbation labels seen during fitting.
     ctrl_ : list of numpy.ndarray
@@ -110,6 +115,7 @@ class KernelBridgeTransfer:
         """
         data = bridge_data(adata, self.weight_by_cells)
         self.perturbations_ = data.perturbations
+        self.feature_names_in_ = adata.var_names.to_numpy(copy=True)
         self.ctrl_ = data.ctrl
         lengthscale = self.lengthscale_scale * median_heuristic(np.concatenate(self.ctrl_))
         self.kernel_w_ = RBF(lengthscales=lengthscale)
@@ -142,6 +148,48 @@ class KernelBridgeTransfer:
         bridges = [self.bridges_[p] for p in label_positions(self.perturbations_, perturbations)]
         preds = [b.predict_embedded(np.zeros(1), t) for b, t in zip(bridges, targets, strict=True)]
         return np.concatenate(preds)
+
+    def predict_environment_average(
+        self,
+        perturbations: list[str],
+        reference: ad.AnnData,
+        *,
+        environment_weights: Mapping[str, float] | None = None,
+    ) -> np.ndarray:
+        """Predict responses averaged over a common distribution of environments.
+
+        Parameters
+        ----------
+        perturbations : list of str
+            Nonempty fitted labels, in the desired order. Repeated labels are allowed.
+        reference : anndata.AnnData
+            Controls only, with batch labels and features in training order.
+            Environments need not have appeared during fitting.
+        environment_weights : mapping of str to float or None, default=None
+            Probability of each reference batch. None weights batches equally,
+            regardless of control counts. See data.transfer.reference_weights.
+
+        Returns
+        -------
+        numpy.ndarray of shape (len(perturbations), J)
+            Weighted response means in fitted target units. Invalid inputs or
+            unknown perturbations raise ValueError.
+        """
+        if not len(perturbations):
+            raise ValueError("perturbations must be nonempty.")
+        positions = label_positions(self.perturbations_, perturbations)
+        weights = reference_weights(
+            reference, feature_names=self.feature_names_in_, environment_weights=environment_weights
+        )
+        controls = batch_controls(reference)
+        target = sum(
+            probability * mean_inner(self.kernel_w_, self.ctrl_, [w])[:, 0]
+            for w, probability in zip(controls, weights, strict=True)
+            if probability > 0
+        )
+        return np.concatenate(
+            [self.bridges_[p].predict_embedded(np.zeros(1), target) for p in positions]
+        )
 
     def _fit_block(self, data: BridgeData, inner: np.ndarray, p: int) -> MarginalEmbeddingBridge:
         """Fit perturbation p using the total weight across all perturbations.
@@ -178,6 +226,8 @@ class NeuralBridgeTransfer:
         Selected model name.
     bridge_kwargs : dict
         Settings used to construct the neural bridge.
+    feature_names_in_ : numpy.ndarray of shape (J,)
+        Training feature names, used to validate reference controls.
     perturbations_ : numpy.ndarray of shape (G,)
         Sorted perturbation labels seen during fitting.
     bridge_ : NeuralPerXEmbeddingBridge or subclass
@@ -241,6 +291,7 @@ class NeuralBridgeTransfer:
         """
         data = bridge_data(adata, self.weight_by_cells)
         self.perturbations_ = data.perturbations
+        self.feature_names_in_ = adata.var_names.to_numpy(copy=True)
         envs = [data.batch == b for b in range(len(data.ctrl))]
         xs = [self._onehot(data.pert[e]) for e in envs]
         ys = [data.y[e] for e in envs]
@@ -276,6 +327,41 @@ class NeuralBridgeTransfer:
         # prediction is linear in mu, so a batch mixture is the mix-weighted per-batch prediction;
         # a generator, so only one batch's prediction is held at a time
         return sum(mix[:, [b]] * self.bridge_.predict(x, w) for b, w in enumerate(controls))
+
+    def predict_environment_average(
+        self,
+        perturbations: list[str],
+        reference: ad.AnnData,
+        *,
+        environment_weights: Mapping[str, float] | None = None,
+    ) -> np.ndarray:
+        """Predict responses averaged over a common distribution of environments.
+
+        Parameters
+        ----------
+        perturbations : list of str
+            Nonempty fitted labels, in the desired order. Repeated labels are allowed.
+        reference : anndata.AnnData
+            Controls only, with batch labels and features in training order.
+            Environments need not have appeared during fitting.
+        environment_weights : mapping of str to float or None, default=None
+            Probability of each reference batch. None weights batches equally,
+            regardless of control counts. See data.transfer.reference_weights.
+
+        Returns
+        -------
+        numpy.ndarray of shape (len(perturbations), J)
+            Weighted response means in fitted target units. Invalid inputs or
+            unknown perturbations raise ValueError.
+        """
+        if not len(perturbations):
+            raise ValueError("perturbations must be nonempty.")
+        positions = label_positions(self.perturbations_, perturbations)
+        weights = reference_weights(
+            reference, feature_names=self.feature_names_in_, environment_weights=environment_weights
+        )
+        controls = batch_controls(reference)
+        return self.bridge_.predict_mixture(self._onehot(positions), controls, weights.to_numpy())
 
     def _onehot(self, idx: np.ndarray) -> np.ndarray:
         """Encode perturbation indices as (n, G) one-hot rows."""

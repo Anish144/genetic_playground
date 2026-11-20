@@ -5,15 +5,19 @@ number of training response cells. Control samples set the input scaling;
 LinearRidgeSolver fits one control slope per output.
 """
 
+from collections.abc import Mapping
+
 import anndata as ad
 import numpy as np
 
 from genetic_perturbation_playground.config import LinearConfig
 from genetic_perturbation_playground.data.transfer import (
     as_dense,
+    batch_controls,
     is_control,
     label_positions,
     matched_control_mean,
+    reference_weights,
     summary_stats,
 )
 from genetic_perturbation_playground.utils.ridge import LinearRidgeSolver
@@ -46,6 +50,8 @@ class LinearTransfer:
 
     Attributes
     ----------
+    feature_names_in_ : numpy.ndarray of shape (J,)
+        Training feature names, used to validate reference controls.
     perturbations_ : numpy.ndarray of shape (G,)
         Sorted perturbation labels seen during fitting.
     coef_ : numpy.ndarray of shape (J,)
@@ -116,6 +122,7 @@ class LinearTransfer:
         s["w_mean"] = (s["w_mean"] - self.w_mean_) / self.w_std_
         self.coef_ = self._coefficient(s)
         self.perturbations_ = s["perturbations"]
+        self.feature_names_in_ = adata.var_names.to_numpy(copy=True)
         self.intercept_ = s["y_mean"] - self.coef_ * s["w_mean"]
         self.slope_ = self.coef_ / self.w_std_
         self.gamma_ = self.intercept_ - self.slope_ * self.w_mean_
@@ -144,6 +151,43 @@ class LinearTransfer:
         intercept = self.intercept_[label_positions(self.perturbations_, perturbations)]
         w = (matched_control_mean(test, perturbations) - self.w_mean_) / self.w_std_
         return intercept + self.coef_ * w
+
+    def predict_environment_average(
+        self,
+        perturbations: list[str],
+        reference: ad.AnnData,
+        *,
+        environment_weights: Mapping[str, float] | None = None,
+    ) -> np.ndarray:
+        """Predict responses averaged over a common distribution of environments.
+
+        Parameters
+        ----------
+        perturbations : list of str
+            Nonempty fitted labels, in the desired order. Repeated labels are allowed.
+        reference : anndata.AnnData
+            Controls only, with batch labels and features in training order.
+            Environments need not have appeared during fitting.
+        environment_weights : mapping of str to float or None, default=None
+            Probability of each reference batch. None weights batches equally,
+            regardless of control counts. See data.transfer.reference_weights.
+
+        Returns
+        -------
+        numpy.ndarray of shape (len(perturbations), J)
+            Weighted response means in fitted target units. Invalid inputs or
+            unknown perturbations raise ValueError.
+        """
+        if not len(perturbations):
+            raise ValueError("perturbations must be nonempty.")
+        positions = label_positions(self.perturbations_, perturbations)
+        weights = reference_weights(
+            reference, feature_names=self.feature_names_in_, environment_weights=environment_weights
+        )
+        controls = batch_controls(reference)
+        mean = sum(p * w.mean(axis=0) for w, p in zip(controls, weights, strict=True) if p > 0)
+        scaled = (mean - self.w_mean_) / self.w_std_
+        return self.intercept_[positions] + self.coef_ * scaled
 
     def _coefficient(self, s: dict) -> np.ndarray:
         """Fit ridge slopes or convert a fixed slope to scaled control units."""
