@@ -98,6 +98,8 @@ class NeuralPerXEmbeddingBridge:
 
     Attributes
     ----------
+    n_features_in_ : int
+        Number of control coordinates seen during fitting.
     psi_ : torch.nn.Module
         Fitted control network, mapping d_w input coordinates to q features.
     A_ : torch.Tensor of shape (G, q, J)
@@ -205,13 +207,71 @@ class NeuralPerXEmbeddingBridge:
         numpy.ndarray of shape (n_new, J)
             Predictions in the units of the targets supplied to fit.
         """
-        with torch.no_grad():
-            pred = self._predict_categories(as_tensor(w_target, self.device))
-            return pred[as_tensor(x, self.device).argmax(dim=1)].cpu().numpy()
+        return self.predict_mixture(x, [w_target], np.ones(1))
 
-    def _predict_categories(self, controls: torch.Tensor) -> torch.Tensor:
-        """Return predictions of shape (G, J) for one control sample set."""
-        return self._control_embedding(controls) @ self.A_
+    @torch.no_grad()
+    def predict_mixture(
+        self, x: np.ndarray, w_targets: list[np.ndarray], environment_weights: np.ndarray
+    ) -> np.ndarray:
+        """Predict responses averaged over a common environment distribution.
+
+        Average the features before applying coefficients:
+
+            z = sum_e p[e] * mean_j psi(w[e, j])
+
+        Shared and hybrid models also retain their intercepts; the hybrid adds
+        its fitted slope times the similarly weighted control mean.
+
+        Parameters
+        ----------
+        x : numpy.ndarray of shape (n_new, G)
+            One-hot fitted categories, in the desired order.
+        w_targets : list of numpy.ndarray
+            Nonempty control samples per environment, already in fitted input
+            units. Each array has shape (m_e, d_w), or (m_e,) for one input.
+        environment_weights : numpy.ndarray of shape (len(w_targets),)
+            Finite, nonnegative probabilities summing to one within absolute
+            tolerance 1e-8. Accepted roundoff is normalized away.
+
+        Returns
+        -------
+        numpy.ndarray of shape (n_new, J)
+            Averaged predictions in the fitted target units. Invalid controls
+            or probabilities raise ValueError.
+        """
+        weights = np.asarray(environment_weights, dtype=float)
+        if (
+            not w_targets
+            or weights.shape != (len(w_targets),)
+            or not np.isfinite(weights).all()
+            or (weights < 0).any()
+            or not np.isclose(weights.sum(), 1, atol=1e-8, rtol=0)
+        ):
+            raise ValueError(
+                "environment_weights must match controls and be probabilities summing to one."
+            )
+        weights = weights / weights.sum()
+        embedding, control_mean = 0.0, 0.0
+        for samples, probability in zip(w_targets, weights, strict=True):
+            samples = np.asarray(samples)
+            if samples.ndim not in (1, 2) or not len(samples) or not np.isfinite(samples).all():
+                raise ValueError("Controls must be nonempty, finite sample arrays.")
+            width = 1 if samples.ndim == 1 else samples.shape[1]
+            if width != self.n_features_in_:
+                raise ValueError("Control feature width must match training controls.")
+            if probability == 0:
+                continue
+            controls = as_tensor(samples, self.device)
+            embedding = embedding + probability * self._control_embedding(controls)
+            control_mean = control_mean + probability * controls.mean(dim=0)
+        pred = self._predict_embedded(embedding, control_mean)
+        return pred[as_tensor(x, self.device).argmax(dim=1)].cpu().numpy()
+
+    def _predict_embedded(
+        self, embedding: torch.Tensor, control_mean: torch.Tensor
+    ) -> torch.Tensor:
+        """Apply per-category coefficients to mean features; return (G, J)."""
+        return embedding @ self.A_
 
     def _to_tensors(self, xs, ys, ws, counts) -> GroupedRidgeData:
         """Group response counts and target sums by category and environment.
@@ -247,7 +307,8 @@ class NeuralPerXEmbeddingBridge:
 
     def _build_networks(self, data: GroupedRidgeData) -> None:
         """Create the control network psi_ on the requested device."""
-        self.psi_ = self._new_control_network(data.w_envs[0].shape[1])
+        self.n_features_in_ = data.w_envs[0].shape[1]
+        self.psi_ = self._new_control_network(self.n_features_in_)
 
     def _new_control_network(self, input_size: int) -> nn.Module:
         """Build a control network with the configured width and feature count."""
@@ -505,9 +566,11 @@ class NeuralSharedEmbeddingBridge(NeuralPerXEmbeddingBridge):
             self.shared_coef_[:, block] = shared
             self.linear_coef_[block] = linear
 
-    def _predict_categories(self, controls: torch.Tensor) -> torch.Tensor:
+    def _predict_embedded(
+        self, embedding: torch.Tensor, control_mean: torch.Tensor
+    ) -> torch.Tensor:
         """Add intercepts, shared effects and category deviations; return (G, J)."""
-        shared, deviation = self._control_embedding(controls).chunk(2)
+        shared, deviation = embedding.chunk(2)
         return self.intercept_ + shared @ self.shared_coef_ + deviation @ self.deviation_coef_
 
 
@@ -591,11 +654,13 @@ class NeuralHybridEmbeddingBridge(NeuralSharedEmbeddingBridge):
             return super()._cross_fit_sse(data, embeddings, folds)
         return checkpointed_sse(self._fit_and_score_sse, data, embeddings, folds)
 
-    def _predict_categories(self, controls: torch.Tensor) -> torch.Tensor:
+    def _predict_embedded(
+        self, embedding: torch.Tensor, control_mean: torch.Tensor
+    ) -> torch.Tensor:
         """Add matching-coordinate control slopes to the neural predictions."""
-        neural = super()._predict_categories(controls)
+        neural = super()._predict_embedded(embedding, control_mean)
         if np.isinf(self.linear_reg):
             return neural
-        if controls.shape[1] != len(self.linear_coef_):
+        if len(control_mean) != len(self.linear_coef_):
             raise ValueError("Hybrid transfer requires matching proxy and target dimensions")
-        return neural + controls.mean(dim=0) * self.linear_coef_
+        return neural + control_mean * self.linear_coef_
