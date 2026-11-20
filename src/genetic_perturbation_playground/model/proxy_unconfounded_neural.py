@@ -251,13 +251,19 @@ class NeuralPerXEmbeddingBridge:
                 "environment_weights must match controls and be probabilities summing to one."
             )
         weights = weights / weights.sum()
+        expected_width = getattr(self, "n_features_in_", None)
+        if expected_width is None:
+            # Previously saved bridges predate the input-width metadata.
+            expected_width = next(
+                layer.in_features for layer in self.psi_.modules() if isinstance(layer, nn.Linear)
+            )
         embedding, control_mean = 0.0, 0.0
         for samples, probability in zip(w_targets, weights, strict=True):
             samples = np.asarray(samples)
             if samples.ndim not in (1, 2) or not len(samples) or not np.isfinite(samples).all():
                 raise ValueError("Controls must be nonempty, finite sample arrays.")
             width = 1 if samples.ndim == 1 else samples.shape[1]
-            if width != self.n_features_in_:
+            if width != expected_width:
                 raise ValueError("Control feature width must match training controls.")
             if probability == 0:
                 continue

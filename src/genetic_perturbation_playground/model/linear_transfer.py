@@ -185,7 +185,11 @@ class LinearTransfer:
             reference, feature_names=self.feature_names_in_, environment_weights=environment_weights
         )
         controls = batch_controls(reference)
-        mean = sum(p * w.mean(axis=0) for w, p in zip(controls, weights, strict=True) if p > 0)
+        mean = sum(
+            p * w.mean(axis=0, dtype=np.float64)
+            for w, p in zip(controls, weights, strict=True)
+            if p > 0
+        )
         scaled = (mean - self.w_mean_) / self.w_std_
         return self.intercept_[positions] + self.coef_ * scaled
 

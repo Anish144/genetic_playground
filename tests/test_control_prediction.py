@@ -248,3 +248,37 @@ def test_new_prediction_rejects_duplicate_training_feature_names(virtual_train, 
     model = Standardised(LinearTransfer()).fit(virtual_train)
     with pytest.raises(ValueError, match="feature"):
         model.predict_environment_average(["a"], virtual_reference)
+
+
+def test_linear_environment_average_accumulates_float32_controls_in_float64(virtual_train):
+    model = LinearTransfer(slope=1, standardise_w=False).fit(virtual_train)
+    values = np.vstack(
+        [np.full((10000, 2), 0.1, dtype=np.float32), np.zeros((1, 2), dtype=np.float32)]
+    )
+    reference = ad.AnnData(
+        values,
+        obs=pd.DataFrame(
+            {"perturbation": ["control"] * 10001, "batch": ["e0"] * 10000 + ["e1"]},
+            index=list(map(str, range(10001))),
+        ),
+        var=virtual_train.var.copy(),
+    )
+    expected = np.array([[10.0, 20.0]]) + np.float64(np.float32(0.1)) / 2
+    predicted = model.predict_environment_average(["a"], reference)
+    duplicated = reference[np.r_[np.arange(10000), np.arange(10001)]]
+    repeated = model.predict_environment_average(["a"], duplicated)
+    np.testing.assert_allclose(predicted, expected, atol=1e-12, rtol=0)
+    np.testing.assert_allclose(repeated, expected, atol=1e-12, rtol=0)
+
+
+def test_saved_neural_bridge_predicts_without_feature_width_metadata(
+    neural_adapter, virtual_reference
+):
+    import pickle
+
+    bridge = neural_adapter.bridge_
+    expected = bridge.predict(np.eye(2), virtual_reference.X)
+    del bridge.n_features_in_
+    restored = pickle.loads(pickle.dumps(bridge))
+    np.testing.assert_array_equal(restored.predict(np.eye(2), virtual_reference.X), expected)
+    assert not hasattr(restored, "n_features_in_")  # Prediction must not mutate the saved model.

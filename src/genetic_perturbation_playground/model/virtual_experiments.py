@@ -15,6 +15,7 @@ from genetic_perturbation_playground.data.transfer import (
     batch_labels,
     label_positions,
     observed_batch_means,
+    perturbation_labels,
     reference_weights,
     validate_features,
 )
@@ -116,11 +117,14 @@ def virtual_experiments(
     if observed is None:
         return result
 
-    filled = prediction.copy()
+    filled = np.array(prediction, dtype=np.result_type(prediction.dtype, float), copy=True)
     coverage = np.zeros(len(labels))
     batches = batch_labels(reference)
+    observed_rows = _observed_rows_by_batch(observed, labels)
     for batch, probability in weights.items():
-        means = observed_batch_means(observed, labels, batch)
+        if batch not in observed_rows:
+            continue
+        means = observed_batch_means(observed[observed_rows[batch]], labels, batch)
         if probability == 0 or means.empty:
             continue
         positions = index.get_indexer(means.index)
@@ -143,5 +147,14 @@ def _validate_observed(observed: ad.AnnData, feature_names: np.ndarray) -> None:
     responses = ~observed.obs["perturbation"].eq("control").fillna(False)
     if observed.obs.loc[responses, ["perturbation", "batch"]].isna().any().any():
         raise ValueError("observed responses must have nonmissing perturbation and batch labels.")
-    if observed.X is None:
-        raise ValueError("observed.X must contain measurements.")
+
+
+def _observed_rows_by_batch(observed: ad.AnnData, perturbations: list[str]) -> dict:
+    """Group requested row positions once, without reading the response matrix."""
+    keep = pd.Index(perturbation_labels(observed)).isin(perturbations)
+    batches = pd.Series(batch_labels(observed))
+    selected = batches[keep]
+    return {
+        batch: rows.to_numpy()
+        for batch, rows in selected.groupby(selected, sort=False).groups.items()
+    }

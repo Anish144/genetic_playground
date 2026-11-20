@@ -477,15 +477,15 @@ def observed_batch_means(
     """
     labels = perturbation_labels(observed)
     selected = (
-        (labels != "control") & np.isin(labels, perturbations) & (batch_labels(observed) == batch)
+        (labels != "control")
+        & pd.Index(labels).isin(perturbations)
+        & (batch_labels(observed) == batch)
     )
     if not selected.any():
         return pd.DataFrame(
             index=pd.Index([], name="perturbation"), columns=observed.var_names, dtype=float
         )
-    if observed.X is None:
-        raise ValueError("observed.X must contain measurements.")
-    values = observed.X[selected]
+    values = observed[selected].X
     _require_finite(values, "observed.X")
     present, groups = np.unique(labels[selected], return_inverse=True)
     means = pd.DataFrame(

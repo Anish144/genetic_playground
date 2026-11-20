@@ -216,3 +216,54 @@ def test_virtual_experiments_corrects_only_observed_pairs(
     result = virtual_experiments(linear, virtual_reference, observed=observed)
     assert calls == [(["a", "b"], ["e0", "e1"]), (["a"], ["e0"])]
     np.testing.assert_allclose(result.layers["observed_fill"], [[58.5, 115.5], [33, 46]])
+
+
+@pytest.mark.parametrize("kind", ["empty", "unrequested", "controls"])
+def test_virtual_experiments_accepts_unmeasured_empty_or_ignored_observed(
+    linear, virtual_reference, observed, kind
+):
+    obs = observed.obs.iloc[:0].copy() if kind == "empty" else observed.obs.copy()
+    if kind == "unrequested":
+        obs["perturbation"] = "unrequested"
+    elif kind == "controls":
+        obs["perturbation"] = "control"
+    unmeasured = ad.AnnData(obs=obs, var=observed.var.copy())
+    assert unmeasured.X is None
+    result = virtual_experiments(linear, virtual_reference, observed=unmeasured)
+    np.testing.assert_array_equal(result.layers["observed_fill"], result.X)
+    np.testing.assert_array_equal(result.obs["observed_weight"], [0, 0])
+
+
+def test_virtual_experiments_materializes_only_selected_observed_rows(
+    linear, virtual_train, monkeypatch
+):
+    source = virtual_train.copy()
+    source.obs["response_source"] = True
+    observed = source[source.obs.perturbation.ne("control")]
+    reference = virtual_train[virtual_train.obs.perturbation.eq("control")]
+    original = ad.AnnData.X
+    reads = []
+
+    def read(instance):
+        if instance.is_view and "response_source" in instance.obs:
+            reads.append(instance.n_obs)
+        return original.fget(instance)
+
+    monkeypatch.setattr(ad.AnnData, "X", property(read, original.fset, original.fdel))
+    result = virtual_experiments(linear, reference, perturbations=["a"], observed=observed)
+    np.testing.assert_allclose(result.layers["observed_fill"], [[15, 27]])
+    assert reads and max(reads) == 1  # One requested response row per environment.
+
+
+def test_virtual_experiments_accepts_integer_predictions(
+    linear, virtual_reference, observed, monkeypatch
+):
+    original = linear.predict_environment_average
+
+    def integer_prediction(*args, **kwargs):
+        return original(*args, **kwargs).astype(np.int64)
+
+    monkeypatch.setattr(linear, "predict_environment_average", integer_prediction)
+    result = virtual_experiments(linear, virtual_reference, observed=observed)
+    assert result.X.dtype == np.int64
+    np.testing.assert_allclose(result.layers["observed_fill"], [[58.5, 115.5], [33, 46]])
