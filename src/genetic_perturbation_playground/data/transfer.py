@@ -452,3 +452,45 @@ def _require_finite(X, name: str) -> None:
     """Reject unavailable or nonfinite measurements without densifying sparse X."""
     if X is None or not np.isfinite(X.data if sparse.issparse(X) else X).all():
         raise ValueError(f"{name} must contain finite measurements.")
+
+
+def observed_batch_means(
+    observed: ad.AnnData, perturbations: list[str], batch: str
+) -> pd.DataFrame:
+    """Average measured responses for requested perturbations in one batch.
+
+    Parameters
+    ----------
+    observed : anndata.AnnData
+        Response rows with perturbation/batch labels. Controls are optional and
+        ignored. Missing pairs have no rows; zero responses are valid measurements.
+    perturbations : list of str
+        Requested labels, in result order. Unobserved labels are omitted.
+    batch : str
+        Environment to select, using the string form of its batch label.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Present perturbations by output features. Selected measurements must be
+        finite. No selected responses gives an empty frame with all output columns.
+    """
+    labels = perturbation_labels(observed)
+    selected = (
+        (labels != "control") & np.isin(labels, perturbations) & (batch_labels(observed) == batch)
+    )
+    if not selected.any():
+        return pd.DataFrame(
+            index=pd.Index([], name="perturbation"), columns=observed.var_names, dtype=float
+        )
+    if observed.X is None:
+        raise ValueError("observed.X must contain measurements.")
+    values = observed.X[selected]
+    _require_finite(values, "observed.X")
+    present, groups = np.unique(labels[selected], return_inverse=True)
+    means = pd.DataFrame(
+        _group_means(groups, len(present), values),
+        index=pd.Index(present, name="perturbation"),
+        columns=observed.var_names,
+    )
+    return means.loc[[p for p in perturbations if p in means.index]]

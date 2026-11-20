@@ -167,3 +167,30 @@ def test_invalid_control_reference_is_rejected(virtual_reference, invalid):
 def test_validate_features_rejects_duplicate_fitted_names(virtual_reference):
     with pytest.raises(ValueError, match="feature"):
         transfer.validate_features(virtual_reference, np.array(["g0", "g0"]))
+
+
+@pytest.mark.parametrize("storage", [np.asarray, sparse.csr_matrix, sparse.csc_matrix])
+def test_observed_batch_means_supports_response_only_sparse_data(virtual_train, storage):
+    observed = virtual_train[virtual_train.obs.perturbation.ne("control")].copy()
+    observed.X = storage(observed.X)
+    result = transfer.observed_batch_means(observed, ["b", "a"], "b0")
+    assert result.index.tolist() == ["b", "a"]
+    assert result.columns.tolist() == ["g0", "g1"]
+    np.testing.assert_allclose(result, [[31, 43], [11, 23]])
+    assert transfer.observed_batch_means(observed, ["a"], "absent").shape == (0, 2)
+
+
+def test_observed_batch_means_ignores_unused_categories(virtual_train):
+    observed = virtual_train.copy()
+    observed.obs["perturbation"] = pd.Categorical(
+        observed.obs.perturbation, categories=["control", "a", "b", "unused"]
+    )
+    observed.obs["batch"] = pd.Categorical(
+        observed.obs.batch, categories=["b0", "b1", "b2", "absent"]
+    )
+    ignored = observed.obs.perturbation.ne("a") | observed.obs.batch.ne("b0")
+    observed.X[ignored] = np.nan
+    result = transfer.observed_batch_means(observed, ["a", "unused"], "b0")
+    assert result.index.tolist() == ["a"]
+    np.testing.assert_allclose(result, [[11, 23]])
+    assert transfer.observed_batch_means(observed, ["a"], "absent").shape == (0, 2)

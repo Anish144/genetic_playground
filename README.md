@@ -204,6 +204,48 @@ Implementation is in `model/proxy_unconfounded_neural.py`. `utils/ridge.py` cont
 
 `scripts/benchmark_ridge_solver.py --baseline /path/to/previous_neural_module.py --output outputs/ridge_benchmark.json` compares a saved pre-refactor module against the neural solver. It checks losses, gradients and coefficients, then records CPU training/reconstruction timings and allocation traffic on two synthetic sizes. The linear comparison sets `reg=0` to match the previous least-squares formula.
 
+## Virtual experiments
+
+`predict_environment_average(perturbations, reference)` predicts fitted perturbations over a common distribution of environments. `reference` contains only control rows, with `obs["perturbation"] == "control"` and environment names in `obs["batch"]`. Its feature names and order must match training. By default, each environment has equal weight, regardless of its sample count. The method works on linear, kernel and all three neural transfer models, including `Standardised` wrappers.
+
+`virtual_experiments` returns labeled predictions and can also retain observed treatment means. Let $\widehat y_{xeg}$ be the bridge prediction for perturbation $x$ in environment $e$, averaged over that environment's controls. The two estimates are
+
+$$
+\widehat\mu^{(1)}_g(x)=\sum_e p(e)\widehat y_{xeg},\qquad
+\widehat\mu^{(2)}_g(x)=\widehat\mu^{(1)}_g(x)+\sum_{e\in E_x}p(e)(\bar y_{xeg}-\widehat y_{xeg}).
+$$
+
+Use an already-fitted model and control rows from the reference environments:
+
+```python
+from genetic_perturbation_playground.model.virtual_experiments import virtual_experiments
+
+reference = reference_data[reference_data.obs["perturbation"].eq("control")]
+result = virtual_experiments(model, reference)  # All fitted perturbations; uniform environments.
+bridge_means = result.X
+```
+
+For two reference environments named `e0` and `e1`, explicit probabilities and separately supplied responses give both estimates:
+
+```python
+result = virtual_experiments(
+    model,
+    reference,
+    environment_weights={"e0": 0.25, "e1": 0.75},
+    observed=available_responses,
+)
+bridge_means = result.X
+filled_means = result.layers["observed_fill"]
+coverage = result.obs["observed_weight"]
+weights = result.uns["environment_weights"]
+```
+
+Rows are labeled by perturbation; columns retain the reference feature annotations. `observed` may contain response rows without controls. Its selected pair means replace predictions only for those pairs; missing pairs are absent rows, and zero responses count as observations. Coverage is the sum of environment probabilities with an observed response, not a fraction of cells. Neither function fits a model or changes its inputs. `Standardised` reuses training scales and restores the target mean, so its results and supplied observations are in original target units.
+
+For RxRx1, use **HUVEC only** when fitting and choosing reference/observed rows. Environment labels are supplied by the caller. Equal weights define a reference population; a causal interpretation requires the bridge assumptions and appropriate observed intervention means. Estimator 2 is not automatically doubly robust.
+
+For evaluation, exclude held-out responses from both fitting and `observed`, and compare predictions under the same reference distribution. Internal neural cross-fitting does not replace an outer evaluation split. Neural inference averages network outputs before applying coefficients; it does not apply the network to averaged controls. Corrections are accumulated one environment at a time, without constructing a perturbation-by-environment-by-output array.
+
 # Evaluation
 
 Select distinct validation batches using `seed` (default 0). Hold out each selected batch separately and train on **all other batches**, including those held out in other runs. Defaults are 10 outer evaluations for Replogle and 5 for RxRx1. Score only perturbations present in both the training data and the held-out batch. This evaluates new batches for known perturbations.
