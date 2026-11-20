@@ -34,6 +34,36 @@ from genetic_perturbation_playground.experiments import rxrx1_sparse_recovery as
 register_configs()
 ROOT = Path(__file__).resolve().parents[1]
 OPERATIONAL_SETTINGS = {"name", "output_dir", "wandb_mode", "resume", "n_seeds"}
+PACKAGE_DEPENDENCIES = (
+    "__init__.py",
+    "config.py",
+    "tuning.py",
+    "data/__init__.py",
+    "data/data_loader.py",
+    "data/rxrx1.py",
+    "data/transfer.py",
+    "data/neural.py",
+    "model/__init__.py",
+    "model/batch_transfer.py",
+    "model/linear_transfer.py",
+    "model/virtual_experiments.py",
+    "model/proxy_unconfounded.py",
+    "model/proxy_unconfounded_neural.py",
+    "utils/__init__.py",
+    "utils/kernels.py",
+    "utils/neural.py",
+    "utils/ridge.py",
+    "utils/standardisation.py",
+    "utils/metrics.py",
+    "experiments/__init__.py",
+    "experiments/checkpoints.py",
+    "experiments/rxrx1_sparse_recovery.py",
+)
+SCRIPT_DEPENDENCIES = (
+    "evaluate_rxrx1_sparse_recovery.py",
+    "train_rxrx1_transfer.py",
+    "train_replogle_transfer.py",
+)
 
 
 def _validate_config(cfg):
@@ -77,9 +107,9 @@ def _scientific_settings(cfg):
 
 
 def _source_fingerprint():
-    """Conservatively invalidate resume after any package or script edit."""
-    paths = sorted((ROOT / "src/genetic_perturbation_playground").rglob("*.py"))
-    paths += sorted((ROOT / "scripts").glob("*.py"))
+    """Hash the runner's dependency modules; keep these lists aligned with imports."""
+    paths = [ROOT / "src/genetic_perturbation_playground" / name for name in PACKAGE_DEPENDENCIES]
+    paths += [ROOT / "scripts" / name for name in SCRIPT_DEPENDENCIES]
     return state.fingerprint_settings(
         {str(p.relative_to(ROOT)): state.fingerprint_file(p) for p in paths}
     )
@@ -109,7 +139,7 @@ def _save_seed_inputs(directory, order, cfg):
     if not path.exists():
         state.atomic_write(path, lambda stream: stream.write(content))
     path = directory / "effective_config.json"
-    expected = _scientific_settings(cfg)
+    expected = state.encode_settings(_scientific_settings(cfg))
     if path.exists() and state.read_json(path) != expected:
         raise ValueError(
             f"Effective configuration mismatch at {path}; use a fresh output directory."
@@ -125,15 +155,21 @@ def _prepare_data(data, cfg):
     if pairs.empty:
         raise ValueError("No treatment reference pairs are available.")
     coverage = recovery.eligibility_table(pairs, list(cfg.k_values))
-    for k in cfg.k_values:
-        if not coverage[coverage.k == k].eligible.any():
-            maximum = int(coverage.n_reference_batches.max())
-            raise ValueError(
-                f"No eligible perturbations for k={k}; maximum observed coverage is {maximum} batches. Check the embeddings or k_values."
-            )
-    data = select_proxy_controls(data, cfg)
-    data = data[is_control(data) | data.obs.well_type.eq("treatment").to_numpy()]
     return data, pairs, coverage
+
+
+def _validate_coverage(coverage):
+    counts = coverage.groupby("k").eligible.sum()
+    missing = counts[counts == 0].index.tolist()
+    if missing:
+        empty = ", ".join(f"k={k}" for k in missing)
+        report = ", ".join(f"k={k}: {count} eligible" for k, count in counts.items())
+        maximum = int(coverage.n_reference_batches.max())
+        raise ValueError(
+            f"No eligible perturbations for {empty}. Coverage: {report}; "
+            f"maximum {maximum} batches. See reference_pairs.csv and eligibility.csv; "
+            "check the embeddings or use different k_values in a fresh output directory."
+        )
 
 
 def _save_references(directory, pairs, coverage, run_id):
@@ -216,6 +252,9 @@ def run_experiment(
         )
         data, pairs, coverage = _prepare_data(data, cfg)
         _save_references(output_dir, pairs, coverage, run_id)
+        _validate_coverage(coverage)
+        data = select_proxy_controls(data, cfg)
+        data = data[is_control(data) | data.obs.well_type.eq("treatment").to_numpy()]
         _print_workload(cfg, candidates)
         for seed in range(cfg.seed, cfg.seed + cfg.n_seeds):
             directory = output_dir / "seeds" / f"seed_{seed}"
@@ -275,7 +314,9 @@ def _run_pair(data, pairs, coverage, order, cfg, candidates, directory, k, run_i
     _write_csv(directory / "inner_scores.csv", inner)
     state.write_json(
         directory / "selected.json",
-        {"selected": selected, "validation": winners.to_dict(orient="index")},
+        state.encode_settings(
+            {"selected": selected, "validation": winners.to_dict(orient="index")}
+        ),
     )
     train = recovery.retained_data(data, order, k)
     models = tuning.fit_selected(train, selected, cfg, f"seed {cfg.seed}/k {k}/neural bridge")

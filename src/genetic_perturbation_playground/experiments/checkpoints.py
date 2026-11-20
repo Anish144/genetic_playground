@@ -116,19 +116,68 @@ def fingerprint_file(path: Path) -> str:
 
 
 def fingerprint_settings(settings: dict) -> str:
-    """Hash finite JSON settings with canonical dictionary key ordering.
+    """Hash settings with canonical keys and explicit positive infinity.
 
     Parameters
     ----------
     settings : dict
-        JSON-compatible settings. List ordering remains significant.
+        JSON-compatible settings, allowing positive infinity for model penalties.
+        List ordering remains significant; NaN and negative infinity are rejected.
 
     Returns
     -------
     str
         Hexadecimal SHA-256 digest, independent of dictionary insertion order.
     """
-    return hashlib.sha256(_json_bytes(settings)).hexdigest()
+    return hashlib.sha256(_json_bytes(encode_settings(settings))).hexdigest()
+
+
+def encode_settings(settings: dict) -> dict:
+    """Represent positive infinity in settings using a reversible JSON tag.
+
+    Parameters
+    ----------
+    settings : dict
+        Nested settings with dictionary/list values. Positive infinity is
+        permitted for penalties such as the hybrid model's linear_reg.
+
+    Returns
+    -------
+    dict
+        A copy using {"__float__": "+inf"} for positive infinity. Other values
+        are unchanged; write_json still rejects NaN and negative infinity.
+        The tag is reserved for this encoding. Use decode_settings to restore it.
+    """
+    return _map_settings(settings, encode=True)
+
+
+def decode_settings(settings: dict) -> dict:
+    """Restore tagged positive infinity in saved configuration values.
+
+    Parameters
+    ----------
+    settings : dict
+        Configuration returned by read_json after encode_settings was used.
+
+    Returns
+    -------
+    dict
+        A copy with tagged values restored to float('inf'). Do not use this
+        decoder for metrics, which must remain finite.
+    """
+    return _map_settings(settings, encode=False)
+
+
+def _map_settings(value, *, encode):
+    if encode and isinstance(value, float) and value == math.inf:
+        return {"__float__": "+inf"}
+    if isinstance(value, dict):
+        if not encode and value == {"__float__": "+inf"}:
+            return math.inf
+        return {key: _map_settings(item, encode=encode) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [_map_settings(item, encode=encode) for item in value]
+    return value
 
 
 def ensure_manifest(directory: Path, expected: dict, *, resume: bool) -> dict:
@@ -141,14 +190,17 @@ def ensure_manifest(directory: Path, expected: dict, *, resume: bool) -> dict:
         manifest writes may predate the manifest.
     expected : dict
         schema_version and identity; optional provenance is retained from creation.
+        Positive infinity in configuration is encoded with encode_settings.
     resume : bool
         Permit an existing compatible run. False never overwrites results.
 
     Returns
     -------
     dict
-        The original manifest, or the newly created one.
+        The original manifest, or the newly created one, in its JSON-safe encoded
+        form. Use decode_settings when numerical configuration values are needed.
     """
+    expected = encode_settings(expected)
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / "manifest.json"
     if path.exists():

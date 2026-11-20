@@ -244,6 +244,8 @@ Rows are labeled by perturbation; columns retain the reference feature annotatio
 
 For RxRx1, use **HUVEC only** when fitting and choosing reference/observed rows. Environment labels are supplied by the caller. Equal weights define a reference population; a causal interpretation requires the bridge assumptions and appropriate observed intervention means. Estimator 2 is not automatically doubly robust.
 
+For evaluation, exclude held-out responses from both fitting and `observed`, and compare predictions under the same reference distribution. Internal neural cross-fitting does not replace an outer evaluation split. Neural inference averages network outputs before applying coefficients; it does not apply the network to averaged controls. Corrections are accumulated one environment at a time, without constructing a perturbation-by-environment-by-output array.
+
 ### RxRx1 sparse-response recovery
 
 `scripts/evaluate_rxrx1_sparse_recovery.py` tests whether virtual averaging recovers the full observed mean better than the sparse observed average. For each seed, independently permute each treatment's originally observed batches and retain the first `k=2,3,4`; these retained sets are nested across k. All selected proxy controls remain available, including controls in batches with no retained treatment responses. Defaults are HUVEC, plate batches and positive controls. Positive controls never become response targets in this experiment, even with negative-only proxies.
@@ -259,7 +261,9 @@ uv run python scripts/evaluate_rxrx1_sparse_recovery.py name=huvec_sparse n_seed
 # Repeat the identical command to resume. Increase n_seeds to append new seeds.
 ```
 
-Results live in the stable folder `outputs/rxrx1_sparse_recovery/huvec_sparse/`; override `output_dir` to choose another location. Invocation logs have timestamped subfolders. The runner saves each completed candidate/fold trial, partial neural scores at every scoring checkpoint, each completed seed/k result, and each completed seed. Resume skips completed trials and stages; an interrupted neural trial restarts from the beginning. An interrupted final refit reuses completed tuning. There is no optimizer-state checkpoint. A lock prevents concurrent writers, and content hashes reject changed inputs, source code or scientific settings. `resume=false` rejects existing results. Reducing `n_seeds` preserves earlier completed results in the combined tables.
+Results live in the stable folder `outputs/rxrx1_sparse_recovery/huvec_sparse/`; override `output_dir` to choose another location. Invocation logs have timestamped subfolders. The runner saves each completed candidate/fold trial, partial neural scores at every scoring checkpoint, each completed seed/k result, and each completed seed. Resume skips completed trials and stages; an interrupted neural trial restarts from the beginning. An interrupted final refit reuses completed tuning. There is no optimizer-state checkpoint. A lock prevents concurrent writers, and content hashes reject changed inputs, relevant source dependencies or scientific settings. `resume=false` rejects existing results. Reducing `n_seeds` preserves earlier completed results in the combined tables.
+
+The hybrid's documented `linear_reg=inf` setting is supported in grids and configuration. Saved settings encode it as `{"__float__":"+inf"}`; use `genetic_perturbation_playground.experiments.checkpoints.decode_settings` after reading JSON to restore it. Scores must always be finite. The experiment seed controls both retention and neural initialization; independent `neural.seed` values and `seed` entries in the active neural grid are rejected.
 
 The output folder contains:
 
@@ -271,9 +275,7 @@ The output folder contains:
 
 Score rows contain `seed`, `k`, `perturbation`, `n_reference_batches`, `n_retained_batches`, `n_removed_batches`, `model`, `metric`, `value`. Models are `retained_mean`, `kernel_virtual`, `neural_virtual`; the metric is `mse`. Summaries report baseline and virtual MSE, `improvement = baseline_mse - virtual_mse` (positive is better), strict improvement fraction, cohort sizes, seed counts and sample SD across seed means. They report both all eligible perturbations and `removed_only`, which excludes exact-k references. Empty cohorts have zero counts and missing metrics; a one-seed SD is missing.
 
-Perturbations with fewer than k original batches are explicitly excluded for that k. Exact-k references remain as diagnostics with zero baseline error. A requested k with no eligible perturbations fails before fitting. The small local fixture has only two HUVEC batches per treatment and negative controls; the default experiment requires the full embeddings. Tests use synthetic data with sufficient coverage and do not launch the full experiment.
-
-For evaluation, exclude held-out responses from both fitting and `observed`, and compare predictions under the same reference distribution. Internal neural cross-fitting does not replace an outer evaluation split. Neural inference averages network outputs before applying coefficients; it does not apply the network to averaged controls. Corrections are accumulated one environment at a time, without constructing a perturbation-by-environment-by-output array.
+Perturbations with fewer than k original batches are explicitly excluded for that k. Exact-k references remain as diagnostics with zero baseline error. If any requested k has no eligible perturbations, the runner saves `reference_pairs.csv` and `eligibility.csv`, reports all empty cohorts and stops before fitting. The small local fixture has only two HUVEC batches per treatment and negative controls; the default experiment requires the full embeddings. Tests use synthetic data with sufficient coverage and do not launch the full experiment.
 
 # Evaluation
 

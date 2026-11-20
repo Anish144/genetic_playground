@@ -10,6 +10,18 @@ def state():
     return importlib.import_module("genetic_perturbation_playground.experiments.checkpoints")
 
 
+def test_settings_encode_infinity_without_allowing_nonfinite_scores(state, tmp_path):
+    settings = {"neural": {"linear_reg": float("inf")}, "grid": [None, 0.0, float("inf")]}
+    encoded = state.encode_settings(settings)
+    state.write_json(tmp_path / "settings.json", encoded)
+    assert state.decode_settings(state.read_json(tmp_path / "settings.json")) == settings
+    assert state.fingerprint_settings(settings) == state.fingerprint_settings(encoded)
+    with pytest.raises(ValueError):
+        state.write_json(tmp_path / "scores.json", {"mse": float("inf")})
+    with pytest.raises(ValueError):
+        state.fingerprint_settings({"penalty": float("nan")})
+
+
 def test_atomic_write_preserves_previous_file_on_failure(state, tmp_path):
     path = tmp_path / "result.json"
     state.write_json(path, {"mse": 2.0})

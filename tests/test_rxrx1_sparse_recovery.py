@@ -202,13 +202,14 @@ def runner():
     return importlib.import_module("evaluate_rxrx1_sparse_recovery")
 
 
-def runner_config(**overrides):
+def runner_config(*, variant="per_x", **overrides):
     register_configs()
     with initialize_config_dir(str(ROOT / "configs"), version_base=None):
         cfg = compose(
             "evaluate_rxrx1_sparse_recovery",
             [
                 "name=test",
+                f"neural={variant}",
                 "proxy_controls=negative",
                 "batch_unit=experiment",
                 "neural.device=cpu",
@@ -284,6 +285,70 @@ def test_runner_rejects_empty_requested_cohort_before_fitting(
     monkeypatch.setattr(tuning, "make_kernel", lambda *args: pytest.fail("fitted an empty cohort"))
     with pytest.raises(ValueError, match="eligible|coverage"):
         run(runner, data, runner_config(k_values=[2, 3, 4]), tmp_path)
+
+
+@pytest.mark.parametrize("grid", ["neural_grid", "neural_variant_grids.hybrid"])
+def test_runner_rejects_seed_in_active_tuning_grid(runner, recovery_data, tmp_path, grid):
+    register_configs()
+    with initialize_config_dir(str(ROOT / "configs"), version_base=None):
+        cfg = compose(
+            "evaluate_rxrx1_sparse_recovery",
+            ["name=test", "seed=3", "neural=hybrid", f"+{grid}.seed=[42]"],
+        )
+    with pytest.raises(ValueError, match="seed.*grid|grid.*seed"):
+        run(runner, recovery_data, cfg, tmp_path)
+    assert not (tmp_path / "manifest.json").exists()
+
+
+def test_hybrid_infinite_linear_penalty_selects_refits_and_resumes(runner, recovery_data, tmp_path):
+    from genetic_perturbation_playground.experiments import checkpoints as state
+
+    cfg = runner_config(variant="hybrid", neural={"linear_reg": float("inf")})
+    cfg.neural_variant_grids.hybrid.linear_reg = [float("inf")]
+    cfg.neural_variant_grids.hybrid.deviation_reg = [None]
+    expected = run(runner, recovery_data, cfg, tmp_path)
+    selected = state.decode_settings(read_json(tmp_path / "seeds/seed_0/k_2/selected.json"))
+    assert np.isposinf(selected["selected"]["neural"]["linear_reg"])
+    pd.testing.assert_frame_equal(run(runner, recovery_data, cfg, tmp_path), expected)
+    assert np.isfinite(expected.value).all()
+
+
+def test_source_fingerprint_ignores_unrelated_code_but_tracks_dependencies(
+    runner, tmp_path, monkeypatch
+):
+    for folder in ["src", "scripts"]:
+        for source in (ROOT / folder).rglob("*.py"):
+            destination = tmp_path / source.relative_to(ROOT)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(source.read_bytes())
+    monkeypatch.setattr(runner, "ROOT", tmp_path)
+    original = runner._source_fingerprint()
+    for relative in [
+        "scripts/rxrx3_core_proxy_minimal_repro.py",
+        "src/genetic_perturbation_playground/model/proxy_confounded.py",
+    ]:
+        path = tmp_path / relative
+        path.write_text(path.read_text() + "\n# unrelated change\n")
+    assert runner._source_fingerprint() == original
+    for relative in [
+        "scripts/train_rxrx1_transfer.py",
+        "src/genetic_perturbation_playground/model/batch_transfer.py",
+        "src/genetic_perturbation_playground/utils/metrics.py",
+    ]:
+        path = tmp_path / relative
+        previous = runner._source_fingerprint()
+        path.write_text(path.read_text() + "\n# relevant change\n")
+        assert runner._source_fingerprint() != previous
+
+
+def test_empty_cohorts_save_coverage_and_report_all_missing_k(runner, recovery_data, tmp_path):
+    data = recovery_data[recovery_data.obs.batch.isin(["HUVEC-0", "HUVEC-1"])]
+    with pytest.raises(ValueError, match=r"k=3.*k=4"):
+        run(runner, data, runner_config(k_values=[2, 3, 4]), tmp_path)
+    assert (tmp_path / "reference_pairs.csv").exists()
+    coverage = pd.read_csv(tmp_path / "eligibility.csv")
+    assert coverage.groupby("k").eligible.sum().to_dict() == {2: 2, 3: 0, 4: 0}
+    assert set(coverage[~coverage.eligible].reason) == {"fewer_than_k_batches"}
 
 
 def test_runner_resume_equals_uninterrupted(runner, recovery_data, tmp_path, monkeypatch):

@@ -19,6 +19,7 @@ from omegaconf import DictConfig
 
 from genetic_perturbation_playground.config import resolve_model_config
 from genetic_perturbation_playground.experiments.checkpoints import (
+    encode_settings,
     fingerprint_settings,
     read_json,
     write_json,
@@ -231,6 +232,10 @@ def candidate_configs(cfg: DictConfig) -> dict[str, list[dict]]:
     if not isinstance(cfg.n_configs, int) or isinstance(cfg.n_configs, bool) or cfg.n_configs < 1:
         raise ValueError("n_configs must be a positive integer.")
     grids = {"kernel": cfg.kernel_grid, "neural": _neural_grid(cfg)}
+    if "seed" in grids["neural"]:
+        raise ValueError(
+            "The active neural tuning grid cannot override seed; use the experiment seed."
+        )
     result = {}
     for bridge, grid in grids.items():
         if not grid or any(not values for values in grid.values()):
@@ -349,7 +354,7 @@ def _resumable_trial(path, identity, train, evaluate, cfg):
             raise ValueError(f"Trial {path} must produce finite, nonnegative MSE.")
         rows.append({"n_steps": step, "mse": score})
         if bridge == "neural":
-            write_json(partial_path, {"identity": identity, "rows": rows})
+            write_json(partial_path, {"identity": encode_settings(identity), "rows": rows})
         print(
             f"  {bridge} fold {identity['inner_fold']} checkpoint {step}: mse {score:.6g}",
             flush=True,
@@ -362,7 +367,7 @@ def _resumable_trial(path, identity, train, evaluate, cfg):
         model.fit(train, steps, record_score)
     record = {
         "schema_version": 1,
-        "identity": identity,
+        "identity": encode_settings(identity),
         "rows": rows,
         "rows_digest": fingerprint_settings({"rows": rows}),
     }
@@ -376,7 +381,7 @@ def _validate_trial(record, identity, path):
     rows = record.get("rows")
     valid = (
         record.get("schema_version") == 1
-        and record.get("identity") == identity
+        and record.get("identity") == encode_settings(identity)
         and isinstance(rows, list)
         and all(isinstance(row, dict) for row in rows)
     )
