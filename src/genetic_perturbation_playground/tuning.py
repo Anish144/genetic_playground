@@ -142,7 +142,7 @@ def _neural_rows(train: sc.AnnData, evaluate: Evaluate, cfg: DictConfig) -> list
     """Validation scores of each sampled neural configuration at every checkpoint."""
     checkpoints = list(cfg.neural_checkpoints)
     rows = []
-    for config in sample_configs(cfg.neural_grid, cfg.n_configs, cfg.seed):
+    for config in sample_configs(_neural_grid(cfg), cfg.n_configs, cfg.seed):
         model = make_neural(config | {"n_steps": max(checkpoints)}, cfg)
 
         def record(step, model=model, config=config):
@@ -152,6 +152,13 @@ def _neural_rows(train: sc.AnnData, evaluate: Evaluate, cfg: DictConfig) -> list
 
         model.fit(train, checkpoints, record)
     return rows
+
+
+def _neural_grid(cfg: DictConfig) -> dict:
+    """Add this variant's grid; explicit neural_grid settings take precedence."""
+    variants = cfg.get("neural_variant_grids", {})
+    extra = variants.get(cfg.neural.variant, {}) if variants else {}
+    return dict(extra) | dict(cfg.neural_grid)
 
 
 def mean_over_inner_folds(inner: pd.DataFrame) -> pd.DataFrame:
@@ -165,7 +172,7 @@ def select(averaged: pd.DataFrame, cfg: DictConfig) -> dict:
     """The configuration of each bridge with the lowest mean validation mse."""
     settings = {
         "kernel": list(cfg.kernel_grid),
-        "neural": list(dict.fromkeys([*cfg.neural_grid, "n_steps"])),
+        "neural": list(dict.fromkeys([*_neural_grid(cfg), "n_steps"])),
     }
     return {
         bridge: _best(averaged[averaged["bridge"] == bridge], names)

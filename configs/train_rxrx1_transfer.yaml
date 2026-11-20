@@ -16,3 +16,4 @@ proxy_controls: positive  # negative, positive or both
 wandb_mode: online  # one W&B run per job, named name, with each fold's neural bridge loss; offline or disabled
 neural:
   width_w: 128        # hidden units of psi
+  gene_block_size: 384  # compute coefficients for all embedding coordinates together

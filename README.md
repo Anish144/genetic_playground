@@ -311,6 +311,7 @@ data/                          Downloaded data, embeddings and OpenPhenom weight
 notebooks/                     Exploration and derivations
 tests/                         Model, data and evaluation checks
 hpc/run.sbatch                 Slurm GPU launcher
+hpc/run_beaker.qsub            Beaker Grid Engine GPU launcher
 outputs/<date>/<name>_<time>/   Results, plots and .hydra/ configuration snapshots
 ```
 
@@ -328,7 +329,7 @@ uv run python scripts/tune_replogle_transfer.py name=replogle_shared_tuned neura
 
 For linear models plus the kernel bridge on CPU, append `'bridges=[kernel]'` to a **training** command; `'bridges=[]'` runs only linear models. Tuning scripts always tune a kernel bridge and one neural variant: `neural=per_x` (default), `neural=shared_2nn` or `neural=hybrid`.
 
-Replogle tuning uses `configs/tune_replogle_transfer.yaml` for all neural variants. It evaluates all 16 neural configurations, with hidden widths 32/64, output dimensions 8/16 and checkpoints from 0 to 50 steps, plus all six kernel configurations.
+Each tuning config samples 32 neural configurations for the selected model and evaluates all kernel configurations (20 for Replogle, 30 for RxRx1). Networks use one hidden layer. `neural_grid` holds common ranges; `neural_variant_grids` adds the separate deviation penalty for shared 2NN and the deviation and linear penalties for hybrid. Explicit `neural_grid` settings override the variant ranges. Checkpoints include initialization and run through 400 steps; every sampled candidate trains to 400, with the best checkpoint chosen on inner validation.
 
 **RxRx1:** download the images and metadata from the [dataset page](https://www.rxrx.ai/rxrx1). Arrange them as:
 
@@ -364,5 +365,23 @@ mkdir -p outputs
 sbatch -J replogle hpc/run.sbatch scripts/train_replogle_transfer.py name=replogle
 sbatch -J replogle_tune --time=2-00:00:00 hpc/run.sbatch scripts/tune_replogle_transfer.py name=replogle_tuned
 ```
+
+**Beaker:** use Grid Engine's `qsub`, not `sbatch`. The launcher requests one 80 GB A100 GPU, 96 GB host memory and 48 hours, following `/share/apps/examples/cluster_induction/one_gpu_test.sh`. GPU jobs use `tmem`; the CPU-job `h_vmem` limit is not needed. Override resources with `qsub -l ...`.
+
+The launcher uses Beaker's installed `/share/apps/singularity_pytorch/pytorch_25.11-py3.sif` container, which has Python 3.12 and `uv`. It installs the locked project dependencies in `.venv-beaker`, separate from any host environment, and preserves the scheduler's `CUDA_VISIBLE_DEVICES` selection. This avoids the CentOS 7 host's older C library. The repository and datasets must already be available on Beaker's shared storage. To prepare dependencies before occupying a GPU, run from the repo root:
+
+```bash
+export BEAKER_IMAGE=/share/apps/singularity_pytorch/pytorch_25.11-py3.sif
+SINGULARITYENV_UV_PROJECT_ENVIRONMENT="$PWD/.venv-beaker" \
+  singularity exec --cleanenv --bind "$PWD:$PWD" --pwd "$PWD" "$BEAKER_IMAGE" \
+  uv sync --frozen --no-dev
+mkdir -p outputs
+qsub -N replogle_shared hpc/run_beaker.qsub scripts/tune_replogle_transfer.py \
+  name=replogle_shared neural=shared_2nn
+qsub -N huvec_hybrid hpc/run_beaker.qsub scripts/tune_rxrx1_transfer.py \
+  name=huvec_hybrid neural=hybrid wandb_mode=offline
+```
+
+Each submission runs one neural variant; change `neural` to run the other. Use `qsub -v BEAKER_IMAGE=/absolute/path/to/image.sif ...` for another image containing Python 3.12+ and `uv`. If `data/` points outside the bound repository and home directory, also bind its target with `SINGULARITY_BINDPATH`. `qsub -verify` prints the submission settings without queuing a job.
 
 **Results:** Replogle writes `scores_per_perturbation.csv`, `scores_per_batch.csv` and plots. Its tuning script also saves per-pair MSE in `scores_per_pair.csv`. RxRx1 writes per-pair `scores.csv` and overall `summary.csv`. Both tuning scripts save `inner_scores.csv` and `selected.csv`. Coverage plots are under `plots/by_training_batches/batch_<label>/`. Model weights are not saved by these entry points. Use each run's `.hydra/config.yaml` and logs to interpret archived results; older runs can differ in preprocessing, scaling and validation splits.

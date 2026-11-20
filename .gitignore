@@ -8,6 +8,7 @@ wheels/
 
 # Virtual environments
 .venv
+.venv-beaker/
 
 /data/
 *.h5ad

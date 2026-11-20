@@ -1,0 +1,48 @@
+#!/bin/bash
+# Run one script on one 80 GB A100 through Beaker's Grid Engine scheduler.
+# Submit from the repo root after creating outputs/. Example:
+#   qsub -N huvec_hybrid hpc/run_beaker.qsub scripts/tune_rxrx1_transfer.py \
+#     name=huvec_hybrid neural=hybrid wandb_mode=offline
+#
+# Beaker's CentOS 7 host cannot run the current PyTorch wheels directly.
+# Use the installed Python 3.12 container and a separate project environment.
+# Override its image with qsub -v BEAKER_IMAGE=/absolute/path/to/image.sif.
+# qsub command-line resource flags override the defaults below.
+#$ -S /bin/bash
+#$ -cwd
+#$ -j y
+#$ -N transfer
+#$ -o outputs
+#$ -l gpu=true
+#$ -l gpu_type=a100_80
+#$ -l tmem=96G
+#$ -l h_rt=48:00:00
+
+set -euo pipefail
+if (( $# == 0 )); then
+    echo "Usage: qsub hpc/run_beaker.qsub scripts/<script>.py [Hydra overrides...]" >&2
+    exit 2
+fi
+cd "${SGE_O_WORKDIR:?Submit this script with qsub from the repo root}"
+image=${BEAKER_IMAGE:-/share/apps/singularity_pytorch/pytorch_25.11-py3.sif}
+
+# GPU slots are not CPU thread counts. Limit each job's numerical libraries.
+export SINGULARITYENV_OMP_NUM_THREADS=8
+export SINGULARITYENV_OPENBLAS_NUM_THREADS=8
+export SINGULARITYENV_MKL_NUM_THREADS=8
+export SINGULARITYENV_TQDM_DISABLE=1
+export SINGULARITYENV_PYTHONUNBUFFERED=1
+export SINGULARITYENV_PYTHONPATH="$PWD/src"
+export SINGULARITYENV_UV_PROJECT_ENVIRONMENT="$PWD/.venv-beaker"
+export SINGULARITYENV_PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+# Retain the scheduler's GPU selection when clearing the host environment.
+if [[ -n ${CUDA_VISIBLE_DEVICES+x} ]]; then
+    export SINGULARITYENV_CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES"
+fi
+
+echo "job ${JOB_ID:-unknown} on $(hostname): $*"
+git rev-parse --short HEAD
+git status --short
+
+exec singularity exec --cleanenv --nv --bind "$PWD:$PWD" --pwd "$PWD" \
+    "$image" uv run --frozen --no-dev python "$@"

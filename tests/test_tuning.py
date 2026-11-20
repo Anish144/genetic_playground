@@ -65,6 +65,57 @@ def test_replogle_grid_varies_hidden_width_independently_of_output_dimension():
         assert model.bridge_kwargs["n_features_w"] == settings["psi_size"]
 
 
+@pytest.mark.parametrize(
+    "variant,penalties,n_trials",
+    [
+        ("per_x", set(), 1),
+        ("shared_2nn", {"deviation_reg"}, 2),
+        ("hybrid", {"deviation_reg", "linear_reg"}, 4),
+    ],
+)
+def test_tuning_samples_and_retains_only_the_selected_variants_penalties(
+    variant, penalties, n_trials
+):
+    with initialize_config_dir(str(ROOT / "configs"), version_base=None):
+        config = compose(
+            "tune_replogle_transfer",
+            [f"neural={variant}", "neural.device=cpu", "neural.cross_fit_folds=0"],
+        )
+    config.neural_grid = {"psi_size": [2], "width_w": [4], "reg": [0.01]}
+    config.kernel_grid = {"reg": [0.01], "lengthscale_scale": [1]}
+    config.neural_checkpoints = [1]
+    config.n_configs = 10
+    OmegaConf.update(
+        config,
+        "neural_variant_grids",
+        {
+            "shared_2nn": {"deviation_reg": [0.001, 0.1]},
+            "hybrid": {"deviation_reg": [0.001, 0.1], "linear_reg": [0.0, 0.01]},
+        },
+        merge=False,
+        force_add=True,
+    )
+    train = _cells()
+    reference = train[train.obs.batch == "b0"]
+    rows = tuning._neural_rows(
+        train,
+        lambda model: {"mse": float(np.square(model.predict(["a"], reference)).mean())},
+        config,
+    )
+    assert len(rows) == n_trials
+    assert set(rows[0]) & {"deviation_reg", "linear_reg"} == penalties
+    if "linear_reg" in penalties:
+        assert {row["linear_reg"] for row in rows} == {0.0, 0.01}
+    scores = pd.DataFrame(
+        rows + [{"bridge": "kernel", "reg": 0.01, "lengthscale_scale": 1, "mse": 1.0}]
+    )
+    selected = tuning.select(scores, config)["neural"]
+    assert set(selected) & {"deviation_reg", "linear_reg"} == penalties
+    model = tuning.make_neural(selected, config).model
+    for name in penalties:
+        assert model.bridge_kwargs[name] == selected[name]
+
+
 def test_selection_ranks_configurations_by_their_mean_over_inner_folds():
     inner = pd.DataFrame(
         {
