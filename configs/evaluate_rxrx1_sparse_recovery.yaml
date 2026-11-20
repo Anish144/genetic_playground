@@ -10,6 +10,7 @@ include_linear: false  # also compare pooled, shift, and fitted-slope virtual av
 n_seeds: 10
 k_values: [2, 3, 4]
 n_configs: 8  # sample this many candidates per bridge once, reuse across seeds/k
+hp_sampling_seed: null  # null uses seed; otherwise changes only the configuration draw
 cell_type: HUVEC
 batch_unit: plate
 proxy_controls: positive

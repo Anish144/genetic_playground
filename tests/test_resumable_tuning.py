@@ -185,3 +185,39 @@ def test_omitting_kernel_preserves_the_ten_sampled_neural_candidates():
     assert set(candidates) == {"neural"}
     assert len(candidates["neural"]) == 10
     assert candidates["neural"] == original
+
+
+def test_hp_sampling_seed_changes_only_the_candidate_draw():
+    register_configs()
+    with initialize_config_dir(str(ROOT / "configs"), version_base=None):
+        cfg = compose(
+            "evaluate_rxrx1_sparse_recovery", ["name=test", "neural=hybrid", "n_configs=10"]
+        )
+    original = tuning.candidate_configs(cfg)
+    OmegaConf.update(cfg, "hp_sampling_seed", None, force_add=True)
+    assert tuning.candidate_configs(cfg) == original
+    cfg.hp_sampling_seed = 0
+    assert tuning.candidate_configs(cfg) == original
+
+    cfg.hp_sampling_seed = 1
+    first = tuning.candidate_configs(cfg)
+    assert first != original
+    assert tuning.candidate_configs(cfg) == first
+    cfg.hp_sampling_seed = 2
+    assert tuning.candidate_configs(cfg) != first
+    assert cfg.seed == 0 and cfg.neural.seed == 0
+
+    cfg.seed = 7
+    cfg.hp_sampling_seed = 0
+    assert tuning.candidate_configs(cfg) == original
+    cfg.hp_sampling_seed = 1
+    assert tuning.candidate_configs(cfg) == first
+    assert cfg.seed == 7 and cfg.neural.seed == 7
+
+
+@pytest.mark.parametrize("value", [-1, True, 1.5, "1"])
+def test_invalid_hp_sampling_seeds_are_rejected(value):
+    cfg = tiny_config()
+    OmegaConf.update(cfg, "hp_sampling_seed", value, force_add=True)
+    with pytest.raises(ValueError, match="hp_sampling_seed"):
+        tuning.candidate_configs(cfg)

@@ -427,6 +427,36 @@ def test_runner_resume_equals_uninterrupted(runner, recovery_data, tmp_path, mon
         assert record["identity"]["config"] == candidates[trial.parent.name][0]
 
 
+def test_hp_sampling_seed_preserves_retention_and_initialization(runner, recovery_data, tmp_path):
+    cfg = runner_config(variant="hybrid", bridges=["neural"], k_values=[3])
+    cfg.neural_grid.reg = [0.1, 0.2, 0.3, 0.4]
+    cfg.neural_variant_grids.hybrid.deviation_reg = [0.1]
+    cfg.neural_variant_grids.hybrid.linear_reg = [0.01]
+    OmegaConf.update(cfg, "hp_sampling_seed", 1, force_add=True)
+    candidates = []
+    for sampling_seed in (1, 2):
+        cfg.hp_sampling_seed = sampling_seed
+        directory = tmp_path / f"hp_{sampling_seed}"
+        run(runner, recovery_data, cfg, directory)
+        identity = read_json(directory / "manifest.json")["identity"]
+        candidates.append(identity["candidates"])
+        assert identity["settings"]["hp_sampling_seed"] == sampling_seed
+        for trial in directory.glob("seeds/seed_0/k_3/trials/fold_*/neural/*.json"):
+            assert read_json(trial)["identity"]["model"]["seed"] == 0
+
+    assert candidates[0] != candidates[1]
+    left, right = (tmp_path / f"hp_{seed}" / "seeds/seed_0" for seed in (1, 2))
+    assert (left / "retained_order.csv").read_bytes() == (right / "retained_order.csv").read_bytes()
+    with (
+        np.load(left / "k_3/estimates.npz") as first,
+        np.load(right / "k_3/estimates.npz") as second,
+    ):
+        for field in ("perturbations", "full_mean", "retained_mean"):
+            np.testing.assert_array_equal(first[field], second[field])
+    with pytest.raises(ValueError, match="incompatible"):
+        run(runner, recovery_data, cfg, tmp_path / "hp_1")
+
+
 def test_completed_seed_resume_and_extension(runner, recovery_data, tmp_path, monkeypatch):
     cfg = runner_config()
     expected = run(runner, recovery_data, cfg, tmp_path)

@@ -256,6 +256,17 @@ Tuning is repeated independently for every `(seed,k)` pair. Each of k inner fold
 
 Sample **8 configurations per bridge** without replacement from the existing grids once, reusing that draw across seeds and k. `n_configs` changes the subsample size; neural scoring checkpoints remain unchanged. With 10 seeds and the default grids, this schedules 720 kernel tuning fits, 720 neural tuning runs and 30 final refits per bridge. The runner prints the workload before fitting; kernel similarities are currently recomputed by the existing model implementation.
 
+By default, candidate sampling uses the base `seed`. Set `hp_sampling_seed` to a nonnegative integer to vary the candidate draw independently of retained batches and neural initialization; `null` preserves the default. For a controlled comparison, keep `seed=0`, use `n_seeds=1`, and change only `hp_sampling_seed` and the output name between searches:
+
+```bash
+uv run python scripts/evaluate_rxrx1_sparse_recovery.py \
+  name=huvec_hybrid_k3_hp1 neural=hybrid 'bridges=[neural]' \
+  include_linear=true seed=0 n_seeds=1 'k_values=[3]' \
+  n_configs=10 hp_sampling_seed=1
+```
+
+The sampling seed is part of the scientific run identity, so each search needs a distinct output directory. It does not resample configurations between experiment seeds or k values within that run.
+
 ```bash
 uv run python scripts/evaluate_rxrx1_sparse_recovery.py name=huvec_sparse n_seeds=10 seed=0 n_configs=8
 # Repeat the identical command to resume. Increase n_seeds to append new seeds.

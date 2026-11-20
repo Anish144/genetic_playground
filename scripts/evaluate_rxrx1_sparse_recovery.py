@@ -11,6 +11,9 @@ fitting, validation and selection are repeated for each seed/k. Completed
 trials and seeds are reused from the stable output directory. An interrupted
 neural trial restarts; its optimizer state is not saved.
 
+Set hp_sampling_seed to change only the candidate draw while keeping seed fixed
+for retained batches and neural initialization. Null uses the base seed.
+
 Use bridges=[neural] to omit the kernel and include_linear=true to add the
 pooled, shift and fitted-slope models. Select one neural variant per run with
 neural=per_x, neural=shared_2nn or neural=hybrid, using distinct output names.

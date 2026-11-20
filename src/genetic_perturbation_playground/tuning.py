@@ -240,12 +240,15 @@ def fit_selected(train: sc.AnnData, selected: dict, cfg: DictConfig, log_key=Non
 
 
 def candidate_configs(cfg: DictConfig) -> dict[str, list[dict]]:
-    """Sample each requested bridge's grid once using the base seed.
+    """Sample each requested grid without changing experiment randomness.
 
     Parameters
     ----------
     cfg : omegaconf.DictConfig
         Tuning grids, positive n_configs, base seed and bridges to include.
+        Optional hp_sampling_seed is a nonnegative integer controlling only
+        candidate sampling. Missing or None uses seed. The configuration is
+        not mutated; retention and neural initialization keep their own seed.
 
     Returns
     -------
@@ -254,6 +257,11 @@ def candidate_configs(cfg: DictConfig) -> dict[str, list[dict]]:
     """
     if not isinstance(cfg.n_configs, int) or isinstance(cfg.n_configs, bool) or cfg.n_configs < 1:
         raise ValueError("n_configs must be a positive integer.")
+    sampling_seed = cfg.get("hp_sampling_seed")
+    if sampling_seed is None:
+        sampling_seed = cfg.seed
+    elif type(sampling_seed) is not int or sampling_seed < 0:
+        raise ValueError("hp_sampling_seed must be a nonnegative integer or null.")
     available = {"kernel": cfg.kernel_grid, "neural": _neural_grid(cfg)}
     grids = {bridge: available[bridge] for bridge in cfg.get("bridges", available)}
     if "seed" in grids.get("neural", {}):
@@ -269,7 +277,7 @@ def candidate_configs(cfg: DictConfig) -> dict[str, list[dict]]:
             for values in grid.values()
         ):
             raise ValueError(f"The {bridge} tuning grid contains duplicate values.")
-        result[bridge] = sample_configs(grid, cfg.n_configs, cfg.seed)
+        result[bridge] = sample_configs(grid, cfg.n_configs, sampling_seed)
     return result
 
 
