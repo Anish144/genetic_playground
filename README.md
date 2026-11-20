@@ -244,6 +244,35 @@ Rows are labeled by perturbation; columns retain the reference feature annotatio
 
 For RxRx1, use **HUVEC only** when fitting and choosing reference/observed rows. Environment labels are supplied by the caller. Equal weights define a reference population; a causal interpretation requires the bridge assumptions and appropriate observed intervention means. Estimator 2 is not automatically doubly robust.
 
+### RxRx1 sparse-response recovery
+
+`scripts/evaluate_rxrx1_sparse_recovery.py` tests whether virtual averaging recovers the full observed mean better than the sparse observed average. For each seed, independently permute each treatment's originally observed batches and retain the first `k=2,3,4`; these retained sets are nested across k. All selected proxy controls remain available, including controls in batches with no retained treatment responses. Defaults are HUVEC, plate batches and positive controls. Positive controls never become response targets in this experiment, even with negative-only proxies.
+
+The full target and retained baseline average crop means **equally across batches**. Each virtual estimate averages predictions over that perturbation's own original reference batches, including retained ones. It uses the pure bridge prediction, without observed-value replacement. Score each estimate by mean squared error over embedding coordinates against the full target. Fitting keeps the existing crop-count weights and retained-response target centering.
+
+Tuning is repeated independently for every `(seed,k)` pair. Each of k inner folds holds out one retained response batch per perturbation, leaving k-1 batches for fitting and retaining all controls. Select settings by MSE averaged equally over perturbations, then folds, and refit on all k retained batches. Removed responses and full-data means never enter tuning. `neural.cross_fit_folds=0` in this preset because k=2 inner fits have only one response batch per perturbation. The neural variant can be selected with `neural=per_x|shared_2nn|hybrid`.
+
+Sample **8 configurations per bridge** without replacement from the existing grids once, reusing that draw across seeds and k. `n_configs` changes the subsample size; neural scoring checkpoints remain unchanged. With 10 seeds and the default grids, this schedules 720 kernel tuning fits, 720 neural tuning runs and 30 final refits per bridge. The runner prints the workload before fitting; kernel similarities are currently recomputed by the existing model implementation.
+
+```bash
+uv run python scripts/evaluate_rxrx1_sparse_recovery.py name=huvec_sparse n_seeds=10 seed=0 n_configs=8
+# Repeat the identical command to resume. Increase n_seeds to append new seeds.
+```
+
+Results live in the stable folder `outputs/rxrx1_sparse_recovery/huvec_sparse/`; override `output_dir` to choose another location. Invocation logs have timestamped subfolders. The runner saves each completed candidate/fold trial, partial neural scores at every scoring checkpoint, each completed seed/k result, and each completed seed. Resume skips completed trials and stages; an interrupted neural trial restarts from the beginning. An interrupted final refit reuses completed tuning. There is no optimizer-state checkpoint. A lock prevents concurrent writers, and content hashes reject changed inputs, source code or scientific settings. `resume=false` rejects existing results. Reducing `n_seeds` preserves earlier completed results in the combined tables.
+
+The output folder contains:
+
+- `manifest.json`, `reference_pairs.csv`, `eligibility.csv`: resolved scientific identity, sampled candidates, original reference memberships and coverage exclusions.
+- `seeds/seed_<seed>/retained_order.csv` and `effective_config.json`: the repeatable batch draw and effective settings.
+- `seeds/seed_<seed>/k_<k>/trials/`: one committed JSON per candidate/fold; `.partial.json` files are progress only.
+- Each seed/k folder's `inner_scores.csv`, `selected.json`, `estimates.npz`, `scores.csv` and `summary.csv`: validation scores, winners, labeled full/retained/virtual mean vectors, per-perturbation MSE and paired summaries. NPZ arrays load with `allow_pickle=False`.
+- Root `scores.csv` and `summary.csv`: rebuilt from validated completed stages on every invocation, including an otherwise fully skipped resume.
+
+Score rows contain `seed`, `k`, `perturbation`, `n_reference_batches`, `n_retained_batches`, `n_removed_batches`, `model`, `metric`, `value`. Models are `retained_mean`, `kernel_virtual`, `neural_virtual`; the metric is `mse`. Summaries report baseline and virtual MSE, `improvement = baseline_mse - virtual_mse` (positive is better), strict improvement fraction, cohort sizes, seed counts and sample SD across seed means. They report both all eligible perturbations and `removed_only`, which excludes exact-k references. Empty cohorts have zero counts and missing metrics; a one-seed SD is missing.
+
+Perturbations with fewer than k original batches are explicitly excluded for that k. Exact-k references remain as diagnostics with zero baseline error. A requested k with no eligible perturbations fails before fitting. The small local fixture has only two HUVEC batches per treatment and negative controls; the default experiment requires the full embeddings. Tests use synthetic data with sufficient coverage and do not launch the full experiment.
+
 For evaluation, exclude held-out responses from both fitting and `observed`, and compare predictions under the same reference distribution. Internal neural cross-fitting does not replace an outer evaluation split. Neural inference averages network outputs before applying coefficients; it does not apply the network to averaged controls. Corrections are accumulated one environment at a time, without constructing a perturbation-by-environment-by-output array.
 
 # Evaluation

@@ -3,6 +3,7 @@
 import fcntl
 import hashlib
 import json
+import math
 import os
 import tempfile
 from collections.abc import Callable, Iterator
@@ -25,7 +26,7 @@ def atomic_write(path: Path, writer: Callable[[BinaryIO], None]) -> None:
     temporary = None
     try:
         with tempfile.NamedTemporaryFile(
-            dir=path.parent, prefix=f".{path.name}.", delete=False
+            dir=path.parent, prefix=f".{path.name}.", suffix=".tmp", delete=False
         ) as stream:
             temporary = Path(stream.name)
             writer(stream)
@@ -42,7 +43,15 @@ def _json_bytes(payload):
 
 
 def write_json(path: Path, payload: dict) -> None:
-    """Atomically save a JSON object, rejecting nonfinite numerical values."""
+    """Atomically save a finite JSON object.
+
+    Parameters
+    ----------
+    path : pathlib.Path
+        Destination, replaced only after successful serialization and flushing.
+    payload : dict
+        JSON-compatible values; NaN and infinity are rejected.
+    """
     content = _json_bytes(payload)
     atomic_write(path, lambda stream: stream.write(content))
 
@@ -51,10 +60,35 @@ def _invalid_constant(value):
     raise ValueError(f"Nonfinite JSON constant: {value}")
 
 
+def _finite_float(value):
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError(f"Nonfinite JSON number: {value}")
+    return parsed
+
+
 def read_json(path: Path) -> dict:
-    """Read a committed JSON object or report its path and recovery action."""
+    """Read a committed JSON object, rejecting malformed or nonfinite values.
+
+    Parameters
+    ----------
+    path : pathlib.Path
+        File containing a JSON object, not a list or scalar.
+
+    Returns
+    -------
+    dict
+        Parsed checkpoint contents.
+
+    Raises
+    ------
+    ValueError
+        If the file cannot be read or contains invalid checkpoint JSON.
+    """
     try:
-        result = json.loads(path.read_text(), parse_constant=_invalid_constant)
+        result = json.loads(
+            path.read_text(), parse_constant=_invalid_constant, parse_float=_finite_float
+        )
         if not isinstance(result, dict):
             raise ValueError("Expected a JSON object")
         return result
@@ -65,13 +99,35 @@ def read_json(path: Path) -> dict:
 
 
 def fingerprint_file(path: Path) -> str:
-    """Return a streaming SHA-256 digest of a file's contents."""
+    """Hash file contents without loading the entire file into memory.
+
+    Parameters
+    ----------
+    path : pathlib.Path
+        Readable file; names and modification times do not affect the hash.
+
+    Returns
+    -------
+    str
+        Hexadecimal SHA-256 digest.
+    """
     with path.open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
 def fingerprint_settings(settings: dict) -> str:
-    """Hash canonical finite JSON, independent of dictionary insertion order."""
+    """Hash finite JSON settings with canonical dictionary key ordering.
+
+    Parameters
+    ----------
+    settings : dict
+        JSON-compatible settings. List ordering remains significant.
+
+    Returns
+    -------
+    str
+        Hexadecimal SHA-256 digest, independent of dictionary insertion order.
+    """
     return hashlib.sha256(_json_bytes(settings)).hexdigest()
 
 
@@ -81,7 +137,8 @@ def ensure_manifest(directory: Path, expected: dict, *, resume: bool) -> dict:
     Parameters
     ----------
     directory : pathlib.Path
-        Locked output directory. Only logs and the lock may predate the manifest.
+        Locked output directory. Only logs, the lock and abandoned temporary
+        manifest writes may predate the manifest.
     expected : dict
         schema_version and identity; optional provenance is retained from creation.
     resume : bool
@@ -101,7 +158,12 @@ def ensure_manifest(directory: Path, expected: dict, *, resume: bool) -> dict:
         if any(original.get(key) != expected[key] for key in ("schema_version", "identity")):
             raise ValueError(f"Run manifest {path} is incompatible; use a fresh output directory.")
         return original
-    existing = [p for p in directory.iterdir() if p.name not in {"logs", ".lock"}]
+    existing = [
+        p
+        for p in directory.iterdir()
+        if p.name not in {"logs", ".lock"}
+        and not (p.name.startswith(".manifest.json.") and p.name.endswith(".tmp"))
+    ]
     if existing:
         raise ValueError(
             f"Cannot initialize nonempty output directory {directory} without a manifest."
@@ -111,7 +173,17 @@ def ensure_manifest(directory: Path, expected: dict, *, resume: bool) -> dict:
 
 
 def write_completion(path: Path, artifacts: list[Path], *, identity: dict) -> None:
-    """Commit a stage only after all its artifacts exist, with content checksums."""
+    """Commit a stage after hashing all its required artifacts.
+
+    Parameters
+    ----------
+    path : pathlib.Path
+        Completion manifest to write atomically after the stage outputs.
+    artifacts : list of pathlib.Path
+        Nonempty list of existing files beneath the manifest's parent directory.
+    identity : dict
+        JSON-compatible run and stage identifiers checked when resuming.
+    """
     if not artifacts:
         raise ValueError("Completion requires at least one artifact.")
     checksums = {str(item.relative_to(path.parent)): fingerprint_file(item) for item in artifacts}
@@ -131,7 +203,13 @@ def is_complete(path: Path, *, identity: dict) -> bool:
     Returns
     -------
     bool
-        False only when the manifest is absent. Damaged committed state raises.
+        True for matching committed state; False if the manifest is absent.
+
+    Raises
+    ------
+    ValueError
+        For a mismatched identity, malformed manifest, missing artifact or
+        changed artifact checksum. File existence alone is insufficient.
     """
     if not path.exists():
         return False
@@ -154,7 +232,23 @@ def is_complete(path: Path, *, identity: dict) -> bool:
 
 @contextmanager
 def run_lock(directory: Path) -> Iterator[None]:
-    """Hold one OS-released writer lock for a local/POSIX output directory."""
+    """Hold an exclusive writer lock for a local/POSIX output directory.
+
+    Parameters
+    ----------
+    directory : pathlib.Path
+        Output directory, created if needed. Use this function in a with block.
+
+    Yields
+    ------
+    None
+        The lock is held during the block and released on exit or process death.
+
+    Raises
+    ------
+    RuntimeError
+        If another process already holds the directory's writer lock.
+    """
     directory.mkdir(parents=True, exist_ok=True)
     with (directory / ".lock").open("a+b") as stream:
         try:

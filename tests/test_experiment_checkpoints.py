@@ -72,7 +72,9 @@ def test_manifest_preserves_provenance_and_allows_only_operational_files(state, 
         state.ensure_manifest(another, original, resume=True)
 
 
-@pytest.mark.parametrize("content", ['{"mse": NaN}', '{"mse": Infinity}', "{", "[]"])
+@pytest.mark.parametrize(
+    "content", ['{"mse": NaN}', '{"mse": Infinity}', '{"mse": 1e9999}', "{", "[]"]
+)
 def test_read_json_rejects_malformed_committed_files(state, tmp_path, content):
     path = tmp_path / "trial.json"
     path.write_text(content)
@@ -84,6 +86,12 @@ def test_write_json_rejects_nonfinite_values(state, tmp_path):
     with pytest.raises(ValueError):
         state.write_json(tmp_path / "bad.json", {"mse": float("nan")})
     assert not (tmp_path / "bad.json").exists()
+
+
+def test_manifest_can_resume_after_kill_during_first_atomic_write(state, tmp_path):
+    (tmp_path / ".manifest.json.interrupted.tmp").write_bytes(b'{"schema_')
+    expected = {"schema_version": 1, "identity": {"data": "abc"}}
+    assert state.ensure_manifest(tmp_path, expected, resume=True) == expected
 
 
 def _try_lock(directory, queue):

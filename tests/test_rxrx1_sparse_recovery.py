@@ -1,9 +1,20 @@
+import hashlib
 import importlib
+import sys
+from pathlib import Path
 
 import anndata as ad
 import numpy as np
 import pandas as pd
 import pytest
+from hydra import compose, initialize_config_dir
+from omegaconf import OmegaConf
+
+from genetic_perturbation_playground import tuning
+from genetic_perturbation_playground.config import register_configs
+from genetic_perturbation_playground.experiments.checkpoints import read_json
+
+ROOT = Path(__file__).parents[1]
 
 
 @pytest.fixture
@@ -130,6 +141,14 @@ def test_virtual_average_uses_each_original_reference(sparse, recovery_data):
     np.testing.assert_allclose(actual, [[12.5, 17.5], [23, 37], [31.5, 58.5]])
 
 
+def test_virtual_average_rejects_a_missing_reference_batch(sparse, recovery_data):
+    controls = recovery_data[
+        (recovery_data.obs.perturbation == "control") & (recovery_data.obs.batch != "HUVEC-5")
+    ]
+    with pytest.raises(ValueError, match="reference.*HUVEC-5"):
+        sparse.virtual_average(object(), controls, sparse.reference_pairs(recovery_data))
+
+
 def test_eligibility_never_silently_reduces_k(sparse, recovery_data):
     pairs = sparse.reference_pairs(recovery_data)
     eligible = sparse.eligibility_table(pairs, [4, 5, 6])
@@ -175,3 +194,278 @@ def test_score_estimates_requires_matching_features(sparse, recovery_data):
     full = sparse.observed_average(recovery_data, ["a"])
     with pytest.raises(ValueError, match="align"):
         sparse.score_estimates(full, full.iloc[:, ::-1], {}, pd.DataFrame(), seed=0, k=2)
+
+
+@pytest.fixture
+def runner():
+    sys.path.insert(0, str(ROOT / "scripts"))
+    return importlib.import_module("evaluate_rxrx1_sparse_recovery")
+
+
+def runner_config(**overrides):
+    register_configs()
+    with initialize_config_dir(str(ROOT / "configs"), version_base=None):
+        cfg = compose(
+            "evaluate_rxrx1_sparse_recovery",
+            [
+                "name=test",
+                "proxy_controls=negative",
+                "batch_unit=experiment",
+                "neural.device=cpu",
+            ],
+        )
+    cfg.n_seeds = 1
+    cfg.k_values = [2]
+    cfg.n_configs = 1
+    cfg.neural_checkpoints = [0, 1]
+    cfg.kernel_grid = {"reg": [0.1], "lengthscale_scale": [1.0]}
+    cfg.neural_grid = {"reg": [0.1], "psi_size": [2], "width_w": [4]}
+    return OmegaConf.merge(cfg, overrides)
+
+
+def run(runner, data, cfg, directory):
+    return runner.run_experiment(
+        data, cfg, directory, input_fingerprint=hashlib.sha256(data.X.tobytes()).hexdigest()
+    )
+
+
+def test_config_subsamples_without_changing_existing_tuning_defaults():
+    register_configs()
+    with initialize_config_dir(str(ROOT / "configs"), version_base=None):
+        original = compose("tune_rxrx1_transfer", ["name=old"])
+        cfg = compose("evaluate_rxrx1_sparse_recovery", ["name=new"])
+    assert cfg.k_values == [2, 3, 4]
+    assert cfg.n_seeds == 10
+    assert len(tuning.candidate_configs(cfg)["kernel"]) == 8
+    assert len(tuning.candidate_configs(cfg)["neural"]) == 8
+    assert original.n_configs == 32
+    assert original.inner_folds == 3
+    assert original.neural.cross_fit_folds == 5
+    assert cfg.neural.cross_fit_folds == 0
+    assert cfg.neural.seed == cfg.seed
+    assert cfg.cell_type == "HUVEC" and cfg.batch_unit == "plate"
+    assert cfg.proxy_controls == "positive" and cfg.wandb_mode == "disabled"
+    assert cfg.weight_by_cells is True
+    for field in ["kernel_grid", "neural_grid", "neural_variant_grids", "neural_checkpoints"]:
+        assert cfg[field] == original[field]
+    assert list(cfg.kernel_grid.reg) == [1e-8, 1e-7, 1e-6, 1e-5, 1e-4, 1e-3]
+    assert list(cfg.kernel_grid.lengthscale_scale) == [0.5, 1, 2, 4, 8]
+    assert cfg.neural_checkpoints == [0, 10, 20, 40, 60, 100, 150, 200, 300, 400]
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"cell_type": None},
+        {"bridges": ["kernel"]},
+        {"k_values": [2, 2]},
+        {"k_values": [1]},
+        {"k_values": []},
+        {"n_seeds": 0},
+        {"n_configs": 0},
+        {"seed": -1},
+        {"neural_checkpoints": []},
+        {"neural_checkpoints": [-1]},
+        {"neural": {"seed": 99}},
+    ],
+)
+def test_runner_rejects_invalid_settings_before_fitting(
+    runner, recovery_data, tmp_path, monkeypatch, override
+):
+    monkeypatch.setattr(tuning, "make_kernel", lambda *args: pytest.fail("fitted invalid config"))
+    with pytest.raises(ValueError):
+        run(runner, recovery_data, runner_config(**override), tmp_path)
+
+
+def test_runner_rejects_empty_requested_cohort_before_fitting(
+    runner, recovery_data, tmp_path, monkeypatch
+):
+    data = recovery_data[recovery_data.obs.batch.isin(["HUVEC-0", "HUVEC-1"])]
+    monkeypatch.setattr(tuning, "make_kernel", lambda *args: pytest.fail("fitted an empty cohort"))
+    with pytest.raises(ValueError, match="eligible|coverage"):
+        run(runner, data, runner_config(k_values=[2, 3, 4]), tmp_path)
+
+
+def test_runner_resume_equals_uninterrupted(runner, recovery_data, tmp_path, monkeypatch):
+    cfg = runner_config(
+        n_seeds=2,
+        k_values=[2, 3, 4],
+        kernel_grid={"reg": [0.01, 0.1, 1.0]},
+        neural_grid={"psi_size": [2, 3, 4]},
+    )
+    clean = run(runner, recovery_data, cfg, tmp_path / "clean")
+    factory = tuning.make_neural
+    injected = False
+
+    def interrupt(settings, effective):
+        nonlocal injected
+        if effective.seed == 1 and not injected:
+            injected = True
+            raise RuntimeError("stopped during seed 1 tuning")
+        return factory(settings, effective)
+
+    monkeypatch.setattr(tuning, "make_neural", interrupt)
+    resumed_dir = tmp_path / "resume"
+    with pytest.raises(RuntimeError, match="stopped"):
+        run(runner, recovery_data, cfg, resumed_dir)
+    assert (resumed_dir / "seeds/seed_0/complete.json").exists()
+    before = {p: p.stat().st_mtime_ns for p in resumed_dir.glob("seeds/seed_0/**/*.json")}
+    resumed = run(runner, recovery_data, cfg, resumed_dir)
+    pd.testing.assert_frame_equal(clean, resumed)
+    assert before == {p: p.stat().st_mtime_ns for p in before}
+    assert not resumed.duplicated(["seed", "k", "perturbation", "model"]).any()
+    assert set(resumed.model) == {"retained_mean", "kernel_virtual", "neural_virtual"}
+    assert set(resumed.k) == {2, 3, 4} and set(resumed.seed) == {0, 1}
+    with np.load(resumed_dir / "seeds/seed_0/k_4/estimates.npz", allow_pickle=False) as saved:
+        assert saved["full_mean"].shape == (3, 2)
+        c = saved["perturbations"].tolist().index("c")
+        np.testing.assert_allclose(saved["full_mean"][c], saved["retained_mean"][c])
+    assert len(pd.read_csv(resumed_dir / "summary.csv")) == 12
+    candidates = read_json(resumed_dir / "manifest.json")["identity"]["candidates"]
+    for trial in resumed_dir.glob("seeds/seed_*/k_*/trials/fold_*/*/*.json"):
+        record = read_json(trial)
+        assert record["identity"]["config"] == candidates[trial.parent.name][0]
+
+
+def test_completed_seed_resume_and_extension(runner, recovery_data, tmp_path, monkeypatch):
+    cfg = runner_config()
+    expected = run(runner, recovery_data, cfg, tmp_path)
+    original = tuning.make_kernel
+    seeds_fitted = []
+
+    def record(settings, effective):
+        assert effective.seed != 0, "completed seed was fitted again"
+        seeds_fitted.append(effective.seed)
+        return original(settings, effective)
+
+    monkeypatch.setattr(tuning, "make_kernel", record)
+    (tmp_path / "scores.csv").unlink()
+    (tmp_path / "summary.csv").unlink()
+    pd.testing.assert_frame_equal(run(runner, recovery_data, cfg, tmp_path), expected)
+    assert seeds_fitted == []
+    cfg.n_seeds = 2
+    extended = run(runner, recovery_data, cfg, tmp_path)
+    assert seeds_fitted == [1, 1, 1]  # two tuning fits and one final fit
+    assert set(extended.seed) == {0, 1}
+    assert (tmp_path / "scores.csv").exists() and (tmp_path / "summary.csv").exists()
+    # Lowering the requested seed count must not erase already completed results.
+    cfg.n_seeds = 1
+    assert set(run(runner, recovery_data, cfg, tmp_path).seed) == {0, 1}
+
+
+def test_poisoned_removed_outcomes_do_not_change_selection_or_predictions(
+    runner, sparse, recovery_data, tmp_path
+):
+    cfg = runner_config()
+    original = tmp_path / "original"
+    altered = tmp_path / "altered"
+    run(runner, recovery_data, cfg, original)
+    order = sparse.retained_order(sparse.reference_pairs(recovery_data), cfg.seed)
+    kept = sparse.retained_data(recovery_data, order, 2)
+    poisoned = recovery_data.copy()
+    poisoned.X[~poisoned.obs_names.isin(kept.obs_names)] += 1000
+    run(runner, poisoned, cfg, altered)
+    left, right = original / "seeds/seed_0/k_2", altered / "seeds/seed_0/k_2"
+    assert read_json(left / "selected.json") == read_json(right / "selected.json")
+    with np.load(left / "estimates.npz") as a, np.load(right / "estimates.npz") as b:
+        for key in ["retained_mean", "kernel_virtual", "neural_virtual"]:
+            np.testing.assert_allclose(a[key], b[key], rtol=0, atol=0)
+        assert not np.allclose(a["full_mean"], b["full_mean"])
+
+
+def test_negative_only_proxies_never_train_on_positive_controls(
+    runner, recovery_data, tmp_path, monkeypatch
+):
+    extra = recovery_data[recovery_data.obs.perturbation == "a"].copy()
+    extra.obs["perturbation"] = "positive"
+    extra.obs["well_type"] = "positive_control"
+    extra.X[:] = 1e9
+    data = ad.concat([recovery_data, extra], index_unique="-")
+    original = tuning.make_kernel
+
+    def record(settings, cfg):
+        model = original(settings, cfg)
+        fit = model.fit
+
+        def check(train):
+            assert set(train.obs.well_type) == {"treatment", "negative_control"}
+            assert "positive" not in set(train.obs.perturbation)
+            return fit(train)
+
+        model.fit = check
+        return model
+
+    monkeypatch.setattr(tuning, "make_kernel", record)
+    scores = run(runner, data, runner_config(), tmp_path)
+    assert set(scores.perturbation) == {"a", "b", "c"}
+
+
+def test_changed_inputs_and_corrupt_completed_results_are_rejected(
+    runner, recovery_data, tmp_path, monkeypatch
+):
+    cfg = runner_config()
+    run(runner, recovery_data, cfg, tmp_path)
+    monkeypatch.setattr(tuning, "make_kernel", lambda *args: pytest.fail("reused incompatible run"))
+    changed = recovery_data.copy()
+    changed.X[0, 0] += 1
+    with pytest.raises(ValueError, match="incompatible"):
+        run(runner, changed, cfg, tmp_path)
+    with pytest.raises(ValueError, match="incompatible"):
+        run(runner, recovery_data, runner_config(n_configs=2), tmp_path)
+    artifact = tmp_path / "seeds/seed_0/k_2/scores.csv"
+    artifact.write_text("broken")
+    with pytest.raises(ValueError, match="scores.csv"):
+        run(runner, recovery_data, cfg, tmp_path)
+
+
+def test_final_fit_failure_keeps_completed_tuning(runner, recovery_data, tmp_path, monkeypatch):
+    original = tuning.fit_selected
+    monkeypatch.setattr(
+        tuning,
+        "fit_selected",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("refit stopped")),
+    )
+    with pytest.raises(RuntimeError, match="refit stopped"):
+        run(runner, recovery_data, runner_config(), tmp_path)
+    paths = list(tmp_path.glob("seeds/seed_0/k_2/trials/fold_*/*/*.json"))
+    before = {p: p.read_bytes() for p in paths}
+    assert len(paths) == 4
+    monkeypatch.setattr(tuning, "fit_selected", original)
+    run(runner, recovery_data, runner_config(), tmp_path)
+    assert before == {p: p.read_bytes() for p in paths}
+
+
+def test_summaries_use_equal_seed_weights_and_handle_zero_baseline(sparse):
+    rows = []
+    for seed, pairs in [(0, [("a", 4, 1), ("b", 0, 0)]), (1, [("a", 10, 5)])]:
+        for perturbation, baseline, virtual in pairs:
+            for model, value in [
+                ("retained_mean", baseline),
+                ("kernel_virtual", virtual),
+                ("neural_virtual", virtual),
+            ]:
+                rows.append(
+                    dict(
+                        seed=seed,
+                        k=2,
+                        perturbation=perturbation,
+                        model=model,
+                        value=value,
+                        n_reference_batches=2 if perturbation == "b" else 4,
+                        n_retained_batches=2,
+                        n_removed_batches=0 if perturbation == "b" else 2,
+                        metric="mse",
+                    )
+                )
+    per_seed, overall = sparse.summarize_scores(pd.DataFrame(rows))
+    result = overall[(overall.model == "kernel_virtual") & (overall.cohort == "all")].iloc[0]
+    assert result.baseline_mse == 6.0  # mean of seed means: 2 and 10
+    assert result.virtual_mse == 2.75  # mean of 0.5 and 5
+    assert result.improvement == 3.25
+    assert result.win_fraction == 0.75  # tie does not count as improvement
+    assert result.n_seeds == 2
+    zero_rows = pd.DataFrame(rows)
+    zero_rows = zero_rows[zero_rows.perturbation == "b"]
+    empty, _ = sparse.summarize_scores(zero_rows)
+    assert (empty[empty.cohort == "removed_only"].n_perturbations == 0).all()
+    assert empty[empty.cohort == "removed_only"].virtual_mse.isna().all()

@@ -201,6 +201,17 @@ def observed_average(data: ad.AnnData, perturbations: list[str]) -> pd.DataFrame
     -------
     pandas.DataFrame
         Perturbations by features, with equal batch weights.
+
+    Examples
+    --------
+    Two crops in b0 and one in b1 still give each batch half the weight.
+
+    >>> obs = pd.DataFrame(
+    ...     {"perturbation": ["a"] * 3, "batch": ["b0", "b0", "b1"],
+    ...      "well_type": ["treatment"] * 3}, index=["0", "1", "2"])
+    >>> data = ad.AnnData(np.array([[1., 2.], [3., 4.], [9., 10.]]), obs=obs)
+    >>> observed_average(data, ["a"]).to_numpy().tolist()
+    [[5.5, 6.5]]
     """
     labels = pd.Index(perturbations, name="perturbation")
     if labels.empty or not labels.is_unique:
@@ -220,15 +231,25 @@ def virtual_average(model: object, controls: ad.AnnData, pairs: pd.DataFrame) ->
     model : object
         Fitted transfer model supporting control-only predictions.
     controls : anndata.AnnData
-        All selected proxy controls in original feature units.
+        Controls only, covering every requested reference batch. Features must
+        match training, in their original units and order.
     pairs : pandas.DataFrame
         Original reference pairs for eligible perturbations only.
 
     Returns
     -------
     pandas.DataFrame
-        Sorted perturbation rows and original feature columns.
+        Sorted perturbation rows and original feature columns. Standardised
+        models restore original target units; no observed means are substituted.
+
+    Raises
+    ------
+    ValueError
+        If reference controls are missing or the model rejects labels/features.
     """
+    missing = sorted(set(pairs.batch) - set(batch_labels(controls)))
+    if missing:
+        raise ValueError(f"Missing reference controls for batches: {', '.join(missing)}")
     groups = defaultdict(list)
     for label, group in pairs.groupby("perturbation", sort=True):
         groups[tuple(sorted(group.batch.unique()))].append(label)
@@ -289,3 +310,61 @@ def score_estimates(
         .merge(coverage[counts], on="perturbation", validate="many_to_one")
         .assign(seed=seed, k=k, metric="mse")
     )
+
+
+def summarize_scores(scores: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Summarize paired recovery errors, weighting perturbations then seeds.
+
+    Parameters
+    ----------
+    scores : pandas.DataFrame
+        Completed score_estimates rows, including the retained_mean baseline.
+
+    Returns
+    -------
+    tuple of (pandas.DataFrame, pandas.DataFrame)
+        Per-seed and across-seed summaries for all eligible perturbations and
+        removed_only cohorts. Positive improvement means lower virtual MSE.
+        Empty cohorts have zero counts and missing metrics; SD uses ddof=1.
+    """
+    rows = []
+    for (seed, k), group in scores.groupby(["seed", "k"], sort=True):
+        paired = group.pivot(index="perturbation", columns="model", values="value")
+        removed = group.drop_duplicates("perturbation").set_index("perturbation").n_removed_batches
+        for cohort in ("all", "removed_only"):
+            chosen = paired if cohort == "all" else paired.loc[removed.reindex(paired.index).gt(0)]
+            for model in paired.columns.difference(["retained_mean"]):
+                baseline, virtual = chosen.retained_mean, chosen[model]
+                rows.append(
+                    {
+                        "seed": seed,
+                        "k": k,
+                        "cohort": cohort,
+                        "model": model,
+                        "n_perturbations": len(chosen),
+                        "n_exact_k": int(removed.reindex(chosen.index).eq(0).sum()),
+                        "baseline_mse": baseline.mean(),
+                        "virtual_mse": virtual.mean(),
+                        "improvement": (baseline - virtual).mean(),
+                        "win_fraction": (virtual < baseline).mean() if len(chosen) else np.nan,
+                    }
+                )
+    per_seed = pd.DataFrame(rows)
+    overall = []
+    metrics = ["baseline_mse", "virtual_mse", "improvement", "win_fraction"]
+    for (k, cohort, model), group in per_seed.groupby(["k", "cohort", "model"], sort=True):
+        result = {
+            "k": k,
+            "cohort": cohort,
+            "model": model,
+            "n_seeds": len(group),
+            "n_scored_seeds": int(group.virtual_mse.notna().sum()),
+            "n_perturbations_min": int(group.n_perturbations.min()),
+            "n_perturbations_max": int(group.n_perturbations.max()),
+            "n_exact_k": float(group.n_exact_k.mean()),
+        }
+        for metric in metrics:
+            result[metric] = group[metric].mean()
+            result[f"{metric}_sd"] = group[metric].std(ddof=1)
+        overall.append(result)
+    return per_seed, pd.DataFrame(overall)
