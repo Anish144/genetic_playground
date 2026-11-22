@@ -465,7 +465,13 @@ def test_fit_models_standardises_linear_and_bridge_inputs(tiny_rxrx1):
     models = mod.fit_models(huvec, cfg(bridges=["kernel"]))
     assert isinstance(models["kernel bridge"], Standardised)
     controls = huvec.X[(huvec.obs["perturbation"] == "control").to_numpy()]
-    for name in ["kernel bridge", "shift (b=1)", "pooled (b=0)", "transfer (fit b)"]:
+    for name in [
+        "kernel bridge",
+        "shift (b=1)",
+        "pooled (b=0)",
+        "transfer (fit b)",
+        "full transfer (fit B)",
+    ]:
         np.testing.assert_allclose(models[name].w_mean_, controls.mean(0))
         np.testing.assert_allclose(models[name].w_std_, controls.std(0))
     plain = mod.fit_models(huvec, cfg(bridges=["kernel"], standardise_w=False))
@@ -483,3 +489,7 @@ def test_training_config_controls_linear_ridge(tiny_rxrx1):
     )
     for name in ("pooled (b=0)", "shift (b=1)"):
         np.testing.assert_array_equal(ordinary[name].coef_, penalised[name].coef_)
+    assert penalised["full transfer (fit B)"].reg == 2.0
+    assert np.linalg.norm(penalised["full transfer (fit B)"].coef_) < np.linalg.norm(
+        ordinary["full transfer (fit B)"].coef_
+    )

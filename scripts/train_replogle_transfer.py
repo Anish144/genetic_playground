@@ -49,6 +49,7 @@ from genetic_perturbation_playground.model.batch_transfer import (
     build_neural,
 )
 from genetic_perturbation_playground.model.linear_transfer import (
+    FullLinearTransfer,
     LinearTransfer,
 )
 from genetic_perturbation_playground.tuning import validation_batches
@@ -58,6 +59,8 @@ from genetic_perturbation_playground.utils.plotting import report, report_by_tra
 register_configs()
 
 MODELS = {"pooled (b=0)": 0.0, "shift (b=1)": 1.0, "transfer (fit b)": None}
+FULL_LINEAR_MODEL = "full transfer (fit B)"
+LINEAR_MODEL_NAMES = (*MODELS, FULL_LINEAR_MODEL)
 
 
 def fit(train: sc.AnnData, cfg: DictConfig) -> dict:
@@ -69,10 +72,14 @@ def fit(train: sc.AnnData, cfg: DictConfig) -> dict:
 
 def _fit_linear(train: sc.AnnData, config: LinearConfig) -> dict:
     """Fit the linear variants with optional input scaling and unscaled targets."""
-    return {
+    models = {
         name: LinearTransfer(**asdict(replace(config, slope=slope))).fit(train)
         for name, slope in MODELS.items()
     }
+    models[FULL_LINEAR_MODEL] = FullLinearTransfer(
+        standardise_w=config.standardise_w, reg=config.reg
+    ).fit(train)
+    return models
 
 
 def _fit_bridges(train: sc.AnnData, cfg: DictConfig) -> dict:

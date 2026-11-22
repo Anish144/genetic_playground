@@ -9,7 +9,7 @@ from genetic_perturbation_playground.model.batch_transfer import (
     KernelBridgeTransfer,
     NeuralBridgeTransfer,
 )
-from genetic_perturbation_playground.model.linear_transfer import LinearTransfer
+from genetic_perturbation_playground.model.linear_transfer import FullLinearTransfer, LinearTransfer
 from genetic_perturbation_playground.utils.standardisation import Standardised
 
 
@@ -33,7 +33,9 @@ def virtual_reference():
     return ad.AnnData(np.array([[0, 2], [2, 4], [5, 9]], dtype=float), obs=obs, var=var)
 
 
-@pytest.fixture(params=["linear", "zero", "shift", "kernel", "per_x", "shared_2nn", "hybrid"])
+@pytest.fixture(
+    params=["linear", "full_linear", "zero", "shift", "kernel", "per_x", "shared_2nn", "hybrid"]
+)
 def adapter_kind(request):
     return request.param
 
@@ -42,6 +44,8 @@ def adapter_kind(request):
 def transfer_model(virtual_train, adapter_kind, request):
     if adapter_kind in ("linear", "zero", "shift"):
         model = LinearTransfer(slope={"linear": None, "zero": 0.0, "shift": 1.0}[adapter_kind])
+    elif adapter_kind == "full_linear":
+        model = FullLinearTransfer()
     elif adapter_kind == "kernel":
         model = KernelBridgeTransfer(reg=0.1)
     else:

@@ -27,7 +27,7 @@ from torch.profiler import ProfilerActivity, profile
 from torch.utils.benchmark import Timer
 
 from genetic_perturbation_playground.model import proxy_unconfounded_neural as current
-from genetic_perturbation_playground.utils.ridge import LinearRidgeSolver
+from genetic_perturbation_playground.utils.ridge import fit_linear_slopes
 
 MODELS = (
     "NeuralPerXEmbeddingBridge",
@@ -229,13 +229,12 @@ def main():
             del old, new, functions
             gc.collect()
         stats = linear_statistics(samples)
-        linear_solver = LinearRidgeSolver(reg=0.0)
         np.testing.assert_allclose(
-            old_linear_slope(stats), linear_solver.solve(stats), rtol=1e-10, atol=1e-12
+            old_linear_slope(stats), fit_linear_slopes(stats, reg=0.0), rtol=1e-10, atol=1e-12
         )
         functions = {
             "before": lambda stats=stats: old_linear_slope(stats),
-            "after": lambda stats=stats, solver=linear_solver: solver.solve(stats),
+            "after": lambda stats=stats: fit_linear_slopes(stats, reg=0.0),
         }
         row = {
             "model": "linear",

@@ -16,7 +16,7 @@ nonnegative offset (null means zero). Changing the offset keeps retained batches
 and neural initialization fixed. Each seed's candidates are saved for resume.
 
 Use bridges=[neural] to omit the kernel and include_linear=true to add the
-pooled, shift and fitted-slope models. Select one neural variant per run with
+pooled, shift, diagonal-transfer and full-transfer models. Select one neural variant per run with
 neural=per_x, neural=shared_2nn or neural=hybrid, using distinct output names.
 """
 
@@ -30,7 +30,7 @@ import pandas as pd
 import wandb
 from hydra.utils import to_absolute_path
 from omegaconf import DictConfig, OmegaConf
-from train_replogle_transfer import MODELS, _fit_linear
+from train_replogle_transfer import LINEAR_MODEL_NAMES, _fit_linear
 from train_rxrx1_transfer import select_batch_unit, select_cell_type, select_proxy_controls
 
 from genetic_perturbation_playground import tuning
@@ -234,7 +234,7 @@ def _print_workload(cfg, candidates):
         f"Planned workload: {trials.get('kernel', 0)} kernel tuning fits, {trials.get('neural', 0)} neural tuning runs, "
         f"{cfg.n_seeds * len(cfg.k_values)} final refits per bridge; "
         f"{trials.get('neural', 0) * max(cfg.neural_checkpoints)} neural tuning updates. "
-        f"{cfg.n_seeds * len(cfg.k_values) * len(MODELS) if cfg.include_linear else 0} linear fits. "
+        f"{cfg.n_seeds * len(cfg.k_values) * len(LINEAR_MODEL_NAMES) if cfg.include_linear else 0} linear fits. "
         "Completed work will be skipped.",
         flush=True,
     )
@@ -255,7 +255,7 @@ def run_experiment(
         Unmasked RxRx1 embeddings and original metadata. Input is not mutated.
     cfg : omegaconf.DictConfig
         Experiment preset, including the base seed, requested seed count,
-        bridge subset and optional inclusion of the three linear models.
+        bridge subset and optional inclusion of the four linear models.
         Candidates are drawn per data seed using data seed + hp_sampling_seed;
         the optional nonnegative offset defaults to null (zero). Each draw is
         reused across k. Retention and neural initialization use the data seed.

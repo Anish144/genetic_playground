@@ -39,44 +39,44 @@ from typing import NamedTuple
 
 import numpy as np
 import torch
+from scipy.sparse.csgraph import connected_components
+from sklearn.linear_model import LinearRegression, Ridge
 
 from genetic_perturbation_playground.data.neural import GroupedRidgeData
 
 
-class LinearRidgeSolver:
-    """Fit one control slope per output, with a separate intercept per category.
+def fit_linear_slopes(stats: dict, reg: float = 1e-3) -> np.ndarray:
+    """Fit diagonal ridge slopes with unpenalised category intercepts.
 
-    For row i in category x, minimise
-
-        loss = sum_i c[i] * ||y[i] - a[x] - W[i] * beta||^2 + N * reg * ||beta||^2
-
-    Intercepts a have no penalty. Subtracting each category's weighted means
-    from y and W gives dy and dw. Each slope then has the solution
-
-        beta[j] = sum_i(c[i] * dw[i, j] * dy[i, j])
-                  / (sum_i(c[i] * dw[i, j]**2) + N * reg)
-
-    Category sums suffice; no full design matrix is needed. The caller recovers
-    each intercept as mean(y) - beta * mean(W) within its category.
+    Subtract category-weighted means implicitly using summary statistics.
+    Each slope is the weighted control/target covariance divided by the
+    weighted control variance plus N * reg, where N is total response count.
 
     Parameters
     ----------
+    stats : dict
+        Output of data.transfer.summary_stats. Uses y_mean, w_mean, n, W,
+        batch_y_sum and batch_n. Controls may already be standardised.
+        Inputs are unchanged.
     reg : float, default=1e-3
-        Finite, nonnegative penalty, scaled by the total training count N.
-        Zero gives ordinary least squares. Applies in the units of the supplied W.
+        Finite, nonnegative slope penalty in the supplied control units.
+        Zero gives ordinary least squares.
 
-    Attributes
-    ----------
-    reg : float
-        Penalty for the slopes. Category intercepts remain unpenalised.
+    Returns
+    -------
+    numpy.ndarray of shape (J,)
+        Float64 slope per output. Zero variance with reg=0 gives zero slope.
+        Recover category intercepts as y_mean - slopes * w_mean.
+
+    Raises
+    ------
+    ValueError
+        If reg is invalid or total response weight is not positive.
 
     Examples
     --------
-    One category has controls 0 and 2, and targets 1 and 5. Without a penalty
-    the slope is 2. With reg=1, ridge shrinks it to 1.
-
     >>> import numpy as np
-    >>> from genetic_perturbation_playground.utils.ridge import LinearRidgeSolver
+    >>> from genetic_perturbation_playground.utils.ridge import fit_linear_slopes
     >>> stats = {
     ...     "n": np.array([2]),
     ...     "y_mean": np.array([[3.]]),
@@ -85,63 +85,123 @@ class LinearRidgeSolver:
     ...     "batch_n": np.array([1, 1]),
     ...     "batch_y_sum": np.array([[1.], [5.]]),
     ... }
-    >>> LinearRidgeSolver(reg=1.0).solve(stats).tolist()
+    >>> fit_linear_slopes(stats, reg=1.0).tolist()
     [1.0]
-    >>> LinearRidgeSolver(reg=0.0).solve(stats).tolist()
+    >>> fit_linear_slopes(stats, reg=0.0).tolist()
     [2.0]
     """
+    if not np.isfinite(reg) or reg < 0:
+        raise ValueError("reg must be finite and nonnegative")
+    y = np.asarray(stats["y_mean"], dtype=np.float64)
+    w = np.asarray(stats["w_mean"], dtype=np.float64)
+    n = np.asarray(stats["n"], dtype=np.float64)[:, None]
+    control = np.asarray(stats["W"], dtype=np.float64)
+    batch_n = np.asarray(stats["batch_n"], dtype=np.float64)
+    batch_y_sum = np.asarray(stats["batch_y_sum"], dtype=np.float64)
+    total = n.sum()
+    if total <= 0:
+        raise ValueError("A linear ridge fit needs positive total response weight")
+    # Global shifts leave slopes unchanged because category intercepts are free.
+    # Centre first to avoid subtracting nearly equal, large products below.
+    control_origin = (batch_n[:, None] * control).sum(axis=0) / total
+    target_origin = batch_y_sum.sum(axis=0) / total
+    control = control - control_origin
+    w = w - control_origin
+    y = y - target_origin
+    batch_y_sum = batch_y_sum - batch_n[:, None] * target_origin
+    numerator = (control * batch_y_sum).sum(axis=0) - (n * y * w).sum(axis=0)
+    variance = (batch_n[:, None] * control**2).sum(axis=0) - (n * w**2).sum(axis=0)
+    # Subtraction can make a zero variance slightly negative through rounding.
+    denominator = np.maximum(variance, 0.0) + total * reg
+    return np.divide(numerator, denominator, out=np.zeros_like(numerator), where=denominator > 0)
 
-    def __init__(self, reg: float = 1e-3):
-        if not np.isfinite(reg) or reg < 0:
-            raise ValueError("reg must be finite and nonnegative")
-        self.reg = reg
 
-    def solve(self, stats: dict) -> np.ndarray:
-        """Fit ridge slopes from category and environment sums.
+def fit_full_linear_slopes(stats: dict, reg: float = 1e-3) -> tuple[np.ndarray, np.ndarray]:
+    """Fit factorised full-matrix slopes with sklearn linear regression.
 
-        Parameters
-        ----------
-        stats : dict
-            Output of ``data.transfer.summary_stats``. Uses ``y_mean``,
-            ``w_mean``, ``n``, ``W``, ``batch_y_sum`` and ``batch_n``.
-            Controls may already be standardised.
+    Remove unpenalised category intercepts in batch space and project controls
+    onto an orthonormal basis before fitting. This retains the full regression
+    objective without a feature-by-feature or observed-pair-by-feature matrix.
 
-        Returns
-        -------
-        numpy.ndarray of shape (J,)
-            Slope per output in the supplied control units. Computed in float64.
-            When reg=0 and there is no control variation within categories,
-            returns zero for that output.
+    Parameters
+    ----------
+    stats : dict
+        Output of data.transfer.summary_stats, with optionally scaled W.
+        Uses n, pert_batch_n, y_mean, batch_y_sum and W. Inputs are unchanged.
+    reg : float, default=1e-3
+        Finite, nonnegative ridge penalty, scaled by total response count.
+        Zero uses LinearRegression to obtain minimum-norm slopes; positive
+        values use Ridge. Both fit without an intercept after centring.
 
-        Raises
-        ------
-        ValueError
-            If the total training count is not positive.
-        """
-        y = np.asarray(stats["y_mean"], dtype=np.float64)
-        w = np.asarray(stats["w_mean"], dtype=np.float64)
-        n = np.asarray(stats["n"], dtype=np.float64)[:, None]
-        control = np.asarray(stats["W"], dtype=np.float64)
-        batch_n = np.asarray(stats["batch_n"], dtype=np.float64)
-        batch_y_sum = np.asarray(stats["batch_y_sum"], dtype=np.float64)
-        total = n.sum()
-        if total <= 0:
-            raise ValueError("A linear ridge fit needs positive total response weight")
-        # Global shifts leave slopes unchanged because category intercepts are free.
-        # Centre first to avoid subtracting nearly equal, large products below.
-        control_origin = (batch_n[:, None] * control).sum(axis=0) / total
-        target_origin = batch_y_sum.sum(axis=0) / total
-        control = control - control_origin
-        w = w - control_origin
-        y = y - target_origin
-        batch_y_sum = batch_y_sum - batch_n[:, None] * target_origin
-        numerator = (control * batch_y_sum).sum(axis=0) - (n * y * w).sum(axis=0)
-        variance = (batch_n[:, None] * control**2).sum(axis=0) - (n * w**2).sum(axis=0)
-        # Subtraction can make a zero variance slightly negative through rounding.
-        denominator = np.maximum(variance, 0.0) + total * self.reg
-        return np.divide(
-            numerator, denominator, out=np.zeros_like(numerator), where=denominator > 0
-        )
+    Returns
+    -------
+    factors : tuple of numpy.ndarray
+        (basis, response), both of shape (rank, J), in float64. For row
+        controls w, the fitted effect is (w @ basis.T) @ response.
+        Rank is at most the number of training batches minus one.
+        Zero within-category variation gives factors with zero rows.
+
+    Raises
+    ------
+    ValueError
+        If reg is invalid or total response weight is not positive.
+    """
+    if not np.isfinite(reg) or reg < 0:
+        raise ValueError("reg must be finite and nonnegative")
+    total = np.asarray(stats["n"], dtype=np.float64).sum()
+    if total <= 0:
+        raise ValueError("A linear ridge fit needs positive total response weight")
+    counts = np.asarray(stats["pert_batch_n"], dtype=np.float64) / total
+    category_weight = counts.sum(axis=1)
+    batch_weight = counts.sum(axis=0)
+    controls = np.asarray(stats["W"], dtype=np.float64)
+    targets = np.asarray(stats["y_mean"], dtype=np.float64)
+    # Remove global target offsets before forming category residuals.
+    target_origin = category_weight @ targets
+    target_sums = np.asarray(stats["batch_y_sum"], dtype=np.float64) / total
+    residual_sums = (
+        target_sums - batch_weight[:, None] * target_origin - counts.T @ (targets - target_origin)
+    )
+    # H is a graph Laplacian. Sum its off-diagonal weights to form the
+    # diagonal without cancellation when categories occupy one batch.
+    gram = -(counts.T / category_weight) @ counts
+    np.fill_diagonal(gram, 0.0)
+    np.fill_diagonal(gram, -gram.sum(axis=1))
+    # Perturbations never span disconnected components. Their intercepts
+    # absorb a separate control origin in each component. Singleton and
+    # control-only batches become exactly zero and cannot affect rank.
+    _, components = connected_components(gram, directed=False)
+    _, origins = np.unique(components, return_index=True)
+    controls = controls - controls[origins[components]]
+    eigenvalues, eigenvectors = np.linalg.eigh(gram)
+    tolerance = np.finfo(np.float64).eps * len(gram) * eigenvalues.max(initial=0.0)
+    keep = eigenvalues > tolerance
+    roots = np.sqrt(eigenvalues[keep])
+    vectors = eigenvectors[:, keep]
+    if not len(roots):
+        return np.empty((0, controls.shape[1])), np.empty((0, targets.shape[1]))
+    design = roots[:, None] * (vectors.T @ controls)
+    target = (vectors.T @ residual_sums) / roots[:, None]
+    left, singular, basis = np.linalg.svd(design, full_matrices=False)
+    # A control constant within each disconnected category component is
+    # annihilated by H. Judge rounding against the input scale, since the
+    # entire projected design can otherwise consist of numerical noise.
+    input_scale = roots.max() * np.linalg.norm(controls)
+    tolerance = np.finfo(np.float64).eps * max(controls.shape) * input_scale
+    keep = singular > tolerance
+    if not np.any(keep):
+        return basis[keep], np.empty((0, targets.shape[1]))
+    # Both loss and count weights were divided by N above, so alpha=reg.
+    # The orthonormal basis preserves the coefficient norm in the penalty.
+    design = np.diag(singular[keep])
+    target = left[:, keep].T @ target
+    model = (
+        LinearRegression(fit_intercept=False)
+        if reg == 0
+        else Ridge(alpha=reg, fit_intercept=False, solver="cholesky")
+    )
+    response = np.atleast_2d(model.fit(design, target).coef_).T
+    return basis[keep], response
 
 
 class _SharedLossTerms(NamedTuple):

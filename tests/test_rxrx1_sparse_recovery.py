@@ -312,6 +312,7 @@ def test_single_bridge_with_linear_models_completes_and_resumes(
         "pooled (b=0)",
         "shift (b=1)",
         "transfer (fit b)",
+        "full transfer (fit B)",
     }
     assert np.isfinite(expected.value).all()
     assert set(read_json(tmp_path / "seeds/seed_0/candidates.json")["candidates"]) == {bridge}
@@ -631,6 +632,7 @@ def test_poisoned_removed_outcomes_do_not_change_selection_or_predictions(
             "pooled (b=0)",
             "shift (b=1)",
             "transfer (fit b)",
+            "full transfer (fit B)",
         ]:
             np.testing.assert_allclose(a[key], b[key], rtol=0, atol=0)
         assert not np.allclose(a["full_mean"], b["full_mean"])

@@ -12,7 +12,7 @@ from genetic_perturbation_playground.model.batch_transfer import (
     KernelBridgeTransfer,
     NeuralBridgeTransfer,
 )
-from genetic_perturbation_playground.model.linear_transfer import LinearTransfer
+from genetic_perturbation_playground.model.linear_transfer import FullLinearTransfer, LinearTransfer
 from genetic_perturbation_playground.model.proxy_unconfounded import mean_inner
 from genetic_perturbation_playground.utils.standardisation import Standardised
 
@@ -143,7 +143,9 @@ def _single_environment(model, controls, positions):
     if isinstance(model, Standardised):
         controls = (controls - model.w_mean_) / model.w_std_
         raw, offset = model.model, model.y_mean_
-    if isinstance(raw, LinearTransfer):
+    if isinstance(raw, FullLinearTransfer):
+        pred = raw.gamma_[positions] + controls.mean(0) @ raw.slope_.T
+    elif isinstance(raw, LinearTransfer):
         pred = raw.gamma_[positions] + raw.slope_ * controls.mean(0)
     elif isinstance(raw, KernelBridgeTransfer):
         inner = mean_inner(raw.kernel_w_, raw.ctrl_, [controls])[:, 0]

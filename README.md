@@ -85,6 +85,49 @@ $$
 
 These equations use original units. The implementation standardises inputs and converts fixed slopes accordingly, so `b=1` still means a unit shift in original units. Each output uses only its matching control coordinate.
 
+### Full linear transfer
+
+`FullLinearTransfer` allows every control coordinate to affect every output:
+
+$$
+\widehat y_{xeg}=a_{xg}+\sum_j B_{gj}W_{ej},\qquad
+\min_{a,B}\sum_{x,e}n_{xe}\left\|\bar y_{xe}-a_x-BW_e\right\|^2
++N\lambda\|B\operatorname{diag}(s)\|_F^2.
+$$
+
+Here $B$ is shared across perturbations, while $a_x$ is perturbation-specific and
+unpenalised. The diagonal model above is the special case $B=\operatorname{diag}(b)$;
+pooled and shift correspond to $B=0$ and $B=I$. With the full matrix, output $g$ can
+use control coordinate $j\ne g$. Unlike the neural bridges, this model uses control
+means directly and has no learned feature network or perturbation-specific slope.
+The scale $s$ is the training-control standard deviation, or one with
+`standardise_w=False`. Missing pairs have zero weight.
+
+```python
+from genetic_perturbation_playground.model.linear_transfer import FullLinearTransfer
+
+model = FullLinearTransfer(reg=1e-3).fit(train)
+predictions = model.predict(perturbations, test)
+# Controls alone suffice for a common reference population:
+average = model.predict_environment_average(perturbations, reference_controls)
+```
+
+`reg=0` gives least squares with minimum-norm slopes in the fitted control units.
+When there are fewer independent batch contrasts than control features, the full
+matrix is not identifiable without choosing among equivalent fits; positive ridge
+regularisation is the default. Fitting and prediction keep an exact factorisation
+in the training-control span, without imposing an extra rank constraint or storing
+a feature-by-feature matrix. `model.slope_` materialises $B$ in original units and
+`model.gamma_` holds $a$; `model.coef_` materialises the matrix in fitting units.
+The compact regression uses sklearn `Ridge`, or `LinearRegression` when `reg=0`.
+Matrix rows index outputs and columns index controls. Accessing either matrix
+property allocates a full array (about 560 MiB for 8,563 features).
+
+Training comparisons include **full transfer (fit B)** alongside the existing
+linear models, using the same `linear.reg` and `linear.standardise_w` settings.
+The model also participates in final tuned-model comparisons and sparse recovery
+when linear baselines are enabled; its penalty is not separately tuned.
+
 ## 2. Kernel bridge
 
 The perturbation feature map is the delta/one-hot basis: $\phi(x)=\delta_x$, so $k_x(x,z)=\mathbf{1}[x=z]$. For two standardised control vectors $u$ and $v$, use an RBF kernel:
@@ -196,11 +239,11 @@ Older commands need these changes:
 
 For programmatic Hydra composition, call `register_configs()` from the config module before `hydra.compose`, then use `resolve_model_config(cfg, "neural")` to obtain the selected dataclass. Use Hydra composition to load transfer presets; a raw YAML load does not apply their inherited defaults.
 
-`model/batch_transfer.py` contains the kernel and neural AnnData adapters. `data/transfer.py` prepares their counts, means and batch mixtures. The linear model is `LinearTransfer` in `model/linear_transfer.py`, and the scaling wrapper is `Standardised` in `utils/standardisation.py`.
+`model/batch_transfer.py` contains the kernel and neural AnnData adapters. `data/transfer.py` prepares their counts, means and batch mixtures. The linear models are `LinearTransfer` and `FullLinearTransfer` in `model/linear_transfer.py`, and the scaling wrapper is `Standardised` in `utils/standardisation.py`.
 
 `utils/neural.py` contains the reusable network layers, network builder, tensor conversion and checkpoint helper. `data/neural.py` defines one `GroupedRidgeData` record shared by the neural models and ridge solver; it holds counts, target sums and optional control tensors without copying them.
 
-Implementation is in `model/proxy_unconfounded_neural.py`. `utils/ridge.py` contains two independent solvers: `LinearRidgeSolver` fits NumPy control slopes with a ridge penalty and unpenalised category intercepts; `NeuralRidgeSolver` fits the coefficients of all three neural bridges with PyTorch gradients. They have no common base class. Per-x retains batched category solves and target-Gram losses. For shared 2NN and hybrid, the neural solver eliminates category coefficients before a small shared solve, then solves the hybrid's extra slope per coordinate. Shared-2NN training uses target Grams and batches all folds' target projections; hybrid training checkpoints folds to limit retained autograd state. Final shared/hybrid coefficients are reconstructed in `gene_block_size` blocks and exposed as `intercept_`, `shared_coef_`, `deviation_coef_` and `linear_coef_` (zero for shared 2NN).
+Implementation is in `model/proxy_unconfounded_neural.py`. `utils/ridge.py` provides `fit_linear_slopes`, a vectorised closed-form diagonal fit, and `fit_full_linear_slopes`, which prepares a compact full-matrix regression for sklearn `Ridge` or `LinearRegression`. Both leave category intercepts unpenalised. `NeuralRidgeSolver` fits all three neural bridges using `torch.linalg.solve` with PyTorch gradients. Per-x retains batched category solves and target-Gram losses. For shared 2NN and hybrid, the neural solver eliminates category coefficients before a small shared solve, then solves the hybrid's extra slope per coordinate. Shared-2NN training uses target Grams and batches all folds' target projections; hybrid training checkpoints folds to limit retained autograd state. Final shared/hybrid coefficients are reconstructed in `gene_block_size` blocks and exposed as `intercept_`, `shared_coef_`, `deviation_coef_` and `linear_coef_` (zero for shared 2NN).
 
 `scripts/benchmark_ridge_solver.py --baseline /path/to/previous_neural_module.py --output outputs/ridge_benchmark.json` compares a saved pre-refactor module against the neural solver. It checks losses, gradients and coefficients, then records CPU training/reconstruction timings and allocation traffic on two synthetic sizes. The linear comparison sets `reg=0` to match the previous least-squares formula.
 
@@ -272,7 +315,7 @@ uv run python scripts/evaluate_rxrx1_sparse_recovery.py name=huvec_sparse n_seed
 # Repeat the identical command to resume. Increase n_seeds to append new seeds.
 ```
 
-To omit the kernel, use `bridges=[neural]`. Add `include_linear=true` to fit the existing pooled (`b=0`), shift (`b=1`) and fitted-slope linear models on retained responses and average their predictions over the same original reference batches. The fitted-slope model uses the configured `linear.reg` (default `1e-3`); this baseline penalty is fixed, not tuned.
+To omit the kernel, use `bridges=[neural]`. Add `include_linear=true` to fit pooled (`b=0`), shift (`b=1`), diagonal transfer and full linear transfer on retained responses and average their predictions over the same original reference batches. Both fitted linear models use the configured `linear.reg` (default `1e-3`); this baseline penalty is fixed, not tuned.
 
 Run the shared and hybrid neural variants with **10 sampled configurations per variant** and the linear comparisons:
 

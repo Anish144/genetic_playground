@@ -2,7 +2,8 @@
 
 G is the number of perturbations, J the number of measured outputs, and N the
 number of training response cells. Control samples set the input scaling;
-LinearRidgeSolver fits one control slope per output.
+LinearTransfer fits one control slope per output; FullLinearTransfer fits
+a matrix shared across perturbations, allowing effects between coordinates.
 """
 
 from collections.abc import Mapping
@@ -20,7 +21,7 @@ from genetic_perturbation_playground.data.transfer import (
     reference_weights,
     summary_stats,
 )
-from genetic_perturbation_playground.utils.ridge import LinearRidgeSolver
+from genetic_perturbation_playground.utils.ridge import fit_full_linear_slopes, fit_linear_slopes
 from genetic_perturbation_playground.utils.standardisation import mean_and_std
 
 
@@ -150,7 +151,7 @@ class LinearTransfer:
         """
         intercept = self.intercept_[label_positions(self.perturbations_, perturbations)]
         w = (matched_control_mean(test, perturbations) - self.w_mean_) / self.w_std_
-        return intercept + self.coef_ * w
+        return intercept + self._control_effect(w)
 
     def predict_environment_average(
         self,
@@ -191,10 +192,127 @@ class LinearTransfer:
             if p > 0
         )
         scaled = (mean - self.w_mean_) / self.w_std_
-        return self.intercept_[positions] + self.coef_ * scaled
+        return self.intercept_[positions] + self._control_effect(scaled)
+
+    def _control_effect(self, w: np.ndarray) -> np.ndarray:
+        return self.coef_ * w
 
     def _coefficient(self, s: dict) -> np.ndarray:
         """Fit ridge slopes or convert a fixed slope to scaled control units."""
         if self.slope is None:
-            return LinearRidgeSolver(reg=self.reg).solve(s)
+            return fit_linear_slopes(s, reg=self.reg)
         return np.full(s["y_mean"].shape[1], float(self.slope)) * self.w_std_
+
+
+class FullLinearTransfer(LinearTransfer):
+    """Predict each output from all control coordinates with a shared matrix.
+
+    Fit y_hat[x, e, g] = a[x, g] + sum_j B[g, j] W[e, j], using response
+    counts as weights. Category intercepts are unpenalised and B is shared
+    across perturbations. The penalty is N * reg * ||B_scaled||_F**2, where
+    N is the total response count. Prediction and environment averaging
+    follow LinearTransfer and use only test controls and response counts.
+
+    Parameters
+    ----------
+    standardise_w : bool, default=True
+        Scale controls with pooled training-control means and standard deviations.
+        Targets and predictions stay in their original units.
+    reg : float, default=1e-3
+        Finite, nonnegative slope penalty in fitted control units. Zero gives
+        the minimum-norm slope matrix among least-squares solutions.
+
+    Attributes
+    ----------
+    perturbations_ : numpy.ndarray of shape (G,)
+        Sorted fitted perturbation labels.
+    feature_names_in_ : numpy.ndarray of shape (J,)
+        Training feature names in control and output order.
+    control_basis_ : numpy.ndarray of shape (rank, J)
+        Orthonormal input basis; rank is at most the training batch count minus one.
+    response_coef_ : numpy.ndarray of shape (rank, J)
+        Shared response coefficients in that basis.
+    intercept_ : numpy.ndarray of shape (G, J)
+        Intercepts for controls in fitting units.
+    gamma_ : numpy.ndarray of shape (G, J)
+        Intercepts a for controls in original units.
+    w_mean_, w_std_ : numpy.ndarray of shape (J,) or float
+        Training-control scaling; zero and one when standardisation is disabled.
+
+    Notes
+    -----
+    Fitting and prediction retain an exact factorisation, avoiding quadratic
+    feature storage. Accessing coef_ or slope_ materialises a J-by-J matrix.
+    The factorisation imposes no additional rank limit on the ridge fit.
+
+    Examples
+    --------
+    >>> import anndata as ad
+    >>> import numpy as np
+    >>> import pandas as pd
+    >>> from genetic_perturbation_playground.model.linear_transfer import FullLinearTransfer
+    >>> obs = pd.DataFrame(
+    ...     {"perturbation": ["control", "a", "control", "a"],
+    ...      "batch": ["b0", "b0", "b1", "b1"]},
+    ...     index=["0", "1", "2", "3"],
+    ... )
+    >>> data = ad.AnnData(np.array([[0., 0.], [1., 5.], [2., 0.], [1., 9.]]), obs=obs)
+    >>> model = FullLinearTransfer(standardise_w=False, reg=0).fit(data)
+    >>> np.allclose(model.slope_, [[0., 0.], [2., 0.]])
+    True
+    """
+
+    def __init__(
+        self,
+        standardise_w: bool = LinearConfig.standardise_w,
+        *,
+        reg: float = LinearConfig.reg,
+    ):
+        super().__init__(standardise_w=standardise_w, reg=reg)
+
+    def fit(self, adata: ad.AnnData) -> "FullLinearTransfer":
+        """Fit the shared matrix and perturbation intercepts from training cells.
+
+        Parameters
+        ----------
+        adata : anndata.AnnData
+            Cells by outputs with perturbation and batch labels in obs.
+            Controls use the label "control". Missing pairs are omitted.
+
+        Returns
+        -------
+        self : FullLinearTransfer
+            Fitted model, retaining the coefficient matrix as two factors.
+        """
+        stats = summary_stats(adata)
+        self.w_mean_, self.w_std_ = (
+            mean_and_std(as_dense(adata.X[is_control(adata)])) if self.standardise_w else (0.0, 1.0)
+        )
+        stats["W"] = (stats["W"] - self.w_mean_) / self.w_std_
+        mean_controls = (stats["w_mean"] - self.w_mean_) / self.w_std_
+        self.control_basis_, self.response_coef_ = fit_full_linear_slopes(stats, reg=self.reg)
+        self.perturbations_ = stats["perturbations"]
+        self.feature_names_in_ = adata.var_names.to_numpy(copy=True)
+        self.intercept_ = stats["y_mean"] - self._control_effect(mean_controls)
+        origin = np.broadcast_to(self.w_mean_, adata.n_vars) / self.w_std_
+        self.gamma_ = self.intercept_ - self._control_effect(origin)
+        return self
+
+    @property
+    def coef_(self) -> np.ndarray:
+        """The (J, J) matrix B in fitting units, allocated on each access.
+
+        Rows are outputs and columns are control coordinates.
+        """
+        return self.response_coef_.T @ self.control_basis_
+
+    @property
+    def slope_(self) -> np.ndarray:
+        """The (J, J) matrix B in original units, allocated on each access.
+
+        Rows are outputs and columns are control coordinates.
+        """
+        return self.coef_ / self.w_std_
+
+    def _control_effect(self, w: np.ndarray) -> np.ndarray:
+        return (w @ self.control_basis_.T) @ self.response_coef_

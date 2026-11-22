@@ -6,7 +6,7 @@ defaults:
 name: ???
 output_dir: outputs/rxrx1_sparse_recovery/${name}
 resume: true
-include_linear: false  # also compare pooled, shift, and fitted-slope virtual averages
+include_linear: false  # also compare pooled, shift, diagonal and full linear virtual averages
 n_seeds: 10
 k_values: [2, 3, 4]
 n_configs: 8  # fresh draw per bridge and data seed; reuse across k
