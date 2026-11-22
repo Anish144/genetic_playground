@@ -267,6 +267,10 @@ def test_config_subsamples_without_changing_existing_tuning_defaults():
         {"n_seeds": 0},
         {"n_configs": 0},
         {"seed": -1},
+        {"hp_sampling_seed": -1},
+        {"hp_sampling_seed": True},
+        {"hp_sampling_seed": 1.5},
+        {"hp_sampling_seed": "1"},
         {"neural_checkpoints": []},
         {"neural_checkpoints": [-1]},
         {"neural": {"seed": 99}},
@@ -310,7 +314,7 @@ def test_single_bridge_with_linear_models_completes_and_resumes(
         "transfer (fit b)",
     }
     assert np.isfinite(expected.value).all()
-    assert set(read_json(tmp_path / "manifest.json")["identity"]["candidates"]) == {bridge}
+    assert set(read_json(tmp_path / "seeds/seed_0/candidates.json")["candidates"]) == {bridge}
     assert set(read_json(tmp_path / "seeds/seed_0/k_2/selected.json")["selected"]) == {bridge}
     assert (tmp_path / "seeds/seed_0/complete.json").exists()
     monkeypatch.setattr(
@@ -421,10 +425,67 @@ def test_runner_resume_equals_uninterrupted(runner, recovery_data, tmp_path, mon
         c = saved["perturbations"].tolist().index("c")
         np.testing.assert_allclose(saved["full_mean"][c], saved["retained_mean"][c])
     assert len(pd.read_csv(resumed_dir / "summary.csv")) == 12
-    candidates = read_json(resumed_dir / "manifest.json")["identity"]["candidates"]
-    for trial in resumed_dir.glob("seeds/seed_*/k_*/trials/fold_*/*/*.json"):
-        record = read_json(trial)
-        assert record["identity"]["config"] == candidates[trial.parent.name][0]
+    for seed in (0, 1):
+        directory = resumed_dir / "seeds" / f"seed_{seed}"
+        candidates = read_json(directory / "candidates.json")["candidates"]
+        trials = list(directory.glob("k_*/trials/fold_*/*/*.json"))
+        assert len(trials) == 18
+        for trial in trials:
+            record = read_json(trial)
+            assert record["identity"]["config"] == candidates[trial.parent.name][0]
+
+
+@pytest.mark.parametrize(
+    ("offset", "draw_seeds", "selected_regs"),
+    [
+        (None, [4, 5], [[6, 8], [5, 7]]),
+        (0, [4, 5], [[6, 8], [5, 7]]),
+        (7, [11, 12], [[1, 2], [3, 5]]),
+    ],
+)
+def test_each_seed_draws_fresh_candidates_independent_of_launch_range(
+    runner, recovery_data, tmp_path, offset, draw_seeds, selected_regs
+):
+    cfg = runner_config(
+        variant="shared_2nn",
+        seed=4,
+        neural={"seed": 4},
+        n_seeds=2,
+        k_values=[2, 3],
+        n_configs=2,
+        hp_sampling_seed=offset,
+        kernel_grid={"reg": list(range(1, 9))},
+        neural_grid={"reg": list(range(1, 9))},
+        neural_variant_grids={"shared_2nn": {"deviation_reg": [0.1]}},
+    )
+    original = OmegaConf.to_container(cfg, resolve=True)
+    combined = tmp_path / "combined"
+    run(runner, recovery_data, cfg, combined)
+    assert OmegaConf.to_container(cfg, resolve=True) == original
+    for seed, draw_seed, regs in zip((4, 5), draw_seeds, selected_regs, strict=True):
+        directory = combined / "seeds" / f"seed_{seed}"
+        metadata = read_json(directory / "candidates.json")
+        assert metadata["hp_sampling_seed"] == draw_seed
+        candidates = metadata["candidates"]
+        assert set(candidates) == {"kernel", "neural"}
+        for values in candidates.values():
+            assert [c["reg"] for c in values] == regs
+        effective = read_json(directory / "effective_config.json")
+        assert effective["seed"] == effective["neural"]["seed"] == seed
+        assert effective["hp_sampling_seed"] == draw_seed
+        trials = list(directory.glob("k_*/trials/fold_*/*/*.json"))
+        assert len(trials) == 20
+        for trial in trials:
+            record = read_json(trial)["identity"]
+            assert record["config"] in candidates[trial.parent.name]
+            if trial.parent.name == "neural":
+                assert record["model"]["seed"] == seed
+
+    single_cfg = OmegaConf.merge(cfg, {"seed": 5, "neural": {"seed": 5}, "n_seeds": 1})
+    run(runner, recovery_data, single_cfg, tmp_path / "single")
+    left, right = (tmp_path / name / "seeds/seed_5" for name in ("combined", "single"))
+    for name in ("candidates.json", "effective_config.json", "retained_order.csv"):
+        assert (left / name).read_bytes() == (right / name).read_bytes()
 
 
 def test_hp_sampling_seed_preserves_retention_and_initialization(runner, recovery_data, tmp_path):
@@ -439,9 +500,11 @@ def test_hp_sampling_seed_preserves_retention_and_initialization(runner, recover
         directory = tmp_path / f"hp_{sampling_seed}"
         run(runner, recovery_data, cfg, directory)
         identity = read_json(directory / "manifest.json")["identity"]
-        candidates.append(identity["candidates"])
+        candidates.append(read_json(directory / "seeds/seed_0/candidates.json")["candidates"])
         assert identity["settings"]["hp_sampling_seed"] == sampling_seed
-        for trial in directory.glob("seeds/seed_0/k_3/trials/fold_*/neural/*.json"):
+        trials = list(directory.glob("seeds/seed_0/k_3/trials/fold_*/neural/*.json"))
+        assert len(trials) == 3
+        for trial in trials:
             assert read_json(trial)["identity"]["model"]["seed"] == 0
 
     assert candidates[0] != candidates[1]
@@ -458,8 +521,10 @@ def test_hp_sampling_seed_preserves_retention_and_initialization(runner, recover
 
 
 def test_completed_seed_resume_and_extension(runner, recovery_data, tmp_path, monkeypatch):
-    cfg = runner_config()
+    cfg = runner_config(kernel_grid={"reg": list(range(1, 9))}, n_configs=2)
     expected = run(runner, recovery_data, cfg, tmp_path)
+    first_candidates = tmp_path / "seeds/seed_0/candidates.json"
+    original_candidates = first_candidates.read_bytes()
     original = tuning.make_kernel
     seeds_fitted = []
 
@@ -475,12 +540,73 @@ def test_completed_seed_resume_and_extension(runner, recovery_data, tmp_path, mo
     assert seeds_fitted == []
     cfg.n_seeds = 2
     extended = run(runner, recovery_data, cfg, tmp_path)
-    assert seeds_fitted == [1, 1, 1]  # two tuning fits and one final fit
+    assert seeds_fitted == [1] * 5  # two candidates in two folds and one final fit
+    assert first_candidates.read_bytes() == original_candidates
+    second = read_json(tmp_path / "seeds/seed_1/candidates.json")
+    assert [c["reg"] for c in second["candidates"]["kernel"]] == [4, 5]
     assert set(extended.seed) == {0, 1}
     assert (tmp_path / "scores.csv").exists() and (tmp_path / "summary.csv").exists()
     # Lowering the requested seed count must not erase already completed results.
     cfg.n_seeds = 1
     assert set(run(runner, recovery_data, cfg, tmp_path).seed) == {0, 1}
+
+
+@pytest.mark.parametrize("completed", [False, True])
+@pytest.mark.parametrize("corruption", ["candidate", "seed_type"])
+def test_resume_rejects_corrupt_seed_candidates(
+    runner, recovery_data, tmp_path, monkeypatch, completed, corruption
+):
+    from genetic_perturbation_playground.experiments.checkpoints import write_json
+
+    cfg = runner_config()
+    if completed:
+        run(runner, recovery_data, cfg, tmp_path)
+    else:
+
+        def stop(*args, **kwargs):
+            raise RuntimeError("interrupted tuning")
+
+        monkeypatch.setattr(tuning, "tune_resumable", stop)
+        with pytest.raises(RuntimeError, match="interrupted tuning"):
+            run(runner, recovery_data, cfg, tmp_path)
+
+    artifact = tmp_path / "seeds/seed_0/candidates.json"
+    metadata = read_json(artifact)
+    if corruption == "candidate":
+        metadata["candidates"]["kernel"][0]["reg"] = 99
+    else:
+        metadata["hp_sampling_seed"] = False
+    write_json(artifact, metadata)
+    monkeypatch.setattr(tuning, "make_kernel", lambda *args: pytest.fail("fitted corrupt run"))
+    with pytest.raises(ValueError, match="candidates.json"):
+        run(runner, recovery_data, cfg, tmp_path)
+
+
+@pytest.mark.parametrize("completed", [False, True])
+def test_reduced_seed_range_checks_candidates_of_all_reported_seeds(
+    runner, recovery_data, tmp_path, completed
+):
+    cfg = runner_config(bridges=["kernel"], n_seeds=2)
+    run(runner, recovery_data, cfg, tmp_path)
+    directory = tmp_path / "seeds/seed_1"
+    if not completed:
+        # Simulate stopping after committing k=2 but before committing the seed.
+        (directory / "complete.json").unlink()
+    (directory / "candidates.json").write_text("{}")
+    cfg.n_seeds = 1
+    with pytest.raises(ValueError, match="candidates.json"):
+        run(runner, recovery_data, cfg, tmp_path)
+
+
+def test_reordered_grid_dimensions_reject_resume_extension(runner, recovery_data, tmp_path):
+    cfg = runner_config(bridges=["kernel"])
+    cfg.kernel_grid = {"reg": [0.1, 1.0, 5.0], "lengthscale_scale": [0.2, 0.6, 1.0]}
+    run(runner, recovery_data, cfg, tmp_path)
+    cfg.kernel_grid = {"lengthscale_scale": [0.2, 0.6, 1.0], "reg": [0.1, 1.0, 5.0]}
+    cfg.n_seeds = 2
+    with pytest.raises(ValueError, match="incompatible"):
+        run(runner, recovery_data, cfg, tmp_path)
+    assert not (tmp_path / "seeds/seed_1").exists()
 
 
 def test_poisoned_removed_outcomes_do_not_change_selection_or_predictions(

@@ -299,7 +299,8 @@ def tune_resumable(
     directory : pathlib.Path
         Trial storage, owned by a locked run with validated data/config identity.
     candidates : dict of str to list of dict
-        Persisted draws for kernel, neural, or both; reused across seeds and k.
+        Persisted draws for kernel, neural, or both, reused across these folds.
+        The caller controls when to resample between experiment seeds.
 
     Returns
     -------

@@ -9,8 +9,8 @@ resume: true
 include_linear: false  # also compare pooled, shift, and fitted-slope virtual averages
 n_seeds: 10
 k_values: [2, 3, 4]
-n_configs: 8  # sample this many candidates per bridge once, reuse across seeds/k
-hp_sampling_seed: null  # null uses seed; otherwise changes only the configuration draw
+n_configs: 8  # fresh draw per bridge and data seed; reuse across k
+hp_sampling_seed: null  # offset: draw RNG = data seed + offset; null means zero
 cell_type: HUVEC
 batch_unit: plate
 proxy_controls: positive

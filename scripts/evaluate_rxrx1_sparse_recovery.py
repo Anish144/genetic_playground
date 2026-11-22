@@ -6,13 +6,14 @@ Run or resume with the same name/output_dir:
 
 Each seed retains k response batches per perturbation for k in [2,3,4].
 Controls remain available everywhere. Tuning uses only retained responses;
-the eight sampled configurations per bridge are reused across seeds/k, while
-fitting, validation and selection are repeated for each seed/k. Completed
+the eight configurations per bridge are sampled afresh for each seed and reused
+across k. Fitting, validation and selection are repeated for each seed/k. Completed
 trials and seeds are reused from the stable output directory. An interrupted
 neural trial restarts; its optimizer state is not saved.
 
-Set hp_sampling_seed to change only the candidate draw while keeping seed fixed
-for retained batches and neural initialization. Null uses the base seed.
+Candidate sampling uses the current data seed plus hp_sampling_seed, an optional
+nonnegative offset (null means zero). Changing the offset keeps retained batches
+and neural initialization fixed. Each seed's candidates are saved for resume.
 
 Use bridges=[neural] to omit the kernel and include_linear=true to add the
 pooled, shift and fitted-slope models. Select one neural variant per run with
@@ -80,6 +81,9 @@ def _validate_config(cfg):
             raise ValueError(f"{key} must be a positive integer.")
     if type(cfg.seed) is not int or cfg.seed < 0:
         raise ValueError("seed must be a nonnegative integer.")
+    offset = cfg.get("hp_sampling_seed")
+    if offset is not None and (type(offset) is not int or offset < 0):
+        raise ValueError("hp_sampling_seed must be a nonnegative integer or null.")
     if cfg.neural.seed != cfg.seed:
         raise ValueError(
             "Set seed to control both retention and neural initialization; neural.seed must match."
@@ -115,6 +119,22 @@ def _scientific_settings(cfg):
     }
 
 
+def _seed_config(cfg, seed):
+    """Copy validated settings with data/model seed and resolved HP draw seed.
+
+    The sparse-run hp_sampling_seed is an offset; null means zero. Use the
+    absolute data seed so separate launches and appended seeds draw identically.
+    """
+    return OmegaConf.merge(
+        cfg,
+        {
+            "seed": seed,
+            "neural": {"seed": seed},
+            "hp_sampling_seed": seed + (cfg.get("hp_sampling_seed") or 0),
+        },
+    )
+
+
 def _source_fingerprint():
     """Hash the runner's dependency modules; keep these lists aligned with imports."""
     paths = [ROOT / "src/genetic_perturbation_playground" / name for name in PACKAGE_DEPENDENCIES]
@@ -137,7 +157,15 @@ def _write_csv(path, table):
     state.atomic_write(path, lambda stream: stream.write(content))
 
 
-def _save_seed_inputs(directory, order, cfg):
+def _seed_metadata(cfg, candidates):
+    return {
+        "effective_config.json": _scientific_settings(cfg),
+        "candidates.json": {"hp_sampling_seed": cfg.hp_sampling_seed, "candidates": candidates},
+    }
+
+
+def _save_seed_inputs(directory, order, cfg, candidates):
+    """Save immutable retention, effective settings and candidates for one seed."""
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / "retained_order.csv"
     content = order.to_csv(index=False).encode()
@@ -147,14 +175,15 @@ def _save_seed_inputs(directory, order, cfg):
         )
     if not path.exists():
         state.atomic_write(path, lambda stream: stream.write(content))
-    path = directory / "effective_config.json"
-    expected = state.encode_settings(_scientific_settings(cfg))
-    if path.exists() and state.read_json(path) != expected:
-        raise ValueError(
-            f"Effective configuration mismatch at {path}; use a fresh output directory."
-        )
-    if not path.exists():
-        state.write_json(path, expected)
+    for name, settings in _seed_metadata(cfg, candidates).items():
+        path = directory / name
+        expected = state.encode_settings(settings)
+        if path.exists() and state.fingerprint_settings(
+            state.read_json(path)
+        ) != state.fingerprint_settings(expected):
+            raise ValueError(f"Seed input mismatch at {path}; use a fresh output directory.")
+        if not path.exists():
+            state.write_json(path, expected)
 
 
 def _prepare_data(data, cfg):
@@ -227,6 +256,10 @@ def run_experiment(
     cfg : omegaconf.DictConfig
         Experiment preset, including the base seed, requested seed count,
         bridge subset and optional inclusion of the three linear models.
+        Candidates are drawn per data seed using data seed + hp_sampling_seed;
+        the optional nonnegative offset defaults to null (zero). Each draw is
+        reused across k. Retention and neural initialization use the data seed.
+        The supplied configuration is not mutated.
     output_dir : pathlib.Path
         Persistent result directory; one writer is permitted at a time.
     input_fingerprint : str
@@ -247,18 +280,23 @@ def run_experiment(
         by an incompatible run.
     """
     _validate_config(cfg)
-    candidates = tuning.candidate_configs(cfg)
+    first_config = _seed_config(cfg, cfg.seed)
+    first_candidates = tuning.candidate_configs(first_config)
     identity = {
         "settings": _scientific_settings(cfg),
         "input_fingerprint": input_fingerprint,
         "source_fingerprint": _source_fingerprint(),
-        "candidates": candidates,
+        "candidate_sampling": "per_seed_offset",
+        # Flat grid indices depend on dimension order; dict hashes do not.
+        "candidate_grid_order": {
+            bridge: list(configs[0]) for bridge, configs in first_candidates.items()
+        },
     }
     run_id = state.fingerprint_settings(identity)
     with state.run_lock(output_dir):
         state.ensure_manifest(
             output_dir,
-            {"schema_version": 1, "identity": identity, "provenance": _provenance(cfg)},
+            {"schema_version": 2, "identity": identity, "provenance": _provenance(cfg)},
             resume=cfg.resume,
         )
         data, pairs, coverage = _prepare_data(data, cfg)
@@ -266,7 +304,7 @@ def run_experiment(
         _validate_coverage(coverage)
         data = select_proxy_controls(data, cfg)
         data = data[is_control(data) | data.obs.well_type.eq("treatment").to_numpy()]
-        _print_workload(cfg, candidates)
+        _print_workload(cfg, first_candidates)
         for seed in range(cfg.seed, cfg.seed + cfg.n_seeds):
             directory = output_dir / "seeds" / f"seed_{seed}"
             marker = directory / "complete.json"
@@ -281,9 +319,12 @@ def run_experiment(
                         )
                 print(f"skip completed seed {seed}", flush=True)
                 continue
-            effective = OmegaConf.merge(cfg, {"seed": seed, "neural": {"seed": seed}})
+            effective = _seed_config(cfg, seed)
+            candidates = (
+                first_candidates if seed == cfg.seed else tuning.candidate_configs(effective)
+            )
             order = recovery.retained_order(pairs, seed)
-            _save_seed_inputs(directory, order, effective)
+            _save_seed_inputs(directory, order, effective, candidates)
             for k in cfg.k_values:
                 _run_pair(
                     data,
@@ -302,6 +343,7 @@ def run_experiment(
                 [
                     directory / "retained_order.csv",
                     directory / "effective_config.json",
+                    directory / "candidates.json",
                     *pair_markers,
                 ],
                 identity=_stage_identity(run_id, seed),
@@ -376,12 +418,30 @@ def _rebuild_results(directory, cfg, run_id):
     tables = []
     for seed_dir in sorted((directory / "seeds").glob("seed_*")):
         seed = int(seed_dir.name.removeprefix("seed_"))
+        stages = []
         for k in cfg.k_values:
             stage = seed_dir / f"k_{k}"
             if state.is_complete(
                 stage / "complete.json", identity=_stage_identity(run_id, seed, k)
             ):
-                tables.append(pd.read_csv(stage / "scores.csv", dtype={"perturbation": str}))
+                stages.append(stage)
+        if not stages:
+            continue
+        if not state.is_complete(
+            seed_dir / "complete.json", identity=_stage_identity(run_id, seed)
+        ):
+            effective = _seed_config(cfg, seed)
+            candidates = tuning.candidate_configs(effective)
+            for name, expected in _seed_metadata(effective, candidates).items():
+                path = seed_dir / name
+                if state.fingerprint_settings(state.read_json(path)) != state.fingerprint_settings(
+                    expected
+                ):
+                    raise ValueError(
+                        f"Seed input mismatch at {path}; use a fresh output directory."
+                    )
+        for stage in stages:
+            tables.append(pd.read_csv(stage / "scores.csv", dtype={"perturbation": str}))
     if not tables:
         return pd.DataFrame()
     scores = pd.concat(tables, ignore_index=True).sort_values(

@@ -254,9 +254,9 @@ The full target and retained baseline average crop means **equally across batche
 
 Tuning is repeated independently for every `(seed,k)` pair. Each of k inner folds holds out one retained response batch per perturbation, leaving k-1 batches for fitting and retaining all controls. Select settings by MSE averaged equally over perturbations, then folds, and refit on all k retained batches. Removed responses and full-data means never enter tuning. `neural.cross_fit_folds=0` in this preset because k=2 inner fits have only one response batch per perturbation. The neural variant can be selected with `neural=per_x|shared_2nn|hybrid`.
 
-Sample **8 configurations per bridge** without replacement from the existing grids once, reusing that draw across seeds and k. `n_configs` changes the subsample size; neural scoring checkpoints remain unchanged. With 10 seeds and the default grids, this schedules 720 kernel tuning fits, 720 neural tuning runs and 30 final refits per bridge. The runner prints the workload before fitting; kernel similarities are currently recomputed by the existing model implementation.
+Sample **8 configurations per bridge per data seed** without replacement from the existing grids, reusing each seed's draw across k. Draws for different seeds may overlap; a grid smaller than `n_configs` is used in full. `n_configs` changes the subsample size; neural scoring checkpoints remain unchanged. With 10 seeds and the default grids, this schedules 720 kernel tuning fits, 720 neural tuning runs and 30 final refits per bridge. The runner prints the workload before fitting; kernel similarities are currently recomputed by the existing model implementation.
 
-By default, candidate sampling uses the base `seed`. Set `hp_sampling_seed` to a nonnegative integer to vary the candidate draw independently of retained batches and neural initialization; `null` preserves the default. For a controlled comparison, keep `seed=0`, use `n_seeds=1`, and change only `hp_sampling_seed` and the output name between searches:
+By default, candidate sampling uses the **current data seed**. In this sparse runner, `hp_sampling_seed` is a nonnegative offset: the draw RNG seed is `data_seed + hp_sampling_seed`, with `null` meaning zero. For example, `seed=1 n_seeds=3 hp_sampling_seed=3` uses draw seeds 4, 5 and 6 for data/init seeds 1, 2 and 3. Launching a data seed separately or appending seeds produces the same candidates. Changing the offset leaves retained batches and neural initialization unchanged. For a controlled comparison, keep `seed=0`, use `n_seeds=1`, and change only `hp_sampling_seed` and the output name between searches:
 
 ```bash
 uv run python scripts/evaluate_rxrx1_sparse_recovery.py \
@@ -288,12 +288,15 @@ Each variant has its own resumable result directory and the same retained-batch 
 
 Results live in the stable folder `outputs/rxrx1_sparse_recovery/huvec_sparse/`; override `output_dir` to choose another location. Invocation logs have timestamped subfolders. The runner saves each completed candidate/fold trial, partial neural scores at every scoring checkpoint, each completed seed/k result, and each completed seed. Resume skips completed trials and stages; an interrupted neural trial restarts from the beginning. An interrupted final refit reuses completed tuning. There is no optimizer-state checkpoint. A lock prevents concurrent writers, and content hashes reject changed inputs, relevant source dependencies or scientific settings. `resume=false` rejects existing results. Reducing `n_seeds` preserves earlier completed results in the combined tables.
 
+Use a fresh output name/directory for this per-seed sampling policy. Older runs reused one candidate draw for every seed (including a fixed explicit `hp_sampling_seed`); their manifests are incompatible and their results are preserved.
+
 The hybrid's documented `linear_reg=inf` setting is supported in grids and configuration. Saved settings encode it as `{"__float__":"+inf"}`; use `genetic_perturbation_playground.experiments.checkpoints.decode_settings` after reading JSON to restore it. Scores must always be finite. The experiment seed controls both retention and neural initialization; independent `neural.seed` values and `seed` entries in the active neural grid are rejected.
 
 The output folder contains:
 
-- `manifest.json`, `reference_pairs.csv`, `eligibility.csv`: resolved scientific identity, sampled candidates, original reference memberships and coverage exclusions.
+- `manifest.json`, `reference_pairs.csv`, `eligibility.csv`: resolved scientific identity and sampling policy, original reference memberships and coverage exclusions.
 - `seeds/seed_<seed>/retained_order.csv` and `effective_config.json`: the repeatable batch draw and effective settings.
+- `seeds/seed_<seed>/candidates.json`: that seed's resolved HP RNG seed and sampled candidates, validated on resume and included in the seed completion hashes. The effective configuration records the resolved RNG seed rather than the original offset.
 - `seeds/seed_<seed>/k_<k>/trials/`: one committed JSON per candidate/fold; `.partial.json` files are progress only.
 - Each seed/k folder's `inner_scores.csv`, `selected.json`, `estimates.npz`, `scores.csv` and `summary.csv`: validation scores, winners, labeled full/retained/virtual mean vectors, per-perturbation MSE and paired summaries. NPZ arrays load with `allow_pickle=False`.
 - Root `scores.csv` and `summary.csv`: rebuilt from validated completed stages on every invocation, including an otherwise fully skipped resume.
