@@ -691,16 +691,34 @@ class NeuralRidgeSolver:
         -----
         Adding this to ``prediction_sse(self.fit)`` gives the fitted ridge
         objective divided by J. Divide by N again to obtain the penalized
-        mean squared error. Shared and hybrid fits reconstruct coefficients
-        for all outputs to evaluate this penalty.
+        mean squared error.
+
+        Category coefficients are never built for every output, which would
+        need a (G, q+1, J) tensor. With local[x] = L[x] @ cy[x] - C[x] @ S,
+        L = local_map, C = coupling and S the shared coefficients, expand
+
+            ||local[x]||^2 = L cy cy^T L^T - 2 L (cy S^T) C^T + C (S S^T) C^T
+
+        (row-weighted by the penalties). Each term needs only target
+        products, so the largest temporary has shape (G, q+1, q_s).
         """
-        if self.shared_features is None:  # ||R @ cy||^2 / J from target products; no cy needed
-            R = self.local_map
-            return self.total * self.local_reg * (R * (R @ self.data.target_gram)).sum()
-        local, shared = self.coefficients()
-        penalty = (self.local_reg * local.square().sum(dim=(0, 2))).sum()
-        penalty = penalty + (self.shared_reg * shared.square().sum(dim=1)).sum()
-        return self.total * penalty / self.data.cy.shape[-1]
+        L = self.local_map
+        # Per-X fits use one float penalty, shared fits one per local row; both broadcast.
+        weights = torch.as_tensor(self.local_reg, dtype=L.dtype, device=L.device).reshape(-1, 1)
+        target_term = (weights * L * (L @ self.data.target_gram)).sum()  # already divided by J
+        if self.shared_features is None:
+            return self.total * target_term
+        J = self.data.cy.shape[-1]
+        S = torch.linalg.solve(
+            self.shared_gram, self.project_targets(self.shared_map, self.data.cy)
+        )  # (q_s, J)
+        C = self.coupling
+        target_shared = self.data.cy @ S.T  # (G, D, q_s)
+        cross_term = (weights * (L @ target_shared) * C).sum() / J
+        shared_term = (weights * (C @ (S @ S.T)) * C).sum() / J
+        local_penalty = target_term - 2 * cross_term + shared_term
+        shared_penalty = (self.shared_reg * S.square().sum(dim=1)).sum() / J
+        return self.total * (local_penalty + shared_penalty)
 
     def prediction_sse(self, scored: torch.Tensor | None = None) -> torch.Tensor:
         """Return count-weighted squared errors averaged over outputs.
