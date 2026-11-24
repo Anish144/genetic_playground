@@ -187,7 +187,7 @@ $$
 
 `NeuralHybridEmbeddingBridge` adds $\beta_g W_{eg}$ to this prediction and $N\lambda_{\rm linear}\|\beta\|^2$ to the penalty. The linear slope, intercept, shared response and deviation are fitted **jointly**. Each raw-control coordinate must correspond to the same target coordinate. `linear_reg` is nonnegative; `float("inf")` disables this term and reproduces shared 2NN. If controls are standardised, the linear term uses the standardised control mean.
 
-Both models retain count weighting, missing-pair handling, float64 ridge algebra, float32 networks, cross-fitting and checkpoint callbacks. `width_w`, `depth` and `n_features_w` size each network. The training loss is prediction MSE, without the coefficient penalty. `Standardised` centres training targets and adds their mean back at prediction, so coefficients in that wrapper describe centred responses.
+Both models retain count weighting, missing-pair handling, float64 ridge algebra, float32 networks, cross-fitting and checkpoint callbacks. `width_w`, `depth` and `n_features_w` size each network. The in-sample training loss is prediction MSE plus the coefficient penalty (scaled by 1/(J·N)); cross-fitted training uses held-out MSE only. `Standardised` centres training targets and adds their mean back at prediction, so coefficients in that wrapper describe centred responses.
 
 Use either variant through the existing AnnData adapter:
 

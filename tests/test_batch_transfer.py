@@ -349,7 +349,9 @@ def test_per_x_coefficients_and_loss_match_dense_ridge(gene_block_size):
     with torch.no_grad():
         loss = bridge._training_loss(bridge._to_tensors(xs, ys, ws, counts))
         sse, dense_A = _dense_fit(bridge, xs, ys, ws, counts)
-    torch.testing.assert_close(loss, sse / sum(c.sum() for c in counts))
+    total = sum(c.sum() for c in counts)
+    penalty = total * bridge.reg * dense_A.square().sum() / dense_A.shape[1]
+    torch.testing.assert_close(loss, (sse + penalty) / total)
     torch.testing.assert_close(bridge.A_.flatten(0, 1), dense_A)
 
 
@@ -404,6 +406,8 @@ def test_per_x_target_gram_loss_and_gradients_match_dense_ridge(
         A = _weighted_ridge(feats[train], pairs.y[train], pairs.c[train], bridge.reg)  # (G*q, J)
         residual = feats[scored] @ A - pairs.y[scored]  # (N_scored, J), possibly zero rows
         reference = reference + (pairs.c[scored] * residual.square().mean(dim=1)).sum()
+        if not cross_fit_folds:  # in-sample loss adds the ridge penalty
+            reference = reference + pairs.c.sum() * bridge.reg * A.square().sum() / A.shape[1]
     reference = reference / pairs.c.sum()
     torch.testing.assert_close(compressed, reference, rtol=1e-9, atol=1e-10)
 

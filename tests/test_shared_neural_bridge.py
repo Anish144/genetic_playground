@@ -146,7 +146,16 @@ def test_training_loss_and_both_network_gradients_match_full_design(
     for fold in range(max(fold_count, 1)):
         scored = folds == fold
         fit = ~scored if fold_count else scored
-        expected = expected + _explicit_ridge(model, pairs, embeddings, fit, scored)[1]
+        coefs, sse = _explicit_ridge(model, pairs, embeddings, fit, scored)
+        expected = expected + sse
+        if not fold_count:  # in-sample loss adds the ridge penalty
+            local, shared, linear = coefs
+            penalty = model.reg * (local[:, 0].square().sum() + shared.square().sum())
+            penalty = penalty + model.deviation_reg * local[:, 1:].square().sum()
+            linear_reg = getattr(model, "linear_reg", float("inf"))
+            if np.isfinite(linear_reg):
+                penalty = penalty + linear_reg * linear.square().sum()
+            expected = expected + pairs.c.sum() * penalty / pairs.y.shape[1]
     expected = expected / pairs.c.sum()
     torch.testing.assert_close(actual, expected, rtol=1e-8, atol=1e-10)
     parameters = tuple(model.psi_.parameters())

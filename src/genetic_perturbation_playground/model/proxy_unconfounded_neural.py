@@ -24,13 +24,15 @@ Q : target-product matrix
 
 Networks map controls to features, averaged within each environment.
 NeuralRidgeSolver fits the response coefficients with penalties scaled by N.
-Network training uses prediction mean squared error (MSE), without that penalty:
+Cross-fitted network training uses held-out prediction mean squared error (MSE):
 
     SSE = sum_i count[i] * sum_j (prediction[i, j] - target[i, j])**2 / J
     MSE = SSE / sum_i count[i]
 
 SSE means sum of squared errors, weighted by counts and averaged over outputs.
 Cross-fitting fits coefficients on some environments and scores the others.
+In-sample training adds the ridge penalty, divided by J and by the total count,
+so the networks minimise the same objective as the coefficients.
 In the equations, @ is matrix multiplication and ||A||^2 sums squared entries.
 """
 
@@ -65,7 +67,7 @@ class NeuralPerXEmbeddingBridge:
         + N * reg * sum_x ||A[x]||^2
 
     All categories share psi. Missing pairs have zero weight. Networks use
-    float32 and ridge uses float64; only prediction MSE trains the network.
+    float32 and ridge uses float64. In-sample training includes the ridge penalty.
 
     Parameters
     ----------
@@ -358,10 +360,9 @@ class NeuralPerXEmbeddingBridge:
         return self._in_sample_loss(data)
 
     def _in_sample_loss(self, data: GroupedRidgeData) -> torch.Tensor:
-        """Fit and score on all environments; return count-weighted MSE."""
-        mu = self._embed(data.w_envs)  # (D, q)
-        all_envs = torch.ones(len(mu), dtype=bool, device=mu.device)  # (D,)
-        return self._fit_and_score_sse(data, mu, all_envs, all_envs) / data.c.sum()
+        """Fit on all environments; return count-weighted MSE plus the scaled ridge penalty."""
+        solver = self._ridge_solver(data, self._embed(data.w_envs))
+        return (solver.prediction_sse() + solver.penalty()) / data.c.sum()
 
     def _cross_fit_loss(self, data) -> torch.Tensor:
         """Draw folds and return count-weighted MSE on held-out environments."""

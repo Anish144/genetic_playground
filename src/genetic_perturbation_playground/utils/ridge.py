@@ -385,6 +385,7 @@ class NeuralRidgeSolver:
         # A matrix right-hand side avoids PyTorch's vector ambiguity when G = q = D.
         rhs = fit_features.T.expand(len(counts), -1, -1)
         solver.local_map = cls.solve(gram, rhs, counts.sum(), reg)
+        solver.total, solver.local_reg = counts.sum(), reg
         return solver
 
     @classmethod
@@ -623,6 +624,7 @@ class NeuralRidgeSolver:
         fit_local = (local * self.fit[:, None]).T.expand(len(self.counts), -1, -1)
         maps = self.solve(local_gram, torch.cat((fit_local, cross), dim=2), self.total, penalties)
         self.local_map, self.coupling = maps.split((len(self.fit), features), dim=2)
+        self.local_reg, self.shared_reg = penalties, reg
         # local_map: (G, q+1, D); coupling: (G, q+1, q).
         gram = shared.T @ (self.counts.sum(dim=0)[:, None] * shared)
         gram = gram - (cross.transpose(1, 2) @ self.coupling).sum(dim=0)
@@ -655,6 +657,22 @@ class NeuralRidgeSolver:
         )
         local = self.local_map @ targets - self.coupling @ shared
         return RidgeCoefficients(local, shared, targets.new_zeros(targets.shape[-1]))
+
+    def penalty(self) -> torch.Tensor:
+        """Return the fit's ridge penalty divided by J, on the scale of ``prediction_sse``.
+
+        This is N * sum_k reg_k * ||coef_k||^2 / J, so prediction_sse() + penalty()
+        is the ridge objective that ``coefficients`` minimises, divided by J.
+        """
+        if self.shared_features is None:  # ||R @ cy||^2 / J from target products; no cy needed
+            R = self.local_map
+            return self.total * self.local_reg * (R * (R @ self.data.target_gram)).sum()
+        local, shared, linear = self.coefficients()
+        penalty = (self.local_reg * local.square().sum(dim=(0, 2))).sum()
+        penalty = penalty + self.shared_reg * shared.square().sum()
+        if not np.isinf(self.linear_reg):
+            penalty = penalty + self.linear_reg * linear.square().sum()
+        return self.total * penalty / self.data.cy.shape[-1]
 
     def prediction_sse(self, scored: torch.Tensor | None = None) -> torch.Tensor:
         """Return the weighted sum of squared prediction errors, averaged over outputs.
