@@ -215,6 +215,8 @@ def runner_config(*, variant="per_x", **overrides):
                 "neural.device=cpu",
             ],
         )
+    cfg.bridges = ["kernel", "neural"]
+    cfg.include_linear = False
     cfg.n_seeds = 1
     cfg.k_values = [2]
     cfg.n_configs = 1
@@ -235,10 +237,10 @@ def test_config_subsamples_without_changing_existing_tuning_defaults():
     with initialize_config_dir(str(ROOT / "configs"), version_base=None):
         original = compose("out_of_batch/rxrx1", ["name=old"])
         cfg = compose("sparse_recovery/rxrx1", ["name=new"])
-    assert cfg.k_values == [2, 3, 4]
-    assert cfg.n_seeds == 10
-    assert len(tuning.candidate_configs(cfg)["kernel"]) == 8
-    assert len(tuning.candidate_configs(cfg)["neural"]) == 8
+    assert cfg.k_values == [2, 3, 4, 5]
+    assert cfg.n_seeds == 5
+    assert cfg.bridges == ["neural"] and cfg.include_linear is True
+    assert len(tuning.candidate_configs(cfg)["neural"]) == 20
     assert original.n_configs == 20
     assert original.inner_folds == 3
     assert original.neural.cross_fit_folds == 5
@@ -247,11 +249,11 @@ def test_config_subsamples_without_changing_existing_tuning_defaults():
     assert cfg.cell_type == "HUVEC" and cfg.batch_unit == "plate"
     assert cfg.proxy_controls == "positive" and cfg.wandb_mode == "disabled"
     assert cfg.weight_by_cells is True
-    for field in ["kernel_grid", "neural_grid", "neural_variant_grids", "neural_checkpoints"]:
-        assert cfg[field] == original[field]
-    assert list(cfg.kernel_grid.reg) == [1e-8, 1e-7, 1e-6, 1e-5, 1e-4, 1e-3]
-    assert list(cfg.kernel_grid.lengthscale_scale) == [0.5, 1, 2, 4, 8]
-    assert cfg.neural_checkpoints == [0, 10, 20, 40, 60, 100, 150, 200, 300, 400]
+    assert cfg.kernel_grid == original.kernel_grid
+    assert list(cfg.neural_grid.width_w) == [128, 256]
+    assert list(cfg.neural_variant_grids.hybrid.deviation_reg) == [1e-2, 1e-1, 1.0]
+    assert cfg.neural_checkpoints == [0, 5, 10, 20, 40, 60, 100]
+    assert original.neural_checkpoints == [0, 10, 20, 40, 60, 100, 150, 200, 300, 400]
 
 
 @pytest.mark.parametrize(

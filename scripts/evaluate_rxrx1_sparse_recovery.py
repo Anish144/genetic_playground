@@ -4,7 +4,7 @@ Run or resume with the same name/output_dir:
 
     uv run python scripts/evaluate_rxrx1_sparse_recovery.py name=huvec_sparse n_seeds=10
 
-Each seed retains k response batches per perturbation for k in [2,3,4].
+Each seed retains k response batches per perturbation for each k in k_values (at least 2).
 Controls remain available everywhere. Tuning uses only retained responses;
 the eight configurations per bridge are sampled afresh for each seed and reused
 across k. Fitting, validation and selection are repeated for each seed/k. Completed
@@ -96,12 +96,8 @@ def _validate_config(cfg):
     if not bridges or len(set(bridges)) != len(bridges) or not set(bridges) <= {"kernel", "neural"}:
         raise ValueError("bridges must be a nonempty, distinct subset of [kernel,neural].")
     ks = list(cfg.k_values)
-    if (
-        not ks
-        or any(type(k) is not int or k not in (2, 3, 4) for k in ks)
-        or len(set(ks)) != len(ks)
-    ):
-        raise ValueError("k_values must be a nonempty, distinct subset of [2,3,4].")
+    if not ks or any(type(k) is not int or k < 2 for k in ks) or len(set(ks)) != len(ks):
+        raise ValueError("k_values must be distinct integers of at least 2.")
     steps = list(cfg.neural_checkpoints)
     if (
         not steps

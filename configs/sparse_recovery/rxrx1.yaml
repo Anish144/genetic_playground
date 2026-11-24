@@ -15,14 +15,14 @@ embeddings:
 
 # Evaluation and tuning
 seed: 0
-n_seeds: 10
-k_values: [2, 3, 4]  # retained response batches per perturbation
-n_configs: 8  # candidates per bridge and data seed; reuse across k
+n_seeds: 5
+k_values: [2, 3, 4, 5]  # retained response batches per perturbation
+n_configs: 20  # candidates per bridge and data seed; reuse across k
 hp_sampling_seed: null  # offset added to the data seed; null means zero
 
 # Models
-bridges: [kernel, neural]
-include_linear: false  # also compare pooled, shift, diagonal and full linear averages
+bridges: [neural]
+include_linear: true  # also compare pooled, shift, diagonal and full linear averages
 neural:
   depth: 1
   n_features_w: 32
@@ -33,6 +33,23 @@ neural:
   cross_fit_folds: 0  # k=2 inner fits retain one response batch per perturbation
   gene_block_size: 384
   device: cuda
+
+# Sparse-only search space, from the 20 Nov Beaker runs (no cross-fitting, before
+# the ||A||^2 training penalty). Winners sat at grid edges and never trained past
+# 40 steps; penalties extend upward because they now also act during training.
+neural_grid:
+  lr: [1.0e-4, 2.5e-4, 7.5e-4]
+  reg: [1.0e-4, 1.0e-3, 1.0e-2]
+  weight_decay: [1.0e-5, 1.0e-4, 1.0e-2]
+  width_w: [128, 256]
+  psi_size: [16, 32, 64, 128]
+neural_variant_grids:
+  shared_2nn:
+    deviation_reg: [1.0e-2, 1.0e-1, 1.0]
+  hybrid:
+    deviation_reg: [1.0e-2, 1.0e-1, 1.0]
+    linear_reg: [1.0e-4, 1.0e-3, 1.0e-2, 1.0e-1]
+neural_checkpoints: [0, 5, 10, 20, 40, 60, 100]
 
 # Execution
 name: ???
