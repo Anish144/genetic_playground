@@ -11,7 +11,7 @@ batch_unit: plate  # plate or experiment
 proxy_controls: positive  # negative, positive or both
 embeddings:
   grid: 4
-  standardise_sites: true
+  standardise_sites: false
 
 # Evaluation and tuning
 seed: 0
@@ -28,7 +28,7 @@ neural:
   reg: 1.0e-6
   weight_decay: 1.0e-2
   n_steps: 200  # tuning selects a step from neural_checkpoints
-  cross_fit_folds: 0
+  cross_fit_folds: 5
   gene_block_size: 384
   device: cuda
 

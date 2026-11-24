@@ -241,7 +241,7 @@ def test_config_subsamples_without_changing_existing_tuning_defaults():
     assert len(tuning.candidate_configs(cfg)["neural"]) == 8
     assert original.n_configs == 20
     assert original.inner_folds == 3
-    assert original.neural.cross_fit_folds == 0
+    assert original.neural.cross_fit_folds == 5
     assert cfg.neural.cross_fit_folds == 0
     assert cfg.neural.seed == cfg.seed
     assert cfg.cell_type == "HUVEC" and cfg.batch_unit == "plate"

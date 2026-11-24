@@ -21,7 +21,7 @@ neural:
   reg: 1.0e-6
   weight_decay: 1.0e-2
   n_steps: 200  # tuning selects a step from neural_checkpoints
-  cross_fit_folds: 0
+  cross_fit_folds: 5
   device: cuda
 
 # Execution

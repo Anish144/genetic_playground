@@ -163,9 +163,7 @@ def test_transfer_presets_retain_model_types_and_defaults(name, variant):
         128 if "rxrx1" in name else 64,
     )
     assert (neural.reg, neural.lr, neural.weight_decay) == (1e-6, 1e-3, 1e-2)
-    folds = (
-        5 if name == "out_of_batch/replogle_fixed" else 0
-    )  # the RxRx1 and tuning presets disable it
+    folds = 5  # every out-of-batch preset cross-fits
     assert (neural.n_steps, neural.cross_fit_folds, neural.device) == (200, folds, "cuda")
     assert resolve_model_config(config, "linear") == LinearConfig()
     assert resolve_model_config(config, "kernel") == KernelConfig()
