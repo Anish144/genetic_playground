@@ -3,13 +3,14 @@ defaults:  # control split, scoring and neural settings as in train_replogle_tra
   - _self_
 
 inner_folds: 3       # K-fold over each outer fold's training batches; settings picked by mean mse
-n_configs: 32        # sampled neural configurations; covers all 20 kernel configurations
+n_configs: 20        # sampled neural configurations; covers all 20 kernel configurations
 # Inputs use training-control statistics; expression targets stay unscaled.
 kernel_grid:
   reg: [1.0e-5, 3.0e-5, 1.0e-4, 3.0e-4, 1.0e-3]
   lengthscale_scale: [0.5, 1, 2, 4]  # multiples of the median-heuristic lengthscale
 neural:
   depth: 1
+  cross_fit_folds: 0
 neural_grid:         # common settings; cross-fitting comes from neural
   lr: [3.0e-5, 1.0e-4, 3.0e-4, 7.5e-4]
   reg: [1.0e-6, 1.0e-5, 1.0e-4, 1.0e-3]

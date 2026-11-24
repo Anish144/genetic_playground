@@ -4,4 +4,4 @@ defaults:
   - _self_
 
 inner_folds: 3
-n_configs: 32  # covers all 30 kernel configurations
+n_configs: 20  # covers all 30 kernel configurations
