@@ -180,8 +180,9 @@ class HybridConfig(Shared2NNConfig):
     variant : str, default="hybrid"
         Model identifier for this config class.
     linear_reg : float, default=1e-3
-        Nonnegative control-slope penalty. Zero leaves slopes unpenalised;
-        infinity disables the linear term.
+        Positive penalty on the squared entries of the control-to-output
+        matrix B, scaled by total training weight. Positive infinity disables
+        the linear term. The model rejects zero, negative values and NaN.
 
     Attributes
     ----------
@@ -190,7 +191,7 @@ class HybridConfig(Shared2NNConfig):
 
     Examples
     --------
-    >>> HybridConfig(linear_reg=0).variant
+    >>> HybridConfig(linear_reg=1e-2).variant
     'hybrid'
     """
 

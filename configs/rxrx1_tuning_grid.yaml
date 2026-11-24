@@ -15,6 +15,6 @@ neural_variant_grids:  # added only for the selected neural model
     deviation_reg: [1.0e-6, 1.0e-4, 1.0e-2]
   hybrid:
     <<: *shared_penalties
-    linear_reg: [0.0, 1.0e-4, 1.0e-3, 1.0e-2]
+    linear_reg: [1.0e-4, 1.0e-3, 1.0e-2]  # full B: must be positive
 # Score checkpoints in one training run; every candidate trains through step 400.
 neural_checkpoints: [0, 10, 20, 40, 60, 100, 150, 200, 300, 400]

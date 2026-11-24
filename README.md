@@ -185,7 +185,9 @@ $$
 
 `reg` sets $\lambda$; `deviation_reg` sets $\lambda_c$ and defaults to `reg`. Both must be finite and positive. The intercept is penalised too. Increasing `deviation_reg` shrinks perturbation-specific deviations toward the shared effect.
 
-`NeuralHybridEmbeddingBridge` adds $\beta_g W_{eg}$ to this prediction and $N\lambda_{\rm linear}\|\beta\|^2$ to the penalty. The linear slope, intercept, shared response and deviation are fitted **jointly**. Each raw-control coordinate must correspond to the same target coordinate. `linear_reg` is nonnegative; `float("inf")` disables this term and reproduces shared 2NN. If controls are standardised, the linear term uses the standardised control mean.
+`NeuralHybridEmbeddingBridge` adds $\bar W_e B$ to this prediction, a full control-to-output matrix shared across perturbations as in `FullLinearTransfer`, and $N\lambda_{\rm linear}\|B\|_F^2$ to the penalty. The matrix $B$, intercept, shared response and deviation are fitted **jointly**; control and target widths may differ. `linear_reg` must be positive; `float("inf")` disables this term and reproduces shared 2NN. If controls are standardised, $B$ uses the standardised control units.
+
+The hybrid projects control means onto their numerical row space once per fit, using a reduced SVD. The projected means $\bar W V$ join the shared neural features. Writing $B = VR$ preserves its squared coefficient norm because $V$ has orthonormal columns. Apart from discarding singular directions below the numerical rank tolerance, this preserves the fit and reduces the shared solve to width $q + r$, where $r \le \min(D, d_w)$. Predictions use the factors directly; accessing `full_coef_` allocates the full matrix $B = VR$.
 
 Both models retain count weighting, missing-pair handling, float64 ridge algebra, float32 networks, cross-fitting and checkpoint callbacks. `width_w`, `depth` and `n_features_w` size each network. The in-sample training loss is prediction MSE plus the coefficient penalty (scaled by 1/(J·N)); cross-fitted training uses held-out MSE only. `Standardised` centres training targets and adds their mean back at prediction, so coefficients in that wrapper describe centred responses.
 
@@ -234,7 +236,7 @@ Older commands need these changes:
 | `neural.variant=shared_2nn` | `neural=shared_2nn` |
 | `linear_reg=0` | `linear.reg=0` |
 | `bridge_reg=1e-5` | `kernel.reg=1e-5 neural.reg=1e-5` |
-| `+neural.linear_reg=0` | `neural=hybrid neural.linear_reg=0` |
+| `+neural.linear_reg=1e-3` | `neural=hybrid neural.linear_reg=1e-3` |
 | `+neural.deviation_reg=1e-3` | `neural=shared_2nn neural.deviation_reg=1e-3` (or select hybrid) |
 
 For programmatic Hydra composition, call `register_configs()` from the config module before `hydra.compose`, then use `resolve_model_config(cfg, "neural")` to obtain the selected dataclass. Use Hydra composition to load transfer presets; a raw YAML load does not apply their inherited defaults.
@@ -243,7 +245,9 @@ For programmatic Hydra composition, call `register_configs()` from the config mo
 
 `utils/neural.py` contains the reusable network layers, network builder, tensor conversion and checkpoint helper. `data/neural.py` defines one `GroupedRidgeData` record shared by the neural models and ridge solver; it holds counts, target sums and optional control tensors without copying them.
 
-Implementation is in `model/proxy_unconfounded_neural.py`. `utils/ridge.py` provides `fit_linear_slopes`, a vectorised closed-form diagonal fit, and `fit_full_linear_slopes`, which prepares a compact full-matrix regression for sklearn `Ridge` or `LinearRegression`. Both leave category intercepts unpenalised. `NeuralRidgeSolver` fits all three neural bridges using `torch.linalg.solve` with PyTorch gradients. Per-x retains batched category solves and target-Gram losses. For shared 2NN and hybrid, the neural solver eliminates category coefficients before a small shared solve, then solves the hybrid's extra slope per coordinate. Shared-2NN training uses target Grams and batches all folds' target projections; hybrid training checkpoints folds to limit retained autograd state. Final shared/hybrid coefficients are reconstructed in `gene_block_size` blocks and exposed as `intercept_`, `shared_coef_`, `deviation_coef_` and `linear_coef_` (zero for shared 2NN).
+Implementation is in `model/proxy_unconfounded_neural.py`. `utils/ridge.py` provides `fit_linear_slopes`, a vectorised closed-form diagonal fit, and `fit_full_linear_slopes`, which prepares a compact full-matrix regression for sklearn `Ridge` or `LinearRegression`. Both leave category intercepts unpenalised. `NeuralRidgeSolver` fits all three neural bridges using `torch.linalg.solve` with PyTorch gradients. Per-x retains batched category solves and target-Gram losses.
+
+For shared 2NN and hybrid, the neural solver eliminates category coefficients before the shared solve. Both use target Grams and combine target projections across cross-fit folds. Final coefficients are reconstructed in `gene_block_size` blocks and exposed as `intercept_`, `shared_coef_` and `deviation_coef_`. The hybrid's `shared_coef_` ends with the rows of the projected coefficient matrix $R$; `full_coef_` reconstructs $B = VR$ on access.
 
 `scripts/benchmark_ridge_solver.py --baseline /path/to/previous_neural_module.py --output outputs/ridge_benchmark.json` compares a saved pre-refactor module against the neural solver. It checks losses, gradients and coefficients, then records CPU training/reconstruction timings and allocation traffic on two synthetic sizes. The linear comparison sets `reg=0` to match the previous least-squares formula.
 

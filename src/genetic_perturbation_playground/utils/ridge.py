@@ -8,6 +8,11 @@ D : number of environments
     Source batches or experiments.
 q : number of learned features
     Output size of each control network, set by n_features_w.
+q_s : number of shared features
+    Equal to q for the shared model and q + r for the hybrid, where
+    r <= min(D, d_w) is the numerical rank of the training control means.
+    Disabling the hybrid's linear term sets r = 0.
+d_w : number of input coordinates per control sample
 J : number of outputs
     Measured genes or image-embedding coordinates predicted by the model.
 N : total training weight
@@ -211,13 +216,13 @@ class _SharedLossTerms(NamedTuple):
     ----------
     local_sse : torch.Tensor of shape ()
         Error from the category fit alone, averaged over outputs.
-    shared_gram : torch.Tensor of shape (q, q)
+    shared_gram : torch.Tensor of shape (q_s, q_s)
         Matrix for fitting the shared coefficients, including their penalty.
-    score_gram : torch.Tensor of shape (q, q)
+    score_gram : torch.Tensor of shape (q_s, q_s)
         Matrix for the squared shared prediction on the scored rows.
-    fit_map : torch.Tensor of shape (G, q, D)
+    fit_map : torch.Tensor of shape (G, q_s, D)
         Shared coefficients b solve shared_gram @ b = sum_x fit_map[x] @ cy[x].
-    cross_map : torch.Tensor of shape (G, q, D)
+    cross_map : torch.Tensor of shape (G, q_s, D)
         Maps target sums to the product of local errors and shared features.
 
     Examples
@@ -255,11 +260,10 @@ class RidgeCoefficients(NamedTuple):
     local : torch.Tensor
         Category coefficients, shape (G, q, J) for per-category fits.
         Shared and hybrid fits use shape (G, q+1, J), with intercepts in row zero.
-    shared : torch.Tensor of shape (q, J) or None
+    shared : torch.Tensor of shape (q_s, J) or None
         Coefficients shared across categories; None for per-category fits.
-    linear : torch.Tensor of shape (J,) or None
-        One control slope per output. Zero for shared fits and None for
-        per-category fits.
+        Hybrid fits append coefficients for the projected control means after
+        the q learned feature rows when the linear term is enabled.
 
     Examples
     --------
@@ -271,51 +275,66 @@ class RidgeCoefficients(NamedTuple):
     >>> coefficients = RidgeCoefficients(local=torch.ones(2, 3, 1))
     >>> coefficients.local.shape
     torch.Size([2, 3, 1])
-    >>> coefficients.shared is None and coefficients.linear is None
+    >>> coefficients.shared is None
     True
     """
 
     local: torch.Tensor
     shared: torch.Tensor | None = None
-    linear: torch.Tensor | None = None
 
 
 class NeuralRidgeSolver:
     """Fit coefficients and score predictions for fixed features.
 
     Create a solver with ``per_category`` or ``shared_deviation``, then call
-    ``coefficients`` or ``prediction_sse``. Fits use small matrix solves and
-    support gradients through the features.
+    ``coefficients``, ``prediction_sse`` or ``penalty``. Fits support gradients
+    through the features.
+
+    Parameters
+    ----------
+    data : GroupedRidgeData
+        Counts and target sums used by the fit.
+    features : torch.Tensor
+        Feature rows, shape (D, q) for per-category fits or (D, q_s + q) for
+        shared/hybrid fits, with shared features before deviation features.
+    fit : torch.Tensor of shape (D,) or None
+        Boolean mask selecting training environments; None includes all of
+        them. The factory methods prepare the coefficient maps for this split.
 
     Attributes
     ----------
     data : GroupedRidgeData
         Counts and target sums used by the fit.
     features : torch.Tensor
-        Input features: (D, q) for per-category fits, (D, 2q) for shared/hybrid fits.
+        Input features, shape (D, q) for per-category fits or (D, q_s + q) for
+        shared/hybrid fits.
     fit : torch.Tensor of shape (D,) or None
         Boolean mask selecting training environments. None includes all of them.
     local_map : torch.Tensor
         Maps target sums to category coefficients before adding shared effects.
         Shape (G, q, D) for per-category fits, (G, q+1, D) for shared/hybrid fits.
-    shared_features : torch.Tensor of shape (D, q) or None
+    shared_features : torch.Tensor of shape (D, q_s) or None
         Shared features; None for per-category fits.
     local_features : torch.Tensor of shape (D, q+1)
         Intercept column followed by deviation features. Shared/hybrid fits only.
     counts : torch.Tensor of shape (G, D)
         Counts in training environments. Shared/hybrid fits only.
     total : torch.Tensor of shape ()
-        Sum of training counts. Shared/hybrid fits only.
-    coupling : torch.Tensor of shape (G, q+1, q)
+        Sum of training counts across all categories.
+    local_reg : float or torch.Tensor of shape (q+1,)
+        Penalty before multiplication by N. A scalar for per-category fits;
+        intercept and deviation penalties for shared/hybrid fits.
+    shared_reg : torch.Tensor of shape (q_s,)
+        Penalty per shared feature before multiplication by N.
+        Shared/hybrid fits only.
+    coupling : torch.Tensor of shape (G, q+1, q_s)
         How category coefficients change with shared coefficients.
         Shared/hybrid fits only.
-    shared_gram : torch.Tensor of shape (q, q)
+    shared_gram : torch.Tensor of shape (q_s, q_s)
         Matrix for the shared solve after accounting for category effects.
         Shared/hybrid fits only.
-    shared_map : torch.Tensor of shape (G, q, D)
+    shared_map : torch.Tensor of shape (G, q_s, D)
         Maps target sums to the shared solve's target term. Shared/hybrid fits only.
-    linear_reg : float
-        Penalty for the hybrid's control slopes. Infinity disables this term.
 
     Examples
     --------
@@ -341,6 +360,8 @@ class NeuralRidgeSolver:
 
     >>> solver.prediction_sse().item()
     6.5
+    >>> solver.penalty().item()
+    4.5
     """
 
     def __init__(self, data: GroupedRidgeData, features: torch.Tensor, fit: torch.Tensor | None):
@@ -348,7 +369,6 @@ class NeuralRidgeSolver:
         self.features = features
         self.fit = fit
         self.shared_features = None
-        self.linear_reg = float("inf")
 
     @classmethod
     def per_category(cls, data: GroupedRidgeData, features, fit=None, *, reg):
@@ -397,53 +417,65 @@ class NeuralRidgeSolver:
         *,
         reg,
         deviation_reg,
-        linear_reg=float("inf"),
+        shared_reg,
     ):
-        """Fit shared effects, category deviations and optional control slopes together.
-
-        Split embeddings into shared features s and deviation features d. Fit
-
-            y_hat[x, e] = a[x] + s[e] @ b + d[e] @ v[x] + W[e] * beta
-            penalty = N * (reg * (||a||^2 + ||b||^2)
-                           + deviation_reg * ||v||^2 + linear_reg * ||beta||^2)
-            loss = J * SSE + penalty
-
-        W is data.control_mean. Omit W * beta and its penalty when linear_reg is
-        infinity. The intercepts a have a ridge penalty too.
+        """Fit shared effects and category deviations together.
 
         Parameters
         ----------
         data : GroupedRidgeData
-            Counts and target sums. Finite linear_reg also needs control_mean
-            and pooled_targets, with matching control and output coordinates.
-        embeddings : torch.Tensor of shape (D, 2q)
-            Shared features followed by deviation features.
+            Counts and target sums.
+        embeddings : torch.Tensor of shape (D, q_s + q)
+            Shared features followed by deviation features. For hybrid fits,
+            the shared block includes projected control means after the
+            learned shared features.
         fit : torch.Tensor of shape (D,) or None, default=None
-            Boolean training mask; None includes all environments.
+            Boolean training mask; None includes all environments. Selected
+            environments must have positive total response weight.
         reg : float
-            Positive penalty for intercepts and shared coefficients.
+            Finite, positive intercept penalty, before multiplication by N.
         deviation_reg : float
-            Positive penalty for category deviations.
-        linear_reg : float, default=inf
-            Nonnegative penalty for control slopes. Infinity disables them.
+            Finite, positive deviation penalty, before multiplication by N.
+        shared_reg : torch.Tensor of shape (q_s,)
+            Finite, positive penalty per shared feature, before multiplication
+            by N. Its length sets the shared width. Use the same device and
+            floating-point precision as embeddings.
 
         Returns
         -------
         NeuralRidgeSolver
             Solver ready to compute coefficients or prediction errors.
+
+        Raises
+        ------
+        ValueError
+            If the selected environments have no positive total response weight.
+
+        Notes
+        -----
+        For shared features s, deviation features d and category intercepts a,
+        fit all coefficients jointly to minimise::
+
+            y_hat[x, e] = a[x] + s[e] @ b + d[e] @ v[x]
+            penalty = N * (reg * ||a||^2 + sum_k shared_reg[k] * ||b[k]||^2
+                           + deviation_reg * ||v||^2)
+            loss = J * SSE + penalty
+
+        SSE is the count-weighted sum of squared errors, averaged over outputs.
+        N is the total response weight in the selected training environments.
         """
         if fit is None:
             fit = torch.ones(len(embeddings), dtype=torch.bool, device=embeddings.device)
         solver = cls(data, embeddings, fit)
-        solver.linear_reg = linear_reg
-        shared, deviation = embeddings.chunk(2, dim=1)
+        width = len(shared_reg)
+        shared, deviation = embeddings.split((width, embeddings.shape[1] - width), dim=1)
         solver.shared_features = shared
         solver.local_features = torch.cat((torch.ones_like(deviation[:, :1]), deviation), dim=1)
         solver.counts = data.c * fit
         solver.total = solver.counts.sum()
         if solver.total <= 0:
             raise ValueError("Each ridge fit needs positive total response weight")
-        solver._eliminate_local_effects(reg, deviation_reg)
+        solver._eliminate_local_effects(reg, deviation_reg, shared_reg)
         return solver
 
     @staticmethod
@@ -551,23 +583,23 @@ class NeuralRidgeSolver:
 
         Parameters
         ----------
-        maps : torch.Tensor of shape (G, q, D)
+        maps : torch.Tensor of shape (G, n_features, D)
             Maps from environments to features for each category.
         targets : torch.Tensor of shape (G, D, J)
             Weighted target sums. May contain only a slice of the outputs.
 
         Returns
         -------
-        torch.Tensor of shape (q, J)
-            sum_x maps[x] @ targets[x], computed without a temporary (G, q, J)
-            tensor or a copy of targets.
+        torch.Tensor of shape (n_features, J)
+            sum_x maps[x] @ targets[x], computed without a temporary
+            (G, n_features, J) tensor or a copy of targets.
         """
         weights = maps.permute(1, 0, 2).reshape(maps.shape[1], -1)
         return weights @ targets.view(-1, targets.shape[-1])
 
     @staticmethod
     def batched_shared_sse(data: GroupedRidgeData, terms: list[_SharedLossTerms]) -> torch.Tensor:
-        """Sum prediction errors across splits using one combined target projection.
+        """Sum prediction errors across splits with one target projection.
 
         Parameters
         ----------
@@ -594,26 +626,15 @@ class NeuralRidgeSolver:
         quadratic = (coefficients * (score_gram @ coefficients)).sum()
         return sum(term.local_sse for term in terms) + (2 * cross + quadratic) / data.cy.shape[-1]
 
-    def _eliminate_local_effects(self, reg: float, deviation_reg: float) -> None:
+    def _eliminate_local_effects(self, reg: float, deviation_reg: float, shared_reg) -> None:
         """Express category coefficients in terms of shared coefficients.
 
         The category equations give
 
             local = local_map @ cy - coupling @ shared
 
-        Substituting this into the shared equations leaves a q-by-q solve.
-
-        Parameters
-        ----------
-        reg : float
-            Penalty for intercepts and shared coefficients.
-        deviation_reg : float
-            Penalty for category deviations.
-
-        Returns
-        -------
-        None
-            Stores local_map, coupling, shared_gram and shared_map on the solver.
+        Substitution leaves a q_s-by-q_s solve. Store the coefficient maps,
+        penalties and shared system on this solver.
         """
         local, shared = self.local_features, self.shared_features
         features = shared.shape[1]
@@ -624,11 +645,11 @@ class NeuralRidgeSolver:
         fit_local = (local * self.fit[:, None]).T.expand(len(self.counts), -1, -1)
         maps = self.solve(local_gram, torch.cat((fit_local, cross), dim=2), self.total, penalties)
         self.local_map, self.coupling = maps.split((len(self.fit), features), dim=2)
-        self.local_reg, self.shared_reg = penalties, reg
-        # local_map: (G, q+1, D); coupling: (G, q+1, q).
+        self.local_reg, self.shared_reg = penalties, shared_reg
+        # local_map: (G, q+1, D); coupling: (G, q+1, q_s).
         gram = shared.T @ (self.counts.sum(dim=0)[:, None] * shared)
         gram = gram - (cross.transpose(1, 2) @ self.coupling).sum(dim=0)
-        self.shared_gram = self.penalised_gram(gram, self.total, reg)
+        self.shared_gram = self.penalised_gram(gram, self.total, shared_reg)
         self.shared_map = (shared * self.fit[:, None]).T - cross.transpose(1, 2) @ self.local_map
 
     def coefficients(self, block: slice | None = None) -> RidgeCoefficients:
@@ -642,7 +663,7 @@ class NeuralRidgeSolver:
         Returns
         -------
         RidgeCoefficients
-            Category, shared and linear coefficients for these outputs.
+            Category and shared coefficients for these outputs.
             Gradients can pass through the fit.
         """
         if block is None:
@@ -650,32 +671,39 @@ class NeuralRidgeSolver:
         targets = self.data.cy[:, :, block]
         if self.shared_features is None:
             return RidgeCoefficients(local=self.local_map @ targets)
-        if not np.isinf(self.linear_reg):
-            return self._hybrid_coefficients(block)
         shared = torch.linalg.solve(
             self.shared_gram, self.project_targets(self.shared_map, targets)
         )
         local = self.local_map @ targets - self.coupling @ shared
-        return RidgeCoefficients(local, shared, targets.new_zeros(targets.shape[-1]))
+        return RidgeCoefficients(local, shared)
 
     def penalty(self) -> torch.Tensor:
-        """Return the fit's ridge penalty divided by J, on the scale of ``prediction_sse``.
+        """Return the fitted ridge penalty averaged over outputs.
 
-        This is N * sum_k reg_k * ||coef_k||^2 / J, so prediction_sse() + penalty()
-        is the ridge objective that ``coefficients`` minimises, divided by J.
+        Returns
+        -------
+        torch.Tensor of shape ()
+            N * sum_k reg_k * ||coef_k||^2 / J, where k indexes coefficient
+            rows and N is the total training weight. Gradients pass through
+            the fitted coefficients.
+
+        Notes
+        -----
+        Adding this to ``prediction_sse(self.fit)`` gives the fitted ridge
+        objective divided by J. Divide by N again to obtain the penalized
+        mean squared error. Shared and hybrid fits reconstruct coefficients
+        for all outputs to evaluate this penalty.
         """
         if self.shared_features is None:  # ||R @ cy||^2 / J from target products; no cy needed
             R = self.local_map
             return self.total * self.local_reg * (R * (R @ self.data.target_gram)).sum()
-        local, shared, linear = self.coefficients()
+        local, shared = self.coefficients()
         penalty = (self.local_reg * local.square().sum(dim=(0, 2))).sum()
-        penalty = penalty + self.shared_reg * shared.square().sum()
-        if not np.isinf(self.linear_reg):
-            penalty = penalty + self.linear_reg * linear.square().sum()
+        penalty = penalty + (self.shared_reg * shared.square().sum(dim=1)).sum()
         return self.total * penalty / self.data.cy.shape[-1]
 
     def prediction_sse(self, scored: torch.Tensor | None = None) -> torch.Tensor:
-        """Return the weighted sum of squared prediction errors, averaged over outputs.
+        """Return count-weighted squared errors averaged over outputs.
 
         For rows i in the scored environments:
 
@@ -696,19 +724,7 @@ class NeuralRidgeSolver:
             scored = torch.ones(self.data.c.shape[1], dtype=torch.bool, device=self.data.c.device)
         if self.shared_features is None:
             return self.grouped_sse(self.data, self.features, self.local_map, scored)
-        if np.isinf(self.linear_reg):
-            return self.batched_shared_sse(self.data, [self.shared_loss_terms(scored)])
-        data = self.data
-        local, shared, linear = self.coefficients()
-        effect = self.shared_features @ shared + data.control_mean * linear
-        counts = data.c * scored
-        target_sum = (self.local_features.T * scored) @ data.cy
-        cross = (local * target_sum).sum() + (effect * data.pooled_targets * scored[:, None]).sum()
-        local_gram = self.grouped_gram(counts, self.local_features)
-        mixed = (self.local_features.T * counts[:, None, :]) @ effect
-        quadratic = (local * (local_gram @ local)).sum() + 2 * (local * mixed).sum()
-        quadratic = quadratic + (counts.sum(dim=0)[:, None] * effect.square()).sum()
-        return data.cyy[scored].sum() + (quadratic - 2 * cross) / data.cy.shape[-1]
+        return self.batched_shared_sse(self.data, [self.shared_loss_terms(scored)])
 
     def shared_loss_terms(self, scored: torch.Tensor) -> _SharedLossTerms:
         """Prepare the shared model's error terms for one split.
@@ -728,9 +744,8 @@ class NeuralRidgeSolver:
         Returns
         -------
         _SharedLossTerms
-            Small matrices needed to fit and score the shared coefficients.
-            Used when there is no control slope; the hybrid scores each output
-            with its own fitted slope instead.
+            Matrices needed to fit and score the shared coefficients. Shared
+            feature matrices have width q_s, including projected controls.
         """
         local = self.local_features
         residual_shared = self.shared_features - local @ self.coupling
@@ -749,80 +764,3 @@ class NeuralRidgeSolver:
             self.shared_map,
             cross_map,
         )
-
-    def _hybrid_coefficients(self, block: slice) -> RidgeCoefficients:
-        """Fit the hybrid's category, shared and linear coefficients together.
-
-        Account for category and shared effects first. Each output then needs
-        only a scalar division for its control slope. All outputs use the same
-        q-by-q matrix for their shared coefficients.
-
-        Parameters
-        ----------
-        block : slice
-            Outputs to include. Let B be the number of selected outputs.
-
-        Returns
-        -------
-        local : torch.Tensor of shape (G, q+1, B)
-            Category intercepts in row zero, followed by deviation coefficients.
-        shared : torch.Tensor of shape (q, B)
-            Coefficients shared across categories.
-        linear : torch.Tensor of shape (B,)
-            One control slope per selected output.
-        """
-        data = self.data
-        targets = data.cy[:, :, block]
-        raw_mean = data.control_mean[:, block]
-        pooled_targets = data.pooled_targets[:, block]
-        local_zero = self.local_map @ targets
-        local_raw = (self.local_map * data.c[:, None, :]) @ raw_mean
-        raw_cross = (self.local_features.T * self.counts[:, None, :]) @ raw_mean
-        shared_rhs = self.project_targets(self.shared_map, targets)
-        shared_raw = (self.shared_map * data.c[:, None, :]).sum(dim=0) @ raw_mean
-        raw_rhs = (raw_mean * pooled_targets * self.fit[:, None]).sum(dim=0)
-        raw_rhs = raw_rhs - (raw_cross * local_zero).sum(dim=(0, 1))
-        raw_gram = (self.counts.sum(dim=0)[:, None] * raw_mean.square()).sum(dim=0)
-        raw_gram = raw_gram - (raw_cross * local_raw).sum(dim=(0, 1))
-        shared_zero, shared_raw_map = torch.linalg.solve(
-            self.shared_gram, torch.cat((shared_rhs, shared_raw), dim=1)
-        ).chunk(2, dim=1)
-        raw_diagonal = raw_gram + self.linear_reg * self.total
-        denominator = raw_diagonal - (shared_raw * shared_raw_map).sum(dim=0)
-        numerator = raw_rhs - (shared_raw * shared_zero).sum(dim=0)
-        linear = self._linear_coefficients(numerator, denominator, raw_diagonal)
-        shared = shared_zero - shared_raw_map * linear
-        local = local_zero - self.coupling @ shared - local_raw * linear
-        return RidgeCoefficients(local, shared, linear)
-
-    @staticmethod
-    def _linear_coefficients(numerator, denominator, scale) -> torch.Tensor:
-        """Divide to get control slopes; use zero when a denominator is too small.
-
-        Parameters
-        ----------
-        numerator : torch.Tensor of shape (B,)
-            Target-control products after accounting for category and shared effects.
-        denominator : torch.Tensor of shape (B,)
-            Remaining control variation plus the ridge penalty.
-        scale : torch.Tensor of shape (B,)
-            Control variation plus penalty before the shared-effect adjustment.
-            Sets the tolerance for floating-point rounding errors.
-
-        Returns
-        -------
-        torch.Tensor of shape (B,)
-            numerator / denominator where the denominator exceeds the tolerance;
-            zero elsewhere.
-
-        Raises
-        ------
-        FloatingPointError
-            If a denominator is negative by more than the rounding tolerance.
-        """
-        tolerance = 100 * torch.finfo(denominator.dtype).eps * scale.abs().clamp_min(1)
-        if (denominator < -tolerance).any():
-            raise FloatingPointError("Negative raw-linear Schur complement")
-        supported = denominator > tolerance
-        safe_denominator = torch.where(supported, denominator, 1.0)
-        return torch.where(supported, numerator / safe_denominator, 0.0)

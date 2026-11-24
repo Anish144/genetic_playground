@@ -12,8 +12,9 @@ import torch
 class GroupedRidgeData(NamedTuple):
     """Counts, target sums and optional controls for a neural ridge fit.
 
-    Missing category/environment pairs have zero count. All tensors use the
-    same device and precision. The record stores references without copying.
+    Missing category/environment pairs have zero count. Count and target
+    tensors share a device and precision; controls may use a different
+    floating-point precision. The record stores references without copying.
 
     Attributes
     ----------
@@ -29,10 +30,6 @@ class GroupedRidgeData(NamedTuple):
     w_envs : list of torch.Tensor or None
         Control samples; entry e has shape (m_e, d_w). Neural bridges need
         these samples to learn features. A standalone ridge fit may omit them.
-    control_mean : torch.Tensor of shape (D, J) or None
-        Mean controls used by the hybrid's linear term. May already be scaled.
-    pooled_targets : torch.Tensor of shape (D, J) or None
-        cy.sum(0), used by the hybrid's linear term.
 
     Examples
     --------
@@ -51,8 +48,6 @@ class GroupedRidgeData(NamedTuple):
     ... )
     >>> data.cy.tolist()
     [[[2.0], [8.0]]]
-    >>> data._replace(pooled_targets=cy.sum(0)).pooled_targets.shape
-    torch.Size([2, 1])
     """
 
     c: torch.Tensor
@@ -60,5 +55,3 @@ class GroupedRidgeData(NamedTuple):
     cyy: torch.Tensor
     target_gram: torch.Tensor
     w_envs: list[torch.Tensor] | None = None
-    control_mean: torch.Tensor | None = None
-    pooled_targets: torch.Tensor | None = None

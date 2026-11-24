@@ -29,7 +29,7 @@ def tiny_config(variant="per_x"):
         "neural_variant_grids",
         {
             "shared_2nn": {"deviation_reg": [None]},
-            "hybrid": {"deviation_reg": [None], "linear_reg": [0.0]},
+            "hybrid": {"deviation_reg": [None], "linear_reg": [0.01]},
         },
         merge=False,
     )
@@ -60,7 +60,7 @@ def test_completed_tuning_resume_never_refits_and_preserves_variant(
     if variant != "per_x":
         assert expected[1]["neural"]["deviation_reg"] is None
     if variant == "hybrid":
-        assert expected[1]["neural"]["linear_reg"] == 0.0
+        assert expected[1]["neural"]["linear_reg"] == 0.01
 
     def forbidden(*args):
         raise AssertionError("A completed trial was fitted again")

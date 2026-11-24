@@ -99,7 +99,6 @@ def parity(old, new):
             "intercept_",
             "shared_coef_",
             "deviation_coef_",
-            "linear_coef_",
         ]
     )
     for name in names:

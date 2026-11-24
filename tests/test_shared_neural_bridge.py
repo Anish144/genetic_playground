@@ -1,4 +1,4 @@
-"""Check the compact shared/hybrid solver against an independent full-design ridge fit."""
+"""Check shared and hybrid solvers against an explicit ridge fit."""
 
 import numpy as np
 import pytest
@@ -61,50 +61,40 @@ def test_fitted_models_with_the_same_settings_are_distinct(model_type):
 
 
 def _explicit_ridge(model, pairs, embeddings, fit, scored):
-    """Build [category intercept/deviation blocks, shared features, raw coordinate].
+    """Fit an explicit design with category and shared feature blocks.
 
-    Solve a complete normal equation independently for every output. Work with the
-    original rows so duplicate responses contribute their own squared errors.
+    Include control means in the shared block when the hybrid's linear term is
+    enabled. Keep duplicate response rows so each contributes its own error.
+    Return ((local, shared), sse, penalty): sse is count-weighted and averaged
+    over outputs; penalty sums reg * coefficient**2 before scaling by N / J.
     """
-    shared, deviation = embeddings.chunk(2, dim=1)
+    q = model.n_features_w
+    shared, deviation = embeddings[:, :-q], embeddings[:, -q:]
     local = torch.cat((torch.ones_like(deviation[:, :1]), deviation), dim=1)
     category_features = (pairs.x[:, :, None] * local[pairs.env, None, :]).flatten(1)
     design = torch.cat((category_features, shared[pairs.env]), dim=1)
-    local_penalty = embeddings.new_tensor([model.reg] + [model.deviation_reg] * model.n_features_w)
-    penalties = torch.cat(
-        (
-            local_penalty.repeat(pairs.x.shape[1]),
-            embeddings.new_full((model.n_features_w,), model.reg),
-        )
-    )
-    linear_reg = getattr(model, "linear_reg", float("inf"))
-    has_linear = np.isfinite(linear_reg)
-    if has_linear:
-        raw_mean = torch.stack([w.mean(dim=0) for w in pairs.w_envs])
-        penalties = torch.cat((penalties, embeddings.new_tensor([linear_reg])))
+    local_penalty = embeddings.new_tensor([model.reg] + [model.deviation_reg] * q)
+    shared_penalty = embeddings.new_full((shared.shape[1],), getattr(model, "linear_reg", 0.0))
+    shared_penalty[:q] = model.reg
+    penalties = torch.cat((local_penalty.repeat(pairs.x.shape[1]), shared_penalty))
     weights = pairs.c * fit[pairs.env]
-    coefficients, predictions = [], []
-    for gene in range(pairs.y.shape[1]):
-        features = design
-        if has_linear:
-            features = torch.cat((features, raw_mean[pairs.env, gene, None]), dim=1)
-        gram = features.T @ (weights[:, None] * features)
-        gram = gram + weights.sum() * torch.diag(penalties)
-        rhs = features.T @ (weights * pairs.y[:, gene])
-        coefficient = torch.linalg.solve(gram, rhs)
-        coefficients.append(coefficient)
-        predictions.append(features @ coefficient)
-    coefficients = torch.stack(coefficients, dim=1)
-    residual = torch.stack(predictions, dim=1) - pairs.y
+    gram = design.T @ (weights[:, None] * design) + weights.sum() * torch.diag(penalties)
+    coefficients = torch.linalg.solve(gram, design.T @ (weights[:, None] * pairs.y))
+    residual = design @ coefficients - pairs.y
     sse = (pairs.c * scored[pairs.env] * residual.square().mean(dim=1)).sum()
+    penalty = (penalties[:, None] * coefficients.square()).sum()
     local_size = pairs.x.shape[1] * local.shape[1]
     local_coef = coefficients[:local_size].reshape(pairs.x.shape[1], local.shape[1], -1)
-    shared_coef = coefficients[local_size : local_size + model.n_features_w]
-    linear_coef = coefficients[-1] if has_linear else embeddings.new_zeros(pairs.y.shape[1])
-    return (local_coef, shared_coef, linear_coef), sse
+    return (local_coef, coefficients[local_size:]), sse, penalty
 
 
-@pytest.mark.parametrize("linear_reg", [None, 0.0, 0.002, float("inf")])
+def _width(model, d_w=5):
+    """Return 2q plus d_w when the hybrid's linear term is enabled."""
+    has_b = np.isfinite(getattr(model, "linear_reg", float("inf")))
+    return 2 * model.n_features_w + d_w * has_b
+
+
+@pytest.mark.parametrize("linear_reg", [None, 0.002, float("inf")])
 @pytest.mark.parametrize("weighted", [False, True])
 def test_solver_coefficients_loss_and_embedding_gradients_match_full_design(linear_reg, weighted):
     xs, ys, ws, counts = _environments()
@@ -113,10 +103,12 @@ def test_solver_coefficients_loss_and_embedding_gradients_match_full_design(line
     data = model._to_tensors(xs, ys, ws, counts)
     pairs = pair_data(xs, ys, ws, counts, device=model.device)
     generator = torch.Generator().manual_seed(7)
-    embeddings = torch.randn(5, 6, generator=generator, dtype=torch.float64, requires_grad=True)
+    embeddings = torch.randn(
+        5, _width(model), generator=generator, dtype=torch.float64, requires_grad=True
+    )
     fit = torch.tensor([False, True, True, False, True])
     solver = model._ridge_solver(data, embeddings, fit)
-    expected_coefs, expected_sse = _explicit_ridge(model, pairs, embeddings, fit, ~fit)
+    expected_coefs, expected_sse, _ = _explicit_ridge(model, pairs, embeddings, fit, ~fit)
     for actual, expected in zip(solver.coefficients(), expected_coefs, strict=True):
         torch.testing.assert_close(actual, expected, rtol=1e-8, atol=1e-10)
     actual_sse = solver.prediction_sse(~fit)
@@ -146,15 +138,9 @@ def test_training_loss_and_both_network_gradients_match_full_design(
     for fold in range(max(fold_count, 1)):
         scored = folds == fold
         fit = ~scored if fold_count else scored
-        coefs, sse = _explicit_ridge(model, pairs, embeddings, fit, scored)
+        _, sse, penalty = _explicit_ridge(model, pairs, embeddings, fit, scored)
         expected = expected + sse
         if not fold_count:  # in-sample loss adds the ridge penalty
-            local, shared, linear = coefs
-            penalty = model.reg * (local[:, 0].square().sum() + shared.square().sum())
-            penalty = penalty + model.deviation_reg * local[:, 1:].square().sum()
-            linear_reg = getattr(model, "linear_reg", float("inf"))
-            if np.isfinite(linear_reg):
-                penalty = penalty + linear_reg * linear.square().sum()
             expected = expected + pairs.c.sum() * penalty / pairs.y.shape[1]
     expected = expected / pairs.c.sum()
     torch.testing.assert_close(actual, expected, rtol=1e-8, atol=1e-10)
@@ -176,19 +162,17 @@ def test_blocked_coefficients_and_new_environment_predictions_match_full_design(
     model = _model(linear_reg, n_steps=2, gene_block_size=block_size).fit(xs, ys, ws, counts)
     data = model._to_tensors(xs, ys, ws, counts)
     pairs = pair_data(xs, ys, ws, counts, device=model.device)
+    q = model.n_features_w
     with torch.no_grad():
         embeddings = model._embed(data.w_envs)
         all_envs = torch.ones(len(ws), dtype=torch.bool)
-        expected, _ = _explicit_ridge(model, pairs, embeddings, all_envs, all_envs)
-        local, shared, linear = expected
+        (local, shared), _, _ = _explicit_ridge(model, pairs, embeddings, all_envs, all_envs)
         torch.testing.assert_close(model.intercept_, local[:, 0])
         torch.testing.assert_close(model.deviation_coef_, local[:, 1:])
         torch.testing.assert_close(model.shared_coef_, shared)
-        torch.testing.assert_close(model.linear_coef_, linear)
         controls = np.random.default_rng(32).normal(size=(11, 5))
-        shared_mean, deviation_mean = model._embed([torch.as_tensor(controls)]).chunk(2, dim=1)
-        prediction = local[:, 0] + shared_mean[0] @ shared + deviation_mean[0] @ local[:, 1:]
-        prediction = prediction + torch.as_tensor(controls.mean(0)) * linear
+        embedded = model._embed([torch.as_tensor(controls)])[0]
+        prediction = local[:, 0] + embedded[:-q] @ shared + embedded[-q:] @ local[:, 1:]
     categories = [2, 0, 2, 3]
     np.testing.assert_allclose(
         model.predict(np.eye(4)[categories], controls), prediction[categories]
@@ -198,14 +182,12 @@ def test_blocked_coefficients_and_new_environment_predictions_match_full_design(
 @pytest.mark.parametrize("fold_count", [0, 2])
 def test_infinite_linear_penalty_exactly_recovers_shared_model(fold_count):
     xs, ys, ws, counts = _environments()
-    # Disabled linear term does not require matching proxy/output dimensions.
-    ws = [w[:, :2] for w in ws]
     shared = _model(n_steps=3, cross_fit_folds=fold_count).fit(xs, ys, ws, counts)
     hybrid = _model(float("inf"), n_steps=3, cross_fit_folds=fold_count).fit(xs, ys, ws, counts)
     np.testing.assert_array_equal(
         shared.predict(np.eye(4), ws[0]), hybrid.predict(np.eye(4), ws[0])
     )
-    assert torch.count_nonzero(hybrid.linear_coef_) == 0
+    assert hybrid.full_coef_.shape == (5, 5) and not hybrid.full_coef_.any()
 
 
 @pytest.mark.parametrize("linear_reg", [None, 0.002])
@@ -214,28 +196,13 @@ def test_held_out_targets_do_not_change_fit_coefficients(linear_reg):
     model = _model(linear_reg)
     data = model._to_tensors(xs, ys, ws, counts)
     changed = model._to_tensors(xs, [ys[0] + 1000, *ys[1:]], ws, counts)
-    embeddings = torch.randn(5, 6, generator=torch.Generator().manual_seed(8), dtype=torch.float64)
+    generator = torch.Generator().manual_seed(8)
+    embeddings = torch.randn(5, _width(model), generator=generator, dtype=torch.float64)
     fit = torch.tensor([False, True, True, True, True])
     original = model._ridge_solver(data, embeddings, fit).coefficients()
     modified = model._ridge_solver(changed, embeddings, fit).coefficients()
     for before, after in zip(original, modified, strict=True):
         torch.testing.assert_close(before, after, rtol=0, atol=0)
-
-
-def test_zero_unregularised_raw_coordinate_has_zero_slope_and_finite_gradients():
-    xs, ys, ws, counts = _environments()
-    for controls in ws:
-        controls[:, 0] = 0
-    model = _model(0.0, n_steps=2, cross_fit_folds=2).fit(xs, ys, ws, counts)
-    assert model.linear_coef_[0] == 0
-    assert np.isfinite(model.predict(np.eye(4), ws[0])).all()
-    assert all(torch.isfinite(p.grad).all() for p in model.psi_.parameters())
-
-
-def test_hybrid_requires_corresponding_proxy_and_target_dimensions():
-    xs, ys, ws, counts = _environments()
-    with pytest.raises(ValueError, match="matching proxy and target dimensions"):
-        _model(0.01).fit(xs, ys, [w[:, :2] for w in ws], counts)
 
 
 @pytest.mark.parametrize(
@@ -245,11 +212,81 @@ def test_hybrid_requires_corresponding_proxy_and_target_dimensions():
         ({"reg": float("nan")}, "reg must be finite and positive"),
         ({"deviation_reg": float("inf")}, "deviation_reg must be finite and positive"),
         ({"deviation_reg": -1}, "deviation_reg must be finite and positive"),
-        ({"linear_reg": -1}, "linear_reg must be nonnegative"),
-        ({"linear_reg": float("nan")}, "linear_reg must be nonnegative"),
+        ({"linear_reg": 0}, "linear_reg must be positive"),
+        ({"linear_reg": -1}, "linear_reg must be positive"),
+        ({"linear_reg": float("nan")}, "linear_reg must be positive"),
         ({"gene_block_size": 0}, "gene_block_size must be positive"),
     ],
 )
 def test_invalid_penalties_and_block_sizes_are_rejected(settings, message):
     with pytest.raises(ValueError, match=message):
         NeuralHybridEmbeddingBridge(**settings)
+
+
+@pytest.mark.parametrize("cross_fit_folds", [0, 2])
+@pytest.mark.parametrize("d_w", [3, 8])  # fewer and more control coordinates than D = 5
+def test_hybrid_matches_dense_full_ridge(d_w, cross_fit_folds):
+    xs, ys, ws, counts = _environments()
+    ws = [np.random.default_rng(e).normal(size=(len(w), d_w)) for e, w in enumerate(ws)]
+    model = NeuralHybridEmbeddingBridge(
+        reg=0.003,
+        deviation_reg=0.007,
+        linear_reg=0.02,
+        n_features_w=2,
+        width_w=6,
+        depth=1,
+        n_steps=2,
+        seed=1,
+        cross_fit_folds=cross_fit_folds,
+    ).fit(xs, ys, ws, counts)
+    data = model._to_tensors(xs, ys, ws, counts)
+    pairs = pair_data(xs, ys, ws, counts, device=model.device)
+    q, rank = model.n_features_w, min(d_w, len(ws))
+    with torch.no_grad():
+        embeddings = model._embed(data.w_envs)
+        loss = model._training_loss(data)
+    means = torch.stack([w.mean(0) for w in pairs.w_envs])
+    basis = model.control_basis_
+    assert basis.shape == (d_w, rank)
+    assert model.shared_coef_.shape == (q + rank, 5)
+    # Training means lie in their own row space, so projecting them loses nothing.
+    torch.testing.assert_close(embeddings[:, q:-q] @ basis.T, means)
+
+    # Dense ridge on all d_w raw control coordinates, without any projection.
+    raw = torch.cat((embeddings[:, :q], means, embeddings[:, -q:]), dim=1)
+    every = torch.ones(len(ws), dtype=torch.float64)
+    (local_coef, shared_coef), sse, penalty = _explicit_ridge(model, pairs, raw, every, every)
+    if not cross_fit_folds:  # the cross-fitted loss is held-out error, not this objective
+        N = pairs.c.sum()
+        torch.testing.assert_close(loss, (sse + N * penalty / 5) / N, rtol=1e-8, atol=1e-10)
+    torch.testing.assert_close(model.full_coef_, shared_coef[q:], rtol=1e-6, atol=1e-8)
+
+    def dense_predict(local, shared):  # (G, J) from (q,) deviation and shared features
+        return torch.cat((torch.ones(1), local)) @ local_coef + shared @ shared_coef
+
+    np.testing.assert_allclose(
+        model.predict(np.eye(4), ws[0]),
+        dense_predict(raw[0, -q:], raw[0, :-q]).numpy(),
+        rtol=1e-6,
+        atol=1e-8,
+    )
+    # New controls outside the training row space meet B exactly.
+    w_new = torch.as_tensor(np.random.default_rng(99).normal(size=(9, d_w)))
+    with torch.no_grad():
+        deviation = model.deviation_network_(w_new).mean(0)
+        shared = torch.cat((model.shared_network_(w_new).mean(0), w_new.mean(0)))
+    np.testing.assert_allclose(
+        model.predict(np.eye(4), w_new.numpy()),
+        dense_predict(deviation, shared).numpy(),
+        rtol=1e-6,
+        atol=1e-8,
+    )
+
+
+def test_hybrid_zero_controls_reduces_rank():
+    xs, ys, ws, counts = _environments()
+    ws = [np.zeros((len(w), 4)) for w in ws]
+    model = _model(0.01, n_steps=1).fit(xs, ys, ws, counts)
+    assert model.control_basis_.shape == (4, 0)
+    assert model.full_coef_.shape == (4, 5) and not model.full_coef_.any()
+    assert np.isfinite(model.predict(np.eye(4), ws[0])).all()

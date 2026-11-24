@@ -57,11 +57,11 @@ def test_neural_mixture_equals_environment_average(neural_adapter, virtual_refer
             ]
             manual = (
                 bridge.intercept_
-                + z_shared @ bridge.shared_coef_
+                + z_shared @ bridge.shared_coef_[: bridge.n_features_w]
                 + z_deviation @ bridge.deviation_coef_
             )
-            if neural_adapter.variant == "hybrid" and np.isfinite(bridge.linear_reg):
-                manual += (0.25 * w[0].mean(0) + 0.75 * w[1].mean(0)) * bridge.linear_coef_
+            if neural_adapter.variant == "hybrid":
+                manual += (0.25 * w[0].mean(0) + 0.75 * w[1].mean(0)) @ bridge.full_coef_
     np.testing.assert_allclose(actual, manual[[1, 0, 1]].numpy(), rtol=1e-6, atol=1e-7)
     assert actual.shape == (3, 2)
     np.testing.assert_array_equal(actual[0], actual[2])
@@ -93,13 +93,13 @@ def test_neural_mixture_applies_coefficients_once(neural_adapter, virtual_refere
     calls = []
     snapshots = {k: v.clone() for k, v in vars(bridge).items() if isinstance(v, torch.Tensor)}
 
-    def record(embedding, control_mean):
-        calls.append((embedding.requires_grad, control_mean.requires_grad, torch.is_grad_enabled()))
-        return original(embedding, control_mean)
+    def record(embedding):
+        calls.append((embedding.requires_grad, torch.is_grad_enabled()))
+        return original(embedding)
 
     monkeypatch.setattr(bridge, "_predict_embedded", record)
     bridge.predict_mixture(np.eye(2), batch_controls(virtual_reference), np.array([0.25, 0.75]))
-    assert calls == [(False, False, False)]
+    assert calls == [(False, False)]
     for key, value in snapshots.items():
         torch.testing.assert_close(getattr(bridge, key), value)
 

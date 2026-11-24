@@ -15,7 +15,11 @@ n_e : number of response rows in environment e
 m_e : number of control samples in environment e
     Controls need not be paired with response rows.
 d_w : number of input coordinates per control sample
-    The hybrid needs d_w = J when its linear term is enabled.
+r : number of retained control directions
+    Numerical rank of the training control means, at most min(D, d_w).
+    Zero when the hybrid's linear term is disabled.
+B : control-to-output matrix
+    Shape (d_w, J), fitted jointly with the hybrid model's neural coefficients.
 N : total training weight
     Sum of response counts across all categories in the current training split.
 Q : target-product matrix
@@ -175,8 +179,10 @@ class NeuralPerXEmbeddingBridge:
         on_checkpoint : callable or None, default=None
             on_checkpoint(step); required when checkpoints is nonempty.
         on_training_loss : callable or None, default=None
-            on_training_loss(step, mse). The loss at step k uses the network
-            after k updates, including k=n_steps for the final loss.
+            on_training_loss(step, loss). The loss is count-weighted prediction
+            MSE, plus the scaled coefficient penalty for in-sample training.
+            Step k uses the network after k updates, including k=n_steps for
+            the final loss.
 
         Returns
         -------
@@ -221,8 +227,9 @@ class NeuralPerXEmbeddingBridge:
 
             z = sum_e p[e] * mean_j psi(w[e, j])
 
-        Shared and hybrid models also retain their intercepts; the hybrid adds
-        its fitted slope times the similarly weighted control mean.
+        Shared and hybrid models also retain their intercepts. The hybrid's
+        embedding includes projected control means when its linear term is enabled,
+        so the matrix B uses the same environment weights.
 
         Parameters
         ----------
@@ -238,8 +245,13 @@ class NeuralPerXEmbeddingBridge:
         Returns
         -------
         numpy.ndarray of shape (n_new, J)
-            Averaged predictions in the fitted target units. Invalid controls
-            or probabilities raise ValueError.
+            Averaged predictions in the fitted target units.
+
+        Raises
+        ------
+        ValueError
+            If controls are empty, nonfinite or have an invalid shape, or
+            probabilities have an invalid shape, value or sum.
         """
         weights = np.asarray(environment_weights, dtype=float)
         if (
@@ -259,7 +271,7 @@ class NeuralPerXEmbeddingBridge:
             expected_width = next(
                 layer.in_features for layer in self.psi_.modules() if isinstance(layer, nn.Linear)
             )
-        embedding, control_mean = 0.0, 0.0
+        embedding = 0.0
         for samples, probability in zip(w_targets, weights, strict=True):
             samples = np.asarray(samples)
             if samples.ndim not in (1, 2) or not len(samples) or not np.isfinite(samples).all():
@@ -271,13 +283,10 @@ class NeuralPerXEmbeddingBridge:
                 continue
             controls = as_tensor(samples, self.device)
             embedding = embedding + probability * self._control_embedding(controls)
-            control_mean = control_mean + probability * controls.mean(dim=0)
-        pred = self._predict_embedded(embedding, control_mean)
+        pred = self._predict_embedded(embedding)
         return pred[as_tensor(x, self.device).argmax(dim=1)].cpu().numpy()
 
-    def _predict_embedded(
-        self, embedding: torch.Tensor, control_mean: torch.Tensor
-    ) -> torch.Tensor:
+    def _predict_embedded(self, embedding: torch.Tensor) -> torch.Tensor:
         """Apply per-category coefficients to mean features; return (G, J)."""
         return embedding @ self.A_
 
@@ -354,13 +363,13 @@ class NeuralPerXEmbeddingBridge:
                 on_training_loss(self.n_steps, self._training_loss(data).item())
 
     def _training_loss(self, data) -> torch.Tensor:
-        """Return prediction MSE using the configured environment split."""
+        """Return prediction MSE, adding the ridge penalty only in sample."""
         if self.cross_fit_folds:
             return self._cross_fit_loss(data)
         return self._in_sample_loss(data)
 
     def _in_sample_loss(self, data: GroupedRidgeData) -> torch.Tensor:
-        """Fit on all environments; return count-weighted MSE plus the scaled ridge penalty."""
+        """Return in-sample MSE plus the ridge penalty scaled by 1 / (J * N)."""
         solver = self._ridge_solver(data, self._embed(data.w_envs))
         return (solver.prediction_sse() + solver.penalty()) / data.c.sum()
 
@@ -414,7 +423,12 @@ class NeuralPerXEmbeddingBridge:
             self.A_[:, :, block] = solver.coefficients(block).local
 
     def _embed(self, w_envs: list[torch.Tensor]) -> torch.Tensor:
-        """Stack mean features: (D, q) for per-x, (D, 2q) for shared/hybrid."""
+        """Stack one mean feature vector per environment.
+
+        Return shape (D, q) for per-x or (D, 2q) for shared models. The hybrid
+        inserts r projected control coordinates between shared and deviation
+        features, giving shape (D, 2q + r). Disabling its linear term sets r = 0.
+        """
         return torch.stack([self._control_embedding(w) for w in w_envs])
 
     def _control_embedding(self, controls: torch.Tensor) -> torch.Tensor:
@@ -458,8 +472,10 @@ class NeuralSharedEmbeddingBridge(NeuralPerXEmbeddingBridge):
         Shared response coefficients b.
     deviation_coef_ : torch.Tensor of shape (G, q, J)
         Category deviation coefficients c.
-    linear_coef_ : torch.Tensor of shape (J,)
-        Zero slopes; used by the hybrid subclass when it adds a linear term.
+
+    Notes
+    -----
+    Networks and coefficient attributes are available after ``fit``.
 
     Examples
     --------
@@ -494,12 +510,12 @@ class NeuralSharedEmbeddingBridge(NeuralPerXEmbeddingBridge):
 
     @property
     def shared_network_(self) -> nn.Module:
-        """Return the control network for shared effects."""
+        """The fitted control network for shared effects."""
         return self.psi_["shared"]
 
     @property
     def deviation_network_(self) -> nn.Module:
-        """Return the control network for category deviations."""
+        """The fitted control network for category deviations."""
         return self.psi_["deviation"]
 
     def _build_networks(self, data: GroupedRidgeData) -> None:
@@ -517,23 +533,27 @@ class NeuralSharedEmbeddingBridge(NeuralPerXEmbeddingBridge):
         """Join shared and deviation feature means into a vector of shape (2q,)."""
         return torch.cat([network(controls).mean(dim=0) for network in self.psi_.values()])
 
-    def _ridge_solver(
-        self, data, embeddings, fit=None, *, linear_reg=float("inf")
-    ) -> NeuralRidgeSolver:
-        """Prepare the joint shared/deviation fit, with optional control slopes."""
+    def _ridge_solver(self, data, embeddings, fit=None) -> NeuralRidgeSolver:
+        """Prepare a joint fit with separate neural and linear penalties."""
+        q = self.n_features_w
+        shared_reg = embeddings.new_full(
+            (embeddings.shape[1] - q,), getattr(self, "linear_reg", np.inf)
+        )
+        shared_reg[:q] = self.reg
         return NeuralRidgeSolver.shared_deviation(
             data,
             embeddings,
             fit,
             reg=self.reg,
             deviation_reg=self.deviation_reg,
-            linear_reg=linear_reg,
+            shared_reg=shared_reg,
         )
 
     def _cross_fit_sse(self, data: GroupedRidgeData, embeddings, folds) -> torch.Tensor:
         """Sum held-out fold errors with one combined target projection.
 
-        Each fold stores small matrices; the combined projection reads cy once.
+        The combined projection reads cy once. Hybrid shared features include
+        r projected control coordinates, so the shared matrices have width q + r.
         """
         terms = [
             self._ridge_solver(data, embeddings, folds != k).shared_loss_terms(folds == k)
@@ -541,14 +561,13 @@ class NeuralSharedEmbeddingBridge(NeuralPerXEmbeddingBridge):
         ]
         return NeuralRidgeSolver.batched_shared_sse(data, terms)
 
-    def _allocate_coefficients(self, data: GroupedRidgeData) -> None:
-        """Allocate coefficient arrays, reusing storage when shapes and devices match."""
+    def _allocate_coefficients(self, data: GroupedRidgeData, n_shared: int) -> None:
+        """Allocate coefficient arrays or reuse matching shapes and devices."""
         groups, _, genes = data.cy.shape
         shapes = {
             "intercept_": (groups, genes),
-            "shared_coef_": (self.n_features_w, genes),
+            "shared_coef_": (n_shared, genes),
             "deviation_coef_": (groups, self.n_features_w, genes),
-            "linear_coef_": (genes,),
         }
         for name, shape in shapes.items():
             current = getattr(self, name, None)
@@ -564,53 +583,74 @@ class NeuralSharedEmbeddingBridge(NeuralPerXEmbeddingBridge):
         embeddings = self._embed(data.w_envs)
         fit = torch.ones(len(embeddings), dtype=torch.bool, device=self.device)
         solver = self._ridge_solver(data, embeddings, fit)
-        self._allocate_coefficients(data)
+        self._allocate_coefficients(data, solver.shared_features.shape[1])
         for start in range(0, data.cy.shape[-1], self.gene_block_size):
             block = slice(start, start + self.gene_block_size)
-            local, shared, linear = solver.coefficients(block)
+            local, shared = solver.coefficients(block)
             self.intercept_[:, block] = local[:, 0]
             self.deviation_coef_[:, :, block] = local[:, 1:]
             self.shared_coef_[:, block] = shared
-            self.linear_coef_[block] = linear
 
-    def _predict_embedded(
-        self, embedding: torch.Tensor, control_mean: torch.Tensor
-    ) -> torch.Tensor:
-        """Add intercepts, shared effects and category deviations; return (G, J)."""
-        shared, deviation = embedding.chunk(2)
+    def _predict_embedded(self, embedding: torch.Tensor) -> torch.Tensor:
+        """Combine fitted effects into predictions of shape (G, J)."""
+        q = self.n_features_w
+        shared, deviation = embedding.split((len(embedding) - q, q))
         return self.intercept_ + shared @ self.shared_coef_ + deviation @ self.deviation_coef_
 
 
 @dataclass(eq=False)
 class NeuralHybridEmbeddingBridge(NeuralSharedEmbeddingBridge):
-    """Add one control slope per output to the shared two-network model.
+    """Add a full control-to-output matrix to the shared neural model.
 
-    For output j, fit all terms together:
-
-        y_hat[x, e, j] = a[x, j] + beta[j] * mean(W[e])_j
-                        + s[e] @ b[:, j] + d[e] @ c[x, :, j]
-
-    The penalty is the shared model's penalty plus N * linear_reg * ||beta||^2.
-    Control and target coordinates must match, so d_w = J. If a wrapper scales
-    controls, the linear term uses those scaled values too.
-
-    Other settings and fitted attributes follow NeuralSharedEmbeddingBridge.
-    Its reg and deviation_reg penalties must remain finite and positive.
+    Fit the matrix B jointly with the intercepts, shared response and category
+    deviations. Control and output widths may differ. Other settings and
+    fitted attributes follow NeuralSharedEmbeddingBridge.
 
     Parameters
     ----------
     linear_reg : float, default=1e-3
-        Nonnegative penalty for control slopes. Infinity disables the linear term
-        and gives the shared model. With zero penalty, an unidentifiable slope is zero.
+        Positive penalty on the squared entries of B, scaled by total training
+        weight N. Positive infinity disables the linear term and gives the
+        shared model. Zero, negative values and NaN are rejected.
 
     Attributes
     ----------
-    linear_coef_ : torch.Tensor of shape (J,)
-        Fitted slopes beta, one for each matching control/output coordinate.
+    control_basis_ : torch.Tensor of shape (d_w, r)
+        Orthonormal basis V for the retained training control directions,
+        available after ``fit``. Its width r is the numerical rank of the
+        training control means, or zero when the linear term is disabled.
+    shared_coef_ : torch.Tensor of shape (q + r, J)
+        Fitted shared coefficients b followed by R, available after ``fit``.
+    full_coef_ : torch.Tensor of shape (d_w, J)
+        The fitted matrix B = V @ R, allocated on access after ``fit``. Rows
+        are control coordinates; columns are outputs. Zero when the linear
+        term is disabled.
+
+    Notes
+    -----
+    With the linear term enabled, the prediction and coefficient penalty are::
+
+        y_hat[x, e] = a[x] + s[e] @ b + mean(W[e]) @ B + d[e] @ c[x]
+        penalty = N * (reg * (||a||^2 + ||b||^2)
+                       + deviation_reg * ||c||^2 + linear_reg * ||B||^2)
+
+    The ridge solution B lies in the row space of the D training control
+    means. Write B = V @ R, where V = control_basis_ and R has shape (r, J).
+    Projected means mean(W[e]) @ V join the shared neural features, and R
+    occupies the last r rows of shared_coef_. Orthonormal columns of V give
+    ||B||^2 = ||R||^2, preserving the ridge penalty.
+
+    A reduced SVD is computed once per fit and reused across cross-fit folds.
+    Singular values at or below max(D, d_w) * eps * largest_singular_value
+    are discarded, where eps is the control tensor's machine precision.
+    Apart from this numerical rank cutoff, the projection preserves the fit.
+    The shared solve has width q + r, with r <= min(D, d_w). Predictions use
+    the factors directly; only accessing full_coef_ allocates the full matrix.
+    If a wrapper scales controls, B uses those scaled units.
 
     Examples
     --------
-    The controls and targets below each have one coordinate.
+    Fit two control coordinates to one output and inspect the full matrix.
 
     >>> import numpy as np
     >>> from genetic_perturbation_playground.model.proxy_unconfounded_neural import (
@@ -618,56 +658,54 @@ class NeuralHybridEmbeddingBridge(NeuralSharedEmbeddingBridge):
     ... )
     >>> xs = [np.eye(2), np.eye(2)]
     >>> ys = [np.array([[1.], [2.]]), np.array([[3.], [4.]])]
-    >>> ws = [np.array([[0.], [1.]]), np.array([[2.], [3.]])]
+    >>> ws = [np.array([[0., 1.], [1., 0.]]), np.array([[2., 1.], [3., 1.]])]
     >>> model = NeuralHybridEmbeddingBridge(n_features_w=2, width_w=4, n_steps=1)
     >>> _ = model.fit(xs, ys, ws)
     >>> model.predict(np.eye(2), ws[0]).shape
     (2, 1)
-    >>> model.linear_coef_.shape
-    torch.Size([1])
+    >>> model.full_coef_.shape
+    torch.Size([2, 1])
     """
 
     linear_reg: float = HybridConfig.linear_reg
 
     def __post_init__(self):
-        """Check neural penalties and require linear_reg >= 0; infinity disables it."""
+        """Check penalties; allow positive infinity only for linear_reg."""
         super().__post_init__()
-        if np.isnan(self.linear_reg) or self.linear_reg < 0:
-            raise ValueError("linear_reg must be nonnegative (infinity disables the linear term)")
+        if np.isnan(self.linear_reg) or self.linear_reg <= 0:
+            raise ValueError("linear_reg must be positive (infinity disables the linear term)")
 
-    def _to_tensors(self, xs, ys, ws, counts) -> GroupedRidgeData:
-        """Add control means and pooled targets when the linear term is enabled.
+    @property
+    def full_coef_(self) -> torch.Tensor:
+        """The fitted control-to-output matrix B = V @ R.
 
-        Require matching control and target dimensions for that term.
+        Returns
+        -------
+        torch.Tensor of shape (d_w, J)
+            Rows correspond to control coordinates and columns to outputs.
+            Allocated on each access after ``fit``; changing it does not update
+            the model. Zero when linear_reg is infinite.
         """
-        data = super()._to_tensors(xs, ys, ws, counts)
-        if np.isinf(self.linear_reg):
-            return data
+        return self.control_basis_ @ self.shared_coef_[self.n_features_w :]
+
+    def _build_networks(self, data: GroupedRidgeData) -> None:
+        """Create the networks and a control basis, once per fit.
+
+        Retain the numerical row space of the training control means.
+        Cross-fit folds use subsets of these rows, so they share the basis.
+        """
+        super()._build_networks(data)
         means = torch.stack([w.mean(dim=0) for w in data.w_envs])
-        if means.shape[1] != data.cy.shape[-1]:
-            raise ValueError("Hybrid transfer requires matching proxy and target dimensions")
-        return data._replace(control_mean=means, pooled_targets=data.cy.sum(dim=0))
+        _, singular, right = torch.linalg.svd(means, full_matrices=False)
+        tolerance = singular.max() * max(means.shape) * torch.finfo(means.dtype).eps
+        # No linear term (infinite linear_reg): an empty basis gives B = 0.
+        keep = (singular > tolerance) & bool(np.isfinite(self.linear_reg))
+        self.control_basis_ = right[keep].T
 
-    def _ridge_solver(self, data, embeddings, fit=None) -> NeuralRidgeSolver:
-        """Prepare the joint fit with this model's control-slope penalty."""
-        return super()._ridge_solver(data, embeddings, fit, linear_reg=self.linear_reg)
+    def _control_embedding(self, controls: torch.Tensor) -> torch.Tensor:
+        """Join shared features, projected control means and deviations.
 
-    def _cross_fit_sse(self, data: GroupedRidgeData, embeddings, folds) -> torch.Tensor:
-        """Checkpoint hybrid fold calculations to limit saved tensors.
-
-        Use the shared model's scoring path when the linear term is disabled.
+        Return shape (2q + r,), where r is the width of control_basis_.
         """
-        if np.isinf(self.linear_reg):
-            return super()._cross_fit_sse(data, embeddings, folds)
-        return checkpointed_sse(self._fit_and_score_sse, data, embeddings, folds)
-
-    def _predict_embedded(
-        self, embedding: torch.Tensor, control_mean: torch.Tensor
-    ) -> torch.Tensor:
-        """Add matching-coordinate control slopes to the neural predictions."""
-        neural = super()._predict_embedded(embedding, control_mean)
-        if np.isinf(self.linear_reg):
-            return neural
-        if len(control_mean) != len(self.linear_coef_):
-            raise ValueError("Hybrid transfer requires matching proxy and target dimensions")
-        return neural + control_mean * self.linear_coef_
+        shared, deviation = (network(controls).mean(dim=0) for network in self.psi_.values())
+        return torch.cat([shared, controls.mean(dim=0) @ self.control_basis_, deviation])
