@@ -17,8 +17,14 @@ def tiny_config(variant="per_x"):
     register_configs()
     with initialize_config_dir(str(ROOT / "configs"), version_base=None):
         cfg = compose(
-            "tune_rxrx1_transfer",
-            ["name=test", f"neural={variant}", "neural.device=cpu", "neural.cross_fit_folds=0"],
+            "out_of_batch/rxrx1",
+            [
+                "name=test",
+                f"neural={variant}",
+                "neural.device=cpu",
+                "neural.cross_fit_folds=0",
+                "bridges=[kernel,neural]",
+            ],
         )
     cfg.n_configs = 1
     cfg.neural_checkpoints = [0, 1, 2]
@@ -164,7 +170,7 @@ def test_nonfinite_new_scores_are_not_committed(virtual_train, tmp_path):
 def test_candidates_subsample_both_grids_without_replacement():
     register_configs()
     with initialize_config_dir(str(ROOT / "configs"), version_base=None):
-        cfg = compose("tune_rxrx1_transfer", ["name=test", "n_configs=8"])
+        cfg = compose("out_of_batch/rxrx1", ["name=test", "n_configs=8", "bridges=[kernel,neural]"])
     candidates = tuning.candidate_configs(cfg)
     assert candidates == tuning.candidate_configs(cfg)
     for values in candidates.values():
@@ -178,7 +184,7 @@ def test_candidates_subsample_both_grids_without_replacement():
 def test_omitting_kernel_preserves_the_ten_sampled_neural_candidates():
     register_configs()
     with initialize_config_dir(str(ROOT / "configs"), version_base=None):
-        cfg = compose("evaluate_rxrx1_sparse_recovery", ["name=test", "n_configs=10"])
+        cfg = compose("sparse_recovery/rxrx1", ["name=test", "n_configs=10"])
     original = tuning.candidate_configs(cfg)["neural"]
     cfg.bridges = ["neural"]
     candidates = tuning.candidate_configs(cfg)
@@ -190,9 +196,7 @@ def test_omitting_kernel_preserves_the_ten_sampled_neural_candidates():
 def test_hp_sampling_seed_changes_only_the_candidate_draw():
     register_configs()
     with initialize_config_dir(str(ROOT / "configs"), version_base=None):
-        cfg = compose(
-            "evaluate_rxrx1_sparse_recovery", ["name=test", "neural=hybrid", "n_configs=10"]
-        )
+        cfg = compose("sparse_recovery/rxrx1", ["name=test", "neural=hybrid", "n_configs=10"])
     original = tuning.candidate_configs(cfg)
     OmegaConf.update(cfg, "hp_sampling_seed", None, force_add=True)
     assert tuning.candidate_configs(cfg) == original

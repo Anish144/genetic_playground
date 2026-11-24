@@ -1,3 +1,4 @@
+# @package _global_
 n_envs: [3, 5, 10, 20, 50, 100]  # number of source environments D (sweep)
 proxies: [u_plus_sin]   # W = g(U2) + noise; see data/proxy_unconfounded.PROXIES
 dim_u: 3              # dimension k of the latents U1, U2 (and of W)

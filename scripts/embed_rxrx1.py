@@ -12,7 +12,7 @@ standardise_sites per site before cropping, so a crop with few cells keeps its l
 than having its noise scaled up (self-standardisation, Sypetkowski et al. 2023). All crops are
 retained, including empty or low-intensity crops.
 
-Config: configs/embed_rxrx1.yaml. Usage:
+Config: configs/preprocessing/embed_rxrx1.yaml. Usage:
 
     uv run python scripts/embed_rxrx1.py 'experiments=[HEPG2-01]'      # smoke run
     sbatch -J embed_rxrx1 --cpus-per-task=16 hpc/run.sbatch scripts/embed_rxrx1.py workers=16
@@ -45,7 +45,7 @@ def embed_sites(model, x: torch.Tensor, cfg: DictConfig, device: str) -> torch.T
     return embed(model, crops).cpu()
 
 
-@hydra.main(config_path="../configs", config_name="embed_rxrx1", version_base=None)
+@hydra.main(config_path="../configs", config_name="preprocessing/embed_rxrx1", version_base=None)
 def main(cfg: DictConfig):
     meta = pd.read_csv(RXRX1_DIR / "metadata.csv")
     if cfg.experiments:

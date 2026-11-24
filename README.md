@@ -224,7 +224,9 @@ model = build_neural(settings, standardise_w=True)
 model.fit(train)
 ```
 
-Hydra applies the dataclass defaults, then `configs/transfer_defaults.yaml`, the dataset/tuning preset, and command-line overrides. Tuning applies each sampled trial last, without changing the experiment config. Direct Python defaults use CPU; the shared transfer preset selects CUDA. Replogle uses width 64 and RxRx1 uses width 128. Tuning grids stay in YAML.
+Configs are organised by experiment: `configs/out_of_batch/{rxrx1,replogle}.yaml` tune and predict held-out batches, and `configs/sparse_recovery/rxrx1.yaml` tunes and evaluates sparse-response recovery. Replogle sparse recovery has no runner yet. The [config guide](configs/README.md) lists presets, commands and shared files.
+
+Hydra applies model dataclass defaults, `configs/common.yaml`, the selected search space and experiment settings, then command-line overrides. Experiments do not inherit other experiments. Search spaces live in `configs/search_spaces/`; tuning applies sampled settings last without changing the experiment config. Direct Python defaults use CPU; experiment presets select CUDA. Replogle uses width 64 and RxRx1 uses width 128. Fixed-setting evaluation uses the `out_of_batch/*_fixed.yaml` presets.
 
 Use `linear.reg` for the standalone linear model, `kernel.reg` for the kernel bridge and `neural.reg` for neural ridge. The hybrid's `neural.linear_reg` is a separate penalty. Setting `neural.deviation_reg=null` makes it follow that trial's `neural.reg`. Model fields are checked against the selected config group, including fields added with `+`.
 
@@ -239,7 +241,7 @@ Older commands need these changes:
 | `+neural.linear_reg=1e-3` | `neural=hybrid neural.linear_reg=1e-3` |
 | `+neural.deviation_reg=1e-3` | `neural=shared_2nn neural.deviation_reg=1e-3` (or select hybrid) |
 
-For programmatic Hydra composition, call `register_configs()` from the config module before `hydra.compose`, then use `resolve_model_config(cfg, "neural")` to obtain the selected dataclass. Use Hydra composition to load transfer presets; a raw YAML load does not apply their inherited defaults.
+For programmatic Hydra composition, call `register_configs()` from the config module before `hydra.compose`, then use `resolve_model_config(cfg, "neural")` to obtain the selected dataclass. Preset names include their experiment directory, for example `compose("out_of_batch/rxrx1", overrides=["name=test", "neural=hybrid"])`. Use Hydra composition to load presets; a raw YAML load does not apply shared defaults or search spaces.
 
 `model/batch_transfer.py` contains the kernel and neural AnnData adapters. `data/transfer.py` prepares their counts, means and batch mixtures. The linear models are `LinearTransfer` and `FullLinearTransfer` in `model/linear_transfer.py`, and the scaling wrapper is `Standardised` in `utils/standardisation.py`.
 
@@ -396,7 +398,13 @@ Cell counts in score tables describe coverage; they do not weight evaluation ave
 Run commands from the repository root. Use Python 3.12+ and install the locked environment with `uv sync`. Neural runs default to CUDA; use `neural.device=cpu` for small runs. Apple MPS does not support the required float64 ridge algebra. Set `MPLBACKEND=Agg` for headless plotting.
 
 ```text
-configs/                       Hydra defaults, tuning grids and checkpoints
+configs/
+  out_of_batch/                Tuned prediction and optional *_fixed presets
+  sparse_recovery/             Tuned sparse-response recovery (RxRx1)
+  search_spaces/               Candidate grids and scoring checkpoints by dataset
+  preprocessing/               RxRx1 image embedding
+  synthetic/                   Separate synthetic experiments
+  common.yaml                  Model schemas and shared setting links
 scripts/
   embed_rxrx1.py                Images → Phenom crop embeddings
   train_replogle_transfer.py    Replogle fixed settings

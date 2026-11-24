@@ -4,7 +4,7 @@ Select n_validation_batches distinct outer batches using seed, as in train_rxrx1
 Batch = plate within experiment (default) or experiment, selected by cfg.batch_unit.
 Each is held out separately; all remaining batches are split into inner_folds folds for tuning.
 The outer batch never enters tuning. n_configs configurations per bridge, drawn from its grid
-(the same draw in every outer fold), are fit on the other inner folds and scored on the held-out
+(a fresh draw for every outer fold), are fit on the other inner folds and scored on the held-out
 one; each neural configuration is trained once per inner fold to the last of neural_checkpoints
 and scored at each. The configuration with the lowest validation mse averaged over the inner
 folds is refit on all training batches and scored on the outer fold, next to the linear
@@ -16,7 +16,7 @@ loss of the refit neural bridge (fold k/neural bridge/loss, against its step) an
 outer scores (fold k/<model>/<metric>); at the end, the means over all folds
 (all folds/<model>/<metric>). The tuning fits are not logged; inner_scores.csv holds them.
 
-Config: configs/tune_rxrx1_transfer.yaml. Usage:
+Config: configs/out_of_batch/rxrx1.yaml. Usage:
 
     sbatch -J tune_huvec --time=24:00:00 hpc/run.sbatch scripts/tune_rxrx1_transfer.py \
         name=tune_huvec batch_unit=plate proxy_controls=positive
@@ -111,8 +111,8 @@ def nested_cv(adata: sc.AnnData, cfg: DictConfig) -> Iterator[tuple]:
         train = adata[np.isin(batch, train_batches)]
         validate_treatment_overlap(train, adata[batch == held_out])
         inner, selected, winners = tuning.tune(
-            inner_folds(adata, train_batches, cfg, [cfg.seed, i]), cfg
-        )
+            inner_folds(adata, train_batches, cfg, [cfg.seed, i]), cfg, seed=[cfg.seed, i, 1]
+        )  # fresh candidate draw per held-out batch
         log_selected(i + 1, selected)
         log_summary(f"fold {i + 1}/validation", winners)
         models = _fit_linear(train, resolve_model_config(cfg, "linear"))
@@ -126,7 +126,7 @@ def nested_cv(adata: sc.AnnData, cfg: DictConfig) -> Iterator[tuple]:
         )
 
 
-@hydra.main(config_path="../configs", config_name="tune_rxrx1_transfer", version_base=None)
+@hydra.main(config_path="../configs", config_name="out_of_batch/rxrx1", version_base=None)
 def main(cfg: DictConfig):
     adata = select_cell_type(load_rxrx1(**cfg.embeddings), cfg.cell_type)
     out_dir = Path(HydraConfig.get().runtime.output_dir)

@@ -1,0 +1,44 @@
+# @package _global_
+# Tune using retained responses, then recover the full equal-batch mean.
+defaults:
+  - /common
+  - /search_spaces/rxrx1
+  - _self_
+
+# Data
+cell_type: HUVEC
+batch_unit: plate
+proxy_controls: positive
+embeddings:
+  grid: 4
+  standardise_sites: false
+
+# Evaluation and tuning
+seed: 0
+n_seeds: 10
+k_values: [2, 3, 4]  # retained response batches per perturbation
+n_configs: 8  # candidates per bridge and data seed; reuse across k
+hp_sampling_seed: null  # offset added to the data seed; null means zero
+
+# Models
+bridges: [kernel, neural]
+include_linear: false  # also compare pooled, shift, diagonal and full linear averages
+neural:
+  depth: 1
+  n_features_w: 32
+  width_w: 128
+  reg: 1.0e-6
+  weight_decay: 1.0e-2
+  n_steps: 200  # tuning selects a step from neural_checkpoints
+  cross_fit_folds: 0  # k=2 inner fits retain one response batch per perturbation
+  gene_block_size: 384
+  device: cuda
+
+# Execution
+name: ???
+output_dir: outputs/rxrx1_sparse_recovery/${name}
+resume: true
+wandb_mode: disabled
+hydra:
+  run:
+    dir: ${output_dir}/logs/${now:%Y-%m-%d_%H-%M-%S_%f}

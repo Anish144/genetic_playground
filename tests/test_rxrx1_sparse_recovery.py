@@ -206,7 +206,7 @@ def runner_config(*, variant="per_x", **overrides):
     register_configs()
     with initialize_config_dir(str(ROOT / "configs"), version_base=None):
         cfg = compose(
-            "evaluate_rxrx1_sparse_recovery",
+            "sparse_recovery/rxrx1",
             [
                 "name=test",
                 f"neural={variant}",
@@ -233,15 +233,15 @@ def run(runner, data, cfg, directory):
 def test_config_subsamples_without_changing_existing_tuning_defaults():
     register_configs()
     with initialize_config_dir(str(ROOT / "configs"), version_base=None):
-        original = compose("tune_rxrx1_transfer", ["name=old"])
-        cfg = compose("evaluate_rxrx1_sparse_recovery", ["name=new"])
+        original = compose("out_of_batch/rxrx1", ["name=old"])
+        cfg = compose("sparse_recovery/rxrx1", ["name=new"])
     assert cfg.k_values == [2, 3, 4]
     assert cfg.n_seeds == 10
     assert len(tuning.candidate_configs(cfg)["kernel"]) == 8
     assert len(tuning.candidate_configs(cfg)["neural"]) == 8
-    assert original.n_configs == 32
+    assert original.n_configs == 20
     assert original.inner_folds == 3
-    assert original.neural.cross_fit_folds == 5
+    assert original.neural.cross_fit_folds == 0
     assert cfg.neural.cross_fit_folds == 0
     assert cfg.neural.seed == cfg.seed
     assert cfg.cell_type == "HUVEC" and cfg.batch_unit == "plate"
@@ -332,7 +332,7 @@ def test_runner_rejects_seed_in_active_tuning_grid(runner, recovery_data, tmp_pa
     register_configs()
     with initialize_config_dir(str(ROOT / "configs"), version_base=None):
         cfg = compose(
-            "evaluate_rxrx1_sparse_recovery",
+            "sparse_recovery/rxrx1",
             ["name=test", "seed=3", "neural=hybrid", f"+{grid}.seed=[42]"],
         )
     with pytest.raises(ValueError, match="seed.*grid|grid.*seed"):

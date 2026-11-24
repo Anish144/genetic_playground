@@ -1,0 +1,22 @@
+# @package _global_
+# Candidate values shared by RxRx1 tuning experiments.
+kernel_grid:
+  reg: [1.0e-8, 1.0e-7, 1.0e-6, 1.0e-5, 1.0e-4, 1.0e-3]
+  lengthscale_scale: [0.5, 1, 2, 4, 8]  # multiples of the median-heuristic lengthscale
+
+neural_grid:
+  lr: [2.5e-4, 7.5e-4, 1.5e-3]
+  reg: [1.0e-5, 1.0e-4, 1.0e-3, 1.0e-2]
+  weight_decay: [1.0e-4, 1.0e-2, 1.0e-1]
+  width_w: [64, 128]        # hidden units per network
+  psi_size: [16, 32, 64, 128]  # output features per network
+
+neural_variant_grids:  # extra penalties for the selected neural variant
+  shared_2nn:
+    deviation_reg: [1.0e-4, 1.0e-2, 1.0e-1]  # past picks hit 1e-2; 1e-6 never won
+  hybrid:
+    deviation_reg: [1.0e-4, 1.0e-2, 1.0e-1]
+    linear_reg: [1.0e-4, 1.0e-3, 1.0e-2, 1.0e-1]  # tuned full linear picked 1e-2
+
+# Score these steps during one training run per candidate and inner fold.
+neural_checkpoints: [0, 10, 20, 40, 60, 100, 150, 200, 300, 400]

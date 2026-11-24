@@ -1,0 +1,36 @@
+# @package _global_
+# Out-of-batch prediction with fixed settings (no tuning).
+defaults:
+  - /common
+  - _self_
+
+# Data
+cell_type: HUVEC  # null pools all cell types
+batch_unit: plate  # plate or experiment
+proxy_controls: positive  # negative, positive or both
+embeddings:
+  grid: 4
+  standardise_sites: true
+
+# Evaluation
+seed: 0
+n_validation_batches: 10  # distinct batches held out one at a time
+
+# Models (linear baselines always run)
+bridges: [kernel, neural]
+neural:
+  n_features_w: 32
+  width_w: 128
+  reg: 1.0e-6
+  weight_decay: 1.0e-2
+  n_steps: 200
+  cross_fit_folds: 0
+  gene_block_size: 384
+  device: cuda
+
+# Execution
+name: ???
+wandb_mode: online  # online, offline or disabled
+hydra:
+  run:
+    dir: outputs/${now:%Y-%m-%d}/${name}_${now:%H-%M-%S}

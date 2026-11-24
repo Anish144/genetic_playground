@@ -56,7 +56,7 @@ def test_sample_configs_draws_distinct_grid_points():
 
 def test_replogle_grid_varies_hidden_width_independently_of_output_dimension():
     with initialize_config_dir(str(ROOT / "configs"), version_base=None):
-        config = compose("tune_replogle_transfer", ["name=test"])
+        config = compose("out_of_batch/replogle", ["name=test"])
     drawn = tuning.sample_configs(config.neural_grid, config.n_configs, config.seed)
     assert len(drawn) == config.n_configs
     for settings in drawn:
@@ -78,7 +78,7 @@ def test_tuning_samples_and_retains_only_the_selected_variants_penalties(
 ):
     with initialize_config_dir(str(ROOT / "configs"), version_base=None):
         config = compose(
-            "tune_replogle_transfer",
+            "out_of_batch/replogle",
             [f"neural={variant}", "neural.device=cpu", "neural.cross_fit_folds=0"],
         )
     config.neural_grid = {"psi_size": [2], "width_w": [4], "reg": [0.01]}
@@ -101,6 +101,7 @@ def test_tuning_samples_and_retains_only_the_selected_variants_penalties(
         train,
         lambda model: {"mse": float(np.square(model.predict(["a"], reference)).mean())},
         config,
+        config.seed,
     )
     assert len(rows) == n_trials
     assert set(rows[0]) & {"deviation_reg", "linear_reg"} == penalties
@@ -188,7 +189,7 @@ def _cells(n_batches=6):
 @pytest.mark.parametrize("n", [1, 2])
 def test_replogle_validation_trains_on_all_other_batches(monkeypatch, n):
     with initialize_config_dir(str(ROOT / "configs"), version_base=None):
-        config = compose("train_replogle_transfer", ["name=test"])
+        config = compose("out_of_batch/replogle_fixed", ["name=test"])
     config.n_validation_batches, config.bridges = n, []
     training_batches = []
     fit = expression.fit
@@ -215,10 +216,11 @@ def test_replogle_validation_trains_on_all_other_batches(monkeypatch, n):
 
 def test_replogle_nested_cv_tunes_on_inner_folds_and_scores_selected_batches():
     with initialize_config_dir(str(ROOT / "configs"), version_base=None):
-        config = compose("tune_replogle_transfer", ["name=test", "neural_grid.width_w=[4]"])
+        config = compose("out_of_batch/replogle", ["name=test", "neural_grid.width_w=[4]"])
     config = OmegaConf.merge(
         config,
         {
+            "bridges": ["kernel", "neural"],  # the preset tunes neural only
             "n_validation_batches": 2,
             "inner_folds": 2,
             "n_configs": 2,
@@ -262,7 +264,7 @@ def test_replogle_nested_cv_tunes_on_inner_folds_and_scores_selected_batches():
 
 def test_trial_settings_override_presets_without_mutation():
     with initialize_config_dir(str(ROOT / "configs"), version_base=None):
-        config = compose("tune_replogle_transfer", ["name=test", "neural=hybrid"])
+        config = compose("out_of_batch/replogle", ["name=test", "neural=hybrid"])
     before = OmegaConf.to_container(config, resolve=True)
     first = tuning.make_neural(
         {"psi_size": 3, "width_w": 4, "n_features_w": 2, "seed": 19, "log_key": "first"}, config
@@ -283,7 +285,7 @@ def test_trial_settings_override_presets_without_mutation():
 def test_selected_null_deviation_overrides_numeric_preset():
     with initialize_config_dir(str(ROOT / "configs"), version_base=None):
         config = compose(
-            "tune_replogle_transfer",
+            "out_of_batch/replogle",
             [
                 "name=test",
                 "neural=shared_2nn",
@@ -369,7 +371,7 @@ def test_selection_restores_integer_model_settings():
 @pytest.mark.parametrize("extra", [{"weight_by_cells": False}, {"device": "cpu"}])
 def test_mixed_type_grid_winners_can_be_refit(extra):
     with initialize_config_dir(str(ROOT / "configs"), version_base=None):
-        config = compose("tune_replogle_transfer", ["name=test"])
+        config = compose("out_of_batch/replogle", ["name=test"])
     config.kernel_grid = {"reg": [0.001], "lengthscale_scale": [1]}
     config.neural_grid = {"reg": [0.005], "psi_size": [2]} | {
         key: [value] for key, value in extra.items()

@@ -1,14 +1,15 @@
 """Batch selection and random-search tuning of the kernel and neural bridges.
 
 Shared by scripts/tune_replogle_transfer.py (Replogle) and scripts/tune_rxrx1_transfer.py. cfg.n_configs
-configurations are drawn from each bridge's grid, the same draw in every fold. On each inner fold,
+configurations are drawn from each bridge's grid, one draw per call to tune (scripts draw afresh for
+each outer fold) shared by its inner folds. On each inner fold,
 shift (b=1, a reference only), every kernel configuration and every neural configuration at each
 of cfg.neural_checkpoints are fit on the other inner folds and scored on this one. The
 configuration with the lowest validation mse averaged over the inner folds is selected.
 """
 
 import itertools
-from collections.abc import Callable, Collection, Iterable
+from collections.abc import Callable, Collection, Iterable, Sequence
 from dataclasses import asdict, replace
 from pathlib import Path
 
@@ -70,7 +71,7 @@ def validation_batches(batch: np.ndarray, n: int, rng: np.random.Generator) -> n
     return rng.permutation(batches)[:n]
 
 
-def sample_configs(grid: DictConfig, n: int, seed: int) -> list[dict]:
+def sample_configs(grid: DictConfig, n: int, seed: int | Sequence[int]) -> list[dict]:
     """n distinct configurations drawn at random from the grid (all of them if n covers it)."""
     configs = [dict(zip(grid, values, strict=True)) for values in itertools.product(*grid.values())]
     picks = np.random.default_rng(seed).choice(len(configs), min(n, len(configs)), replace=False)
@@ -96,35 +97,48 @@ def _network_sizes(config: dict) -> dict:
     return {"width_w": psi, "n_features_w": psi} | settings
 
 
-def tune(folds: Iterable[tuple[sc.AnnData, Evaluate]], cfg: DictConfig) -> tuple:
+def tune(
+    folds: Iterable[tuple[sc.AnnData, Evaluate]], cfg: DictConfig, seed: int | Sequence[int]
+) -> tuple:
     """Tune both bridges on the inner folds, each given as (training data, its Evaluate).
+
+    seed draws the cfg.n_configs candidates per bridge, shared by all inner folds.
 
     Returns the validation scores on every inner fold, the selected configuration of each bridge,
     and the mean validation scores of the selected configurations and of shift.
     """
-    inner = _inner_scores(folds, cfg)
+    inner = _inner_scores(folds, cfg, seed)
     averaged = mean_over_inner_folds(inner)
     selected, winners = select(averaged, cfg), _winners(averaged)
     print(f"selected: {selected}\n{winners.to_string(float_format='%.4g')}", flush=True)
     return inner, selected, winners
 
 
-def _inner_scores(folds: Iterable[tuple[sc.AnnData, Evaluate]], cfg: DictConfig) -> pd.DataFrame:
+def _inner_scores(
+    folds: Iterable[tuple[sc.AnnData, Evaluate]], cfg: DictConfig, seed
+) -> pd.DataFrame:
     """Validation scores of shift and every configuration on each inner fold."""
     tables = []
     for j, (train, evaluate) in enumerate(folds):
         print(f"  inner fold {j + 1}/{cfg.inner_folds}", flush=True)
-        tables.append(pd.DataFrame(_validation_rows(train, evaluate, cfg)).assign(inner_fold=j))
+        tables.append(
+            pd.DataFrame(_validation_rows(train, evaluate, cfg, seed)).assign(inner_fold=j)
+        )
     return pd.concat(tables, ignore_index=True)
 
 
-def _validation_rows(train: sc.AnnData, evaluate: Evaluate, cfg: DictConfig) -> list[dict]:
-    """Validation scores of shift, each kernel configuration and each neural one at each checkpoint."""
-    return (
-        _shift_rows(train, evaluate, cfg)
-        + _kernel_rows(train, evaluate, cfg)
-        + _neural_rows(train, evaluate, cfg)
-    )
+def _validation_rows(train: sc.AnnData, evaluate: Evaluate, cfg: DictConfig, seed) -> list[dict]:
+    """Validation scores of shift and of each configuration of the bridges in cfg.bridges.
+
+    Neural configurations are scored at each checkpoint. A missing cfg.bridges tunes both.
+    """
+    bridges = cfg.get("bridges", ["kernel", "neural"])
+    rows = _shift_rows(train, evaluate, cfg)
+    if "kernel" in bridges:
+        rows += _kernel_rows(train, evaluate, cfg, seed)
+    if "neural" in bridges:
+        rows += _neural_rows(train, evaluate, cfg, seed)
+    return rows
 
 
 def _shift_rows(train: sc.AnnData, evaluate: Evaluate, cfg: DictConfig) -> list[dict]:
@@ -135,21 +149,21 @@ def _shift_rows(train: sc.AnnData, evaluate: Evaluate, cfg: DictConfig) -> list[
     return [{"bridge": "shift (b=1)", **scores}]
 
 
-def _kernel_rows(train: sc.AnnData, evaluate: Evaluate, cfg: DictConfig) -> list[dict]:
+def _kernel_rows(train: sc.AnnData, evaluate: Evaluate, cfg: DictConfig, seed) -> list[dict]:
     """Validation scores of each sampled kernel configuration."""
     rows = []
-    for config in sample_configs(cfg.kernel_grid, cfg.n_configs, cfg.seed):
+    for config in sample_configs(cfg.kernel_grid, cfg.n_configs, seed):
         scores = evaluate(make_kernel(config, cfg).fit(train))
         rows.append({"bridge": "kernel", **config, **scores})
         print(f"  kernel {config}: mse {scores['mse']:.4g}", flush=True)
     return rows
 
 
-def _neural_rows(train: sc.AnnData, evaluate: Evaluate, cfg: DictConfig) -> list[dict]:
+def _neural_rows(train: sc.AnnData, evaluate: Evaluate, cfg: DictConfig, seed) -> list[dict]:
     """Validation scores of each sampled neural configuration at every checkpoint."""
     checkpoints = list(cfg.neural_checkpoints)
     rows = []
-    for config in sample_configs(_neural_grid(cfg), cfg.n_configs, cfg.seed):
+    for config in sample_configs(_neural_grid(cfg), cfg.n_configs, seed):
         model = make_neural(config | {"n_steps": max(checkpoints)}, cfg)
 
         def record(step, model=model, config=config):

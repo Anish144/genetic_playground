@@ -15,6 +15,7 @@ from genetic_perturbation_playground.utils.standardisation import (
 )
 
 ROOT = Path(__file__).parents[1]
+PRESETS = {"train": "out_of_batch/rxrx1_fixed", "tune": "out_of_batch/rxrx1"}
 sys.path.insert(0, str(ROOT / "scripts"))
 import train_rxrx1_transfer as mod  # noqa: E402
 import tune_rxrx1_transfer as tune  # noqa: E402
@@ -24,7 +25,7 @@ def cfg(**overrides):
     """The script's config with `overrides`, in struct mode as Hydra hands it over."""
     register_configs()
     with initialize_config_dir(str(ROOT / "configs"), version_base=None):
-        config = compose("train_rxrx1_transfer", ["name=test", "wandb_mode=disabled"])
+        config = compose("out_of_batch/rxrx1_fixed", ["name=test", "wandb_mode=disabled"])
     return OmegaConf.merge(config, {"batch_unit": "experiment"}, overrides)
 
 
@@ -115,7 +116,7 @@ def test_removed_proxy_flag_is_rejected(entrypoint):
         initialize_config_dir(str(ROOT / "configs"), version_base=None),
         pytest.raises(ConfigCompositionException, match="positive_controls_as_proxies"),
     ):
-        compose(f"{entrypoint}_rxrx1_transfer", ["name=test", "positive_controls_as_proxies=true"])
+        compose(PRESETS[entrypoint], ["name=test", "positive_controls_as_proxies=true"])
 
 
 def test_mse_of_perfect_prediction_is_zero(tiny_rxrx1):
@@ -226,7 +227,7 @@ def test_batch_and_proxy_selection_are_used_for_training_and_prediction(
     if unit is not None:
         overrides += [f"batch_unit={unit}", f"proxy_controls={mode}"]
     with initialize_config_dir(str(ROOT / "configs"), version_base=None):
-        config = compose(f"{entrypoint}_rxrx1_transfer", overrides)
+        config = compose(PRESETS[entrypoint], overrides)
     config.n_validation_batches = 1
     if entrypoint == "tune":
         config.inner_folds = 2
@@ -279,7 +280,7 @@ def test_plate_batches_check_proxies_per_plate(tiny_rxrx1, entrypoint):
         & (tiny_rxrx1.obs["well_type"] == "positive_control")
     )
     with initialize_config_dir(str(ROOT / "configs"), version_base=None):
-        config = compose(f"{entrypoint}_rxrx1_transfer", ["name=test", "wandb_mode=disabled"])
+        config = compose(PRESETS[entrypoint], ["name=test", "wandb_mode=disabled"])
     run = mod.cross_validate if entrypoint == "train" else tune.nested_cv
     with pytest.raises(ValueError, match=r"HUVEC-2\|plate_1"):
         next(run(tiny_rxrx1[~remove], config))
@@ -306,7 +307,7 @@ def test_outer_plate_splits_reject_unseen_treatments_before_fitting(
     data = disjoint_plate_treatments
     data = data[data.obs["batch"] == "HUVEC-1"]
     with initialize_config_dir(str(ROOT / "configs"), version_base=None):
-        config = compose(f"{entrypoint}_rxrx1_transfer", ["name=test", "n_validation_batches=1"])
+        config = compose(PRESETS[entrypoint], ["name=test", "n_validation_batches=1"])
     run = mod.cross_validate if entrypoint == "train" else tune.nested_cv
     with pytest.raises(ValueError, match=r"No treatment.*HUVEC-1\|plate_"):
         next(run(data, config))
@@ -364,7 +365,13 @@ def test_cross_validate_fits_the_neural_bridge(tiny_rxrx1):
 def test_nested_cv_tunes_on_inner_validation_and_scores_the_outer_folds(tiny_rxrx1):
     with initialize_config_dir(str(ROOT / "configs"), version_base=None):
         config = compose(
-            "tune_rxrx1_transfer", ["name=test", "wandb_mode=disabled", "batch_unit=experiment"]
+            "out_of_batch/rxrx1",
+            [
+                "name=test",
+                "wandb_mode=disabled",
+                "batch_unit=experiment",
+                "bridges=[kernel,neural]",
+            ],
         )
     config = OmegaConf.merge(
         config,

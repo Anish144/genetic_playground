@@ -1,0 +1,40 @@
+# @package _global_
+# Tune on training batches, refit, then predict each held-out batch.
+defaults:
+  - /common
+  - /search_spaces/rxrx1
+  - _self_
+
+# Data
+cell_type: HUVEC  # null pools all cell types
+batch_unit: plate  # plate or experiment
+proxy_controls: positive  # negative, positive or both
+embeddings:
+  grid: 4
+  standardise_sites: true
+
+# Evaluation and tuning
+seed: 0
+n_validation_batches: 10  # distinct outer batches held out one at a time
+inner_folds: 3
+n_configs: 20  # candidates per bridge; fresh draw for each outer batch
+
+# Models (linear baselines always run)
+bridges: [neural]  # add kernel to tune it too
+neural:
+  depth: 1
+  n_features_w: 32
+  width_w: 128
+  reg: 1.0e-6
+  weight_decay: 1.0e-2
+  n_steps: 200  # tuning selects a step from neural_checkpoints
+  cross_fit_folds: 0
+  gene_block_size: 384
+  device: cuda
+
+# Execution
+name: ???
+wandb_mode: online  # online, offline or disabled
+hydra:
+  run:
+    dir: outputs/${now:%Y-%m-%d}/${name}_${now:%H-%M-%S}

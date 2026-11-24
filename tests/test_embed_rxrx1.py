@@ -52,7 +52,7 @@ def test_embedding_keeps_blank_crops_and_labels_across_batches(
         return torch.stack((pixels.argmax(1).float(), pixels.amax(1)), dim=1)
 
     monkeypatch.setattr(mod, "embed", embed_pixel_positions)
-    cfg = OmegaConf.load(ROOT / "configs" / "embed_rxrx1.yaml")
+    cfg = OmegaConf.load(ROOT / "configs" / "preprocessing" / "embed_rxrx1.yaml")
     cfg.grid, cfg.batch_size, cfg.workers = 2, 1, 0
     cfg.standardise_sites = standardise_sites
     mod.main.__wrapped__(cfg)

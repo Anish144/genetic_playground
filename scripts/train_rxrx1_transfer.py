@@ -11,7 +11,7 @@
   n_validation_batches fits per model. Scores per (treatment siRNA, held-out batch), on means:
   mse      squared error in Phenom coordinates
 
-Config: configs/train_rxrx1_transfer.yaml. Usage:
+Config: configs/out_of_batch/rxrx1_fixed.yaml. Usage:
 
     uv run python scripts/train_rxrx1_transfer.py name=huvec 'bridges=[kernel]'
     uv run python scripts/train_rxrx1_transfer.py name=hybrid neural=hybrid
@@ -214,7 +214,7 @@ def log_summary(prefix: str, table: pd.DataFrame) -> None:
         )
 
 
-@hydra.main(config_path="../configs", config_name="train_rxrx1_transfer", version_base=None)
+@hydra.main(config_path="../configs", config_name="out_of_batch/rxrx1_fixed", version_base=None)
 def main(cfg: DictConfig):
     adata = select_cell_type(load_rxrx1(**cfg.embeddings), cfg.cell_type)
     out_dir = Path(HydraConfig.get().runtime.output_dir)

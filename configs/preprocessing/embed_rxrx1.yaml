@@ -1,3 +1,4 @@
+# @package _global_
 name: embed_rxrx1_g${grid}  # run folder outputs/<date>/<name>_<time>/ (embeddings go to data/)
 hydra:
   run:

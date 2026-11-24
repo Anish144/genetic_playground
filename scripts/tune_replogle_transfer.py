@@ -7,7 +7,7 @@ and scored on the one outer batch, next to the linear models. shift (b=1) is sco
 folds too, as a reference only. The outer batch never enters tuning. n_validation_batches counts
 outer evaluations; the inner tuning fits and final refits are additional training runs.
 
-Config: configs/tune_replogle_transfer.yaml (grids; everything else from train_replogle_transfer.yaml).
+Config: configs/out_of_batch/replogle.yaml.
 Choose one neural model with neural=per_x (default), neural=shared_2nn,
 or neural=hybrid.
 Usage:
@@ -112,7 +112,9 @@ def nested_cv(adata: sc.AnnData, cfg: DictConfig) -> tuple:
         )
         train_batches = np.setdiff1d(np.unique(batch), held_out)
         folds_i = _inner_folds(adata, batch, seen, train_batches, cfg, [cfg.seed, i])
-        inner, selected, _ = tuning.tune(folds_i, cfg)
+        inner, selected, _ = tuning.tune(
+            folds_i, cfg, seed=[cfg.seed, i, 1]
+        )  # fresh draw per batch
         inner_tables.append(inner.assign(fold=i))
         selected_rows += [{"fold": i, "bridge": b, **c} for b, c in selected.items()]
 
@@ -137,7 +139,7 @@ def nested_cv(adata: sc.AnnData, cfg: DictConfig) -> tuple:
     )
 
 
-@hydra.main(config_path="../configs", config_name="tune_replogle_transfer", version_base=None)
+@hydra.main(config_path="../configs", config_name="out_of_batch/replogle", version_base=None)
 def main(cfg: DictConfig):
     adata = load_dataset()
     inner, selected, per_pert, per_batch, per_pair = nested_cv(adata, cfg)

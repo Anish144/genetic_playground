@@ -5,7 +5,7 @@ For each task and seed, three predictors are scored on held-out target samples:
   no_adapt   the same bridge with a W | X embedding fit on the pooled sources instead
   oracle     bridge fit on labelled target data (Tsai et al., 2024, Appendix D.2)
 
-Config: configs/train_proxy_confounded.yaml. Usage:
+Config: configs/synthetic/proxy_confounded.yaml. Usage:
 
     uv run python scripts/train_proxy_confounded.py n_seeds=3 tasks=[1]
 
@@ -74,7 +74,7 @@ def evaluate(cfg: DictConfig) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-@hydra.main(config_path="../configs", config_name="train_proxy_confounded", version_base=None)
+@hydra.main(config_path="../configs", config_name="synthetic/proxy_confounded", version_base=None)
 def main(cfg: DictConfig):
     scores = evaluate(cfg)
     scores.to_csv(Path(HydraConfig.get().runtime.output_dir) / "scores.csv", index=False)

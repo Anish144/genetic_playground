@@ -455,9 +455,7 @@ def _rebuild_results(directory, cfg, run_id):
     return scores
 
 
-@hydra.main(
-    config_path="../configs", config_name="evaluate_rxrx1_sparse_recovery", version_base=None
-)
+@hydra.main(config_path="../configs", config_name="sparse_recovery/rxrx1", version_base=None)
 def main(cfg: DictConfig):
     """Load RxRx1, execute the requested seed range, and report saved results."""
     _validate_config(cfg)

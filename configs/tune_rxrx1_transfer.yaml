@@ -1,7 +1,0 @@
-defaults:
-  - train_rxrx1_transfer
-  - rxrx1_tuning_grid
-  - _self_
-
-inner_folds: 3
-n_configs: 20  # covers all 30 kernel configurations

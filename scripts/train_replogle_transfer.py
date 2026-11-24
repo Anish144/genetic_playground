@@ -14,7 +14,7 @@ Per-perturbation scores include n_training_batches, the number of training batch
 that perturbation. plots/by_training_batches/batch_<label>/ contains a separate scatter plot per
 metric and per_perturbation.csv for each held-out batch, using that batch's scores directly.
 
-Config: configs/train_replogle_transfer.yaml. `name` is required and names the output folder. Usage:
+Config: configs/out_of_batch/replogle_fixed.yaml. `name` is required and names the output folder. Usage:
 
     uv run python scripts/train_replogle_transfer.py name=baseline n_validation_batches=10
     uv run python scripts/train_replogle_transfer.py name=kernel_only 'bridges=[kernel]'   # no GPU: skip the neural bridge
@@ -208,7 +208,7 @@ def _average_per_batch(scores: list[pd.DataFrame]) -> pd.DataFrame:
     return grouped.agg(value=("value", "mean"), cells=("cells", "first")).reset_index()
 
 
-@hydra.main(config_path="../configs", config_name="train_replogle_transfer", version_base=None)
+@hydra.main(config_path="../configs", config_name="out_of_batch/replogle_fixed", version_base=None)
 def main(cfg: DictConfig):
     adata = load_dataset()
     per_pert, per_batch, per_pair = cross_validate(adata, cfg)

@@ -1,0 +1,22 @@
+# @package _global_
+# Candidate values shared by Replogle tuning experiments.
+kernel_grid:
+  reg: [1.0e-5, 3.0e-5, 1.0e-4, 3.0e-4, 1.0e-3]
+  lengthscale_scale: [0.5, 1, 2, 4]  # multiples of the median-heuristic lengthscale
+
+neural_grid:
+  lr: [3.0e-5, 1.0e-4, 3.0e-4, 7.5e-4]
+  reg: [1.0e-6, 1.0e-5, 1.0e-4, 1.0e-3]
+  weight_decay: [1.0e-4, 1.0e-2, 1.0e-1]
+  width_w: [32, 64, 128]  # hidden units per network
+  psi_size: [16, 32, 64]  # output features per network; past hybrid picks hit 32
+
+neural_variant_grids:  # extra penalties for the selected neural variant
+  shared_2nn:
+    deviation_reg: [1.0e-6, 1.0e-4, 1.0e-2]
+  hybrid:
+    deviation_reg: [1.0e-6, 1.0e-4, 1.0e-2]
+    linear_reg: [1.0e-6, 1.0e-5, 1.0e-4, 1.0e-3, 1.0e-2]  # tuned full linear picked 0
+
+# Score these steps during one training run per candidate and inner fold.
+neural_checkpoints: [0, 1, 2, 4, 8, 16, 32, 50, 100, 200, 400]

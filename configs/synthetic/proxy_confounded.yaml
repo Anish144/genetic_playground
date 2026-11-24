@@ -1,3 +1,4 @@
+# @package _global_
 tasks: [1, 2, 3]  # source/target P(U=0) settings, see data/proxy_confounded.TASKS
 n_seeds: 10       # independent data draws per task (paper: 10)
 n_source: 3200    # training samples per source domain

@@ -7,7 +7,7 @@ are scored by MSE on held-out (x, y) pairs from the target environment:
   oracle  kernel ridge regression of y on x over labelled target data
   bayes   the true E[Y | x, e*]; its MSE is the irreducible error Var(Y | x, e*)
 
-Config: configs/train_proxy_unconfounded.yaml. Usage:
+Config: configs/synthetic/proxy_unconfounded.yaml. Usage:
 
     uv run python scripts/train_proxy_unconfounded.py n_seeds=3 'n_envs=[20]'
 
@@ -91,7 +91,7 @@ def evaluate(cfg: DictConfig) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-@hydra.main(config_path="../configs", config_name="train_proxy_unconfounded", version_base=None)
+@hydra.main(config_path="../configs", config_name="synthetic/proxy_unconfounded", version_base=None)
 def main(cfg: DictConfig):
     scores = evaluate(cfg)
     out_dir = Path(HydraConfig.get().runtime.output_dir)

@@ -122,14 +122,14 @@ def test_builder_rejects_variant_schema_mismatch():
 
 
 TRANSFER_CONFIGS = [
-    "train_replogle_transfer",
-    "train_rxrx1_transfer",
-    "tune_replogle_transfer",
-    "tune_rxrx1_transfer",
+    "out_of_batch/replogle_fixed",
+    "out_of_batch/rxrx1_fixed",
+    "out_of_batch/replogle",
+    "out_of_batch/rxrx1",
 ]
 
 
-def compose_config(name="train_replogle_transfer", *overrides):
+def compose_config(name="out_of_batch/replogle_fixed", *overrides):
     from genetic_perturbation_playground.config import register_configs
 
     register_configs()
@@ -163,7 +163,10 @@ def test_transfer_presets_retain_model_types_and_defaults(name, variant):
         128 if "rxrx1" in name else 64,
     )
     assert (neural.reg, neural.lr, neural.weight_decay) == (1e-6, 1e-3, 1e-2)
-    assert (neural.n_steps, neural.cross_fit_folds, neural.device) == (200, 5, "cuda")
+    folds = (
+        5 if name == "out_of_batch/replogle_fixed" else 0
+    )  # the RxRx1 and tuning presets disable it
+    assert (neural.n_steps, neural.cross_fit_folds, neural.device) == (200, folds, "cuda")
     assert resolve_model_config(config, "linear") == LinearConfig()
     assert resolve_model_config(config, "kernel") == KernelConfig()
 
@@ -180,14 +183,14 @@ def test_transfer_presets_retain_model_types_and_defaults(name, variant):
 )
 def test_transfer_presets_reject_invalid_model_overrides(override):
     with pytest.raises(ConfigCompositionException):
-        compose_config("train_replogle_transfer", override)
+        compose_config("out_of_batch/replogle_fixed", override)
 
 
 @pytest.mark.parametrize("override", ["+neural.linear_reg=0", "+neural.typo=1"])
 def test_resolution_rejects_undeclared_model_fields_added_with_plus(override):
     from genetic_perturbation_playground.config import resolve_model_config
 
-    config = compose_config("train_replogle_transfer", override)
+    config = compose_config("out_of_batch/replogle_fixed", override)
     with pytest.raises(ValueError, match="Unknown.*neural"):
         resolve_model_config(config, "neural")
 
@@ -195,7 +198,7 @@ def test_resolution_rejects_undeclared_model_fields_added_with_plus(override):
 def test_resolution_rejects_variant_schema_mismatch():
     from genetic_perturbation_playground.config import resolve_model_config
 
-    config = compose_config("train_replogle_transfer", "neural.variant=hybrid")
+    config = compose_config("out_of_batch/replogle_fixed", "neural.variant=hybrid")
     with pytest.raises(ValueError, match="neural=hybrid"):
         resolve_model_config(config, "neural")
 
@@ -204,7 +207,7 @@ def test_trial_interpolations_see_trial_values_without_changing_the_base():
     from genetic_perturbation_playground.config import resolve_model_config
 
     config = compose_config(
-        "train_replogle_transfer",
+        "out_of_batch/replogle_fixed",
         "neural=shared_2nn",
         "seed=19",
         "neural.deviation_reg=${neural.reg}",
@@ -231,7 +234,7 @@ def test_root_switches_and_model_penalties_resolve_independently():
     from genetic_perturbation_playground.config import resolve_model_config
 
     config = compose_config(
-        "train_rxrx1_transfer",
+        "out_of_batch/rxrx1_fixed",
         "neural=hybrid",
         "linear.reg=0",
         "neural.linear_reg=0.002",
@@ -251,7 +254,7 @@ def test_root_switches_and_model_penalties_resolve_independently():
 
 
 def test_tuning_grid_can_add_a_declared_model_field():
-    config = compose_config("tune_replogle_transfer", "+neural_grid.depth=[1]")
+    config = compose_config("out_of_batch/replogle", "+neural_grid.depth=[1]")
     assert list(config.neural_grid.depth) == [1]
 
 
@@ -262,8 +265,9 @@ def test_transfer_entry_points_run_each_neural_group(cells, monkeypatch, dataset
     monkeypatch.syspath_prepend(str(Path(__file__).parents[1] / "scripts"))
     name = f"{action}_{dataset}_transfer"
     module = importlib.import_module(name)
+    preset = f"out_of_batch/{dataset}" + ("_fixed" if action == "train" else "")
     config = compose_config(
-        name,
+        preset,
         f"neural={variant}",
         "neural.device=cpu",
         "neural.n_steps=1",
