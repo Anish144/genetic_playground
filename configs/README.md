@@ -56,7 +56,7 @@ The remaining files hold shared settings or support other runs:
 - `out_of_batch/*_fixed.yaml` holds settings for runs without tuning. The
   `train_rxrx1_transfer.py` and `train_replogle_transfer.py` scripts use these.
 - [preprocessing/embed_rxrx1.yaml](preprocessing/embed_rxrx1.yaml) controls image
-  embedding. The `synthetic/` folder holds the separate synthetic experiments.
+  embedding.
 
 Each experiment loads shared files directly. It does not inherit settings from
 another experiment. RxRx1 uses site normalisation for out-of-batch prediction

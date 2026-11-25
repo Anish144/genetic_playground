@@ -366,7 +366,7 @@ def test_source_fingerprint_ignores_unrelated_code_but_tracks_dependencies(
     monkeypatch.setattr(runner, "ROOT", tmp_path)
     original = runner._source_fingerprint()
     for relative in [
-        "scripts/rxrx3_core_proxy_minimal_repro.py",
+        "scripts/embed_rxrx1.py",
         "src/genetic_perturbation_playground/model/proxy_confounded.py",
     ]:
         path = tmp_path / relative

@@ -251,8 +251,6 @@ Implementation is in `model/proxy_unconfounded_neural.py`. `utils/ridge.py` prov
 
 For shared 2NN and hybrid, the neural solver eliminates category coefficients before the shared solve. Both use target Grams and combine target projections across cross-fit folds. Final coefficients are reconstructed in `gene_block_size` blocks and exposed as `intercept_`, `shared_coef_` and `deviation_coef_`. The hybrid's `shared_coef_` ends with the rows of the projected coefficient matrix $R$; `full_coef_` reconstructs $B = VR$ on access.
 
-`scripts/benchmark_ridge_solver.py --baseline /path/to/previous_neural_module.py --output outputs/ridge_benchmark.json` compares a saved pre-refactor module against the neural solver. It checks losses, gradients and coefficients, then records CPU training/reconstruction timings and allocation traffic on two synthetic sizes. The linear comparison sets `reg=0` to match the previous least-squares formula.
-
 ## Virtual experiments
 
 `predict_environment_average(perturbations, reference)` predicts fitted perturbations over a common distribution of environments. `reference` contains only control rows, with `obs["perturbation"] == "control"` and environment names in `obs["batch"]`. Its feature names and order must match training. By default, each environment has equal weight, regardless of its sample count. The method works on linear, kernel and all three neural transfer models, including `Standardised` wrappers.
@@ -403,7 +401,6 @@ configs/
   sparse_recovery/             Tuned sparse-response recovery (RxRx1)
   search_spaces/               Candidate grids and scoring checkpoints by dataset
   preprocessing/               RxRx1 image embedding
-  synthetic/                   Separate synthetic experiments
   common.yaml                  Model schemas and shared setting links
 scripts/
   embed_rxrx1.py                Images → Phenom crop embeddings
@@ -411,6 +408,7 @@ scripts/
   train_rxrx1_transfer.py       RxRx1 fixed settings
   tune_replogle_transfer.py     Replogle nested tuning
   tune_rxrx1_transfer.py        RxRx1 nested tuning
+  evaluate_rxrx1_sparse_recovery.py   RxRx1 sparse-response recovery
 src/genetic_perturbation_playground/
   config.py                    Typed model settings and Hydra registration
   data/                        Dataset loading and preprocessing
@@ -428,8 +426,6 @@ hpc/run.sbatch                 Slurm GPU launcher
 hpc/run_beaker.qsub            Beaker Grid Engine GPU launcher
 outputs/<date>/<name>_<time>/   Results, plots and .hydra/ configuration snapshots
 ```
-
-The `train_proxy_confounded.py` and `train_proxy_unconfounded.py` scripts are separate synthetic experiments. The unconfounded continuous-X experiment now runs only the kernel bridge, since its neural marginal model has been removed.
 
 **Replogle:** the first run downloads and caches the data. `name` is required.
 
