@@ -419,7 +419,7 @@ siRNAs of the same gene are averaged. Each estimate is then centred on its mean 
 2. In each round, hide one fold of every siRNA's treatment wells. Controls stay visible on every plate.
 3. Score each model by the squared error between its average prediction over an siRNA's hidden plates and the observed average there. Average over features and siRNAs, then over rounds.
 
-This picks a penalty for transfer (fit b) and for full transfer (fit B), and the best of 20 hybrid-bridge settings from `configs/search_spaces/rxrx1.yaml`. Pooled and shift are scored for reference. Tuning takes about 8–10 GPU hours. `tune=false` skips it and uses the fixed settings in `configs/recall/rxrx1.yaml`.
+This picks a penalty for transfer (fit b) and for full transfer (fit B), and the best of 20 bridge settings from the grids in `configs/recall/rxrx1.yaml`. The bridge is hybrid by default; `neural=shared_2nn` tunes the shared two-network bridge instead. Pooled and shift are scored for reference. Tuning takes about 8–10 GPU hours. `tune=false` skips it and uses the fixed settings in `configs/recall/rxrx1.yaml`.
 
 **Outputs** go to `outputs/rxrx1_recall/<name>/`: `recall.csv`, `excluded_sirnas.csv`, `estimates.npz`, `selected.json`, `config.yaml` and, when tuning, `linear_tuning_scores.csv` and `tuning_scores.csv`. The tuning results are saved before the final fits.
 

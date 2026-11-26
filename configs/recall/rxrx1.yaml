@@ -23,9 +23,27 @@ databases: [CORUM, HuMAP, Reactome, SIGNOR, StringDB]
 # Tuning: per-siRNA plate folds, scored on plate-averaged predictions
 tune: true  # false fits the fixed settings below
 inner_folds: 3
-n_configs: 20  # hybrid settings drawn from search_spaces/rxrx1
+n_configs: 20  # bridge settings drawn from the grids below
 bridges: [neural]
 linear_reg_grid: [1.0e-6, 1.0e-5, 1.0e-4, 1.0e-3, 1.0e-2, 1.0e-1, 1.0]
+
+# Bridge grids from the 26 Nov sparse-recovery runs (98ad029, k=2-5): lr 1e-4 and
+# deviation_reg 1e-2 won most often at the grid edge, so both extend downward.
+# Picks stopped by 60 steps, but recall folds see ~16 plates per siRNA, not 2-5,
+# so checkpoints still run to 400.
+neural_checkpoints: [0, 5, 10, 20, 40, 60, 100, 150, 200, 300, 400]
+neural_grid:
+  lr: [5.0e-5, 1.0e-4, 2.5e-4]
+  reg: [1.0e-4, 1.0e-3, 1.0e-2]
+  weight_decay: [1.0e-5, 1.0e-4, 1.0e-2]
+  width_w: [128, 256]
+  psi_size: [32, 64, 128]
+neural_variant_grids:
+  shared_2nn:
+    deviation_reg: [1.0e-3, 1.0e-2, 1.0e-1, 1.0]  # sparse picks: 1e-2 x8, 1e-1 x6, 1 x1
+  hybrid:
+    deviation_reg: [1.0e-3, 1.0e-2, 1.0e-1]
+    linear_reg: [1.0e-4, 1.0e-3, 1.0e-2, 1.0e-1]
 
 # Models, fit on every batch. Linear reg (untuned): /common. Neural: from rxrx1_fixed.yaml
 seed: 0
