@@ -393,7 +393,9 @@ Cell counts in score tables describe coverage; they do not weight evaluation ave
 
 ### RxRx1 known-relationship recall
 
-`scripts/rxrx1/recall.py` asks whether averaging the bridge over every HUVEC plate recovers known gene relationships better than the observed means. It fits the neural bridge on all HUVEC plates (positive-control proxies) and compares two estimates per siRNA:
+`scripts/rxrx1/recall.py` tests whether a model averaged over every HUVEC plate recovers known gene relationships better than the observed means.
+
+**Estimates.** The script fits five models on all HUVEC plates, with positive controls as proxies: pooled (b=0), shift (b=1), transfer (fit b), full transfer (fit B) and the hybrid neural bridge. For each siRNA it compares the observed mean with each model's average over every plate. For the bridge:
 
 $$
 \bar Y_x^{\mathrm{observed}}=\frac{1}{|E_x^{\mathrm{obs}}|}\sum_{e\in E_x^{\mathrm{obs}}}\bar Y_{xe},
@@ -401,7 +403,27 @@ $$
 \bar Y_x^{\mathrm{bridge}}=\frac{1}{|E|}\sum_{e\in E}\widehat Y_{xe}.
 $$
 
-siRNAs map to genes through `data/rxrx1/sirna_to_gene_thermofisher.csv` (MorphoDiff's Thermo Fisher export). Symbols that a spreadsheet mangled (`LSM 7.00` → `LSM7`; 7 HUVEC siRNAs) are repaired; siRNAs with several targets (`TIMM23B;TIMM23`; 42) or no symbol (1) are excluded and listed in `excluded_sirnas.csv`; any other malformed symbol stops the run. siRNAs of one gene are averaged, and each estimate is centred on its own mean across genes. A known pair is a hit when its cosine similarity lies in the top or bottom 5% of all gene pairs; recall is hits over the database's pairs among the study genes. Pair files (`entity1,entity2`) come from EFAAR_benchmarking's `benchmark_annotations/` and live in `data/annotations/`. `recall.csv` reports `n_pairs` beside each recall: SIGNOR has only about 8 pairs among RxRx1 genes.
+**Genes.** `data/rxrx1/sirna_to_gene_thermofisher.csv` (MorphoDiff's Thermo Fisher export) maps siRNAs to genes.
+
+- Symbols a spreadsheet mangled are repaired, such as `LSM 7.00` → `LSM7` (7 HUVEC siRNAs).
+- siRNAs with several targets, such as `TIMM23B;TIMM23` (42), or with no symbol (1) are excluded and listed in `excluded_sirnas.csv`.
+- Any other malformed symbol stops the run.
+
+siRNAs of the same gene are averaged. Each estimate is then centred on its mean across genes.
+
+**Recall.** A known pair is a hit when its cosine similarity is in the top or bottom 5% of all gene pairs. Recall is the share of a database's pairs among the study genes that are hits. The pair files (`entity1,entity2`) come from EFAAR_benchmarking's `benchmark_annotations/` and live in `data/annotations/`. `recall.csv` gives `n_pairs` next to each recall; SIGNOR has only about 8 pairs among RxRx1 genes.
+
+**Tuning.** Before the final fits, the script tunes on held-out plate averages, not on recall.
+
+1. Split each siRNA's plates into 3 folds.
+2. In each round, hide one fold of every siRNA's treatment wells. Controls stay visible on every plate.
+3. Score each model by the squared error between its average prediction over an siRNA's hidden plates and the observed average there. Average over features and siRNAs, then over rounds.
+
+This picks a penalty for transfer (fit b) and for full transfer (fit B), and the best of 20 hybrid-bridge settings from `configs/search_spaces/rxrx1.yaml`. Pooled and shift are scored for reference. Tuning takes about 8–10 GPU hours. `tune=false` skips it and uses the fixed settings in `configs/recall/rxrx1.yaml`.
+
+**Outputs** go to `outputs/rxrx1_recall/<name>/`: `recall.csv`, `excluded_sirnas.csv`, `estimates.npz`, `selected.json`, `config.yaml` and, when tuning, `linear_tuning_scores.csv` and `tuning_scores.csv`. The tuning results are saved before the final fits.
+
+**Restarts.** Rerun the same command to resume. Finished tuning trials are skipped; a trial cut off midway starts again. A rerun with a different config or different embeddings stops before writing anything; use a new `name`.
 
 ```bash
 uv run python scripts/rxrx1/recall.py name=huvec_recall

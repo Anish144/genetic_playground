@@ -1,8 +1,10 @@
 # @package _global_
-# Known-relationship recall on RxRx1: full observed means vs bridge averages over every batch.
+# Known-relationship recall on RxRx1 HUVEC: observed means vs linear and hybrid-bridge averages.
 defaults:
   - /common
+  - /search_spaces/rxrx1
   - _self_
+  - override /neural: hybrid
 
 # Data
 cell_type: HUVEC
@@ -18,7 +20,14 @@ sirna_to_gene: data/rxrx1/sirna_to_gene_thermofisher.csv
 annotations_dir: data/annotations
 databases: [CORUM, HuMAP, Reactome, SIGNOR, StringDB]
 
-# Bridge, fit on every batch; settings from out_of_batch/rxrx1_fixed.yaml
+# Tuning: per-siRNA plate folds, scored on plate-averaged predictions
+tune: true  # false fits the fixed settings below
+inner_folds: 3
+n_configs: 20  # hybrid settings drawn from search_spaces/rxrx1
+bridges: [neural]
+linear_reg_grid: [1.0e-6, 1.0e-5, 1.0e-4, 1.0e-3, 1.0e-2, 1.0e-1, 1.0]
+
+# Models, fit on every batch. Linear reg (untuned): /common. Neural: from rxrx1_fixed.yaml
 seed: 0
 neural:
   n_features_w: 32
