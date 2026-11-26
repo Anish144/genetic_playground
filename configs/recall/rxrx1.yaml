@@ -1,0 +1,38 @@
+# @package _global_
+# Known-relationship recall on RxRx1: full observed means vs bridge averages over every batch.
+defaults:
+  - /common
+  - _self_
+
+# Data
+cell_type: HUVEC
+batch_unit: plate
+proxy_controls: positive
+embeddings:
+  grid: 4
+  standardise_sites: false
+
+# Recall
+tail: 0.05  # fraction of gene pairs in each cosine tail
+sirna_to_gene: data/rxrx1/sirna_to_gene_thermofisher.csv
+annotations_dir: data/annotations
+databases: [CORUM, HuMAP, Reactome, SIGNOR, StringDB]
+
+# Bridge, fit on every batch; settings from out_of_batch/rxrx1_fixed.yaml
+seed: 0
+neural:
+  n_features_w: 32
+  width_w: 128
+  reg: 1.0e-6
+  weight_decay: 1.0e-2
+  n_steps: 200
+  cross_fit_folds: 5
+  gene_block_size: 384
+  device: cuda
+
+# Execution
+name: ???
+output_dir: outputs/rxrx1_recall/${name}
+hydra:
+  run:
+    dir: ${output_dir}/logs/${now:%Y-%m-%d_%H-%M-%S}

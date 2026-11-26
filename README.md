@@ -391,6 +391,22 @@ Cell counts in score tables describe coverage; they do not weight evaluation ave
 
 **Tuning:** nested cross-validation keeps the outer batch out of tuning. Split the remaining batches into three inner folds. Randomly sample bridge settings from the YAML grids and score neural training checkpoints. Select the lowest mean inner MSE: average over perturbations within each batch, then batches within an inner fold, then inner folds equally. Refit on all outer-training batches. The same candidate draw is reused across outer evaluations. When pooling RxRx1 cell types, inner folds distribute batches by cell type. These inner folds are separate from neural cross-fitting.
 
+### RxRx1 known-relationship recall
+
+`scripts/rxrx1/recall.py` asks whether averaging the bridge over every HUVEC plate recovers known gene relationships better than the observed means. It fits the neural bridge on all HUVEC plates (positive-control proxies) and compares two estimates per siRNA:
+
+$$
+\bar Y_x^{\mathrm{observed}}=\frac{1}{|E_x^{\mathrm{obs}}|}\sum_{e\in E_x^{\mathrm{obs}}}\bar Y_{xe},
+\qquad
+\bar Y_x^{\mathrm{bridge}}=\frac{1}{|E|}\sum_{e\in E}\widehat Y_{xe}.
+$$
+
+siRNAs map to genes through `data/rxrx1/sirna_to_gene_thermofisher.csv` (MorphoDiff's Thermo Fisher export). Symbols that a spreadsheet mangled (`LSM 7.00` → `LSM7`; 7 HUVEC siRNAs) are repaired; siRNAs with several targets (`TIMM23B;TIMM23`; 42) or no symbol (1) are excluded and listed in `excluded_sirnas.csv`; any other malformed symbol stops the run. siRNAs of one gene are averaged, and each estimate is centred on its own mean across genes. A known pair is a hit when its cosine similarity lies in the top or bottom 5% of all gene pairs; recall is hits over the database's pairs among the study genes. Pair files (`entity1,entity2`) come from EFAAR_benchmarking's `benchmark_annotations/` and live in `data/annotations/`. `recall.csv` reports `n_pairs` beside each recall: SIGNOR has only about 8 pairs among RxRx1 genes.
+
+```bash
+uv run python scripts/rxrx1/recall.py name=huvec_recall
+```
+
 # Paths and how to run the experiments
 
 Run commands from the repository root. Use Python 3.12+ and install the locked environment with `uv sync`. Neural runs default to CUDA; use `neural.device=cpu` for small runs. Apple MPS does not support the required float64 ridge algebra. Set `MPLBACKEND=Agg` for headless plotting.
