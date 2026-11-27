@@ -283,8 +283,8 @@ class RidgeCoefficients(NamedTuple):
     shared: torch.Tensor | None = None
 
 
-class NeuralRidgeSolver:
-    """Fit coefficients and score predictions for fixed features.
+class GramRidgeSolver:
+    """Fit coefficients through target products Q = cy cy^T / J (best when D <= J).
 
     Create a solver with ``per_category`` or ``shared_deviation``, then call
     ``coefficients``, ``prediction_sse`` or ``penalty``. Fits support gradients
@@ -394,7 +394,7 @@ class NeuralRidgeSolver:
 
         Returns
         -------
-        NeuralRidgeSolver
+        GramRidgeSolver
             Solver storing maps A[x] = local_map[x] @ data.cy[x]. Coefficients
             are built only when requested.
         """
@@ -443,7 +443,7 @@ class NeuralRidgeSolver:
 
         Returns
         -------
-        NeuralRidgeSolver
+        GramRidgeSolver
             Solver ready to compute coefficients or prediction errors.
 
         Raises
@@ -572,7 +572,7 @@ class NeuralRidgeSolver:
         """
         rq = R @ data.target_gram  # (G, q, D)
         scored_mu = mu * scored[:, None]  # (D, q)
-        gram = NeuralRidgeSolver.grouped_gram(data.c * scored, mu)  # (G, q, q)
+        gram = GramRidgeSolver.grouped_gram(data.c * scored, mu)  # (G, q, q)
         cross_term = (rq * scored_mu.T).sum()
         quadratic = (rq * (gram @ R)).sum()
         return data.cyy[scored].sum() - 2 * cross_term + quadratic
@@ -616,7 +616,7 @@ class NeuralRidgeSolver:
         """
         features = terms[0].shared_gram.shape[0]
         maps = torch.cat([m for term in terms for m in (term.fit_map, term.cross_map)], dim=1)
-        projected = NeuralRidgeSolver.project_targets(maps, data.cy).reshape(
+        projected = GramRidgeSolver.project_targets(maps, data.cy).reshape(
             len(terms), 2, features, -1
         )
         shared_gram = torch.stack([term.shared_gram for term in terms])
@@ -782,3 +782,344 @@ class NeuralRidgeSolver:
             self.shared_map,
             cross_map,
         )
+
+
+class DirectRidgeSolver:
+    """Fit ridge coefficients from counts and target sums, for D > J.
+
+    Fits the same models as ``GramRidgeSolver``, with the same penalties and
+    methods. It builds the coefficients themselves, of shape (G, k, J), and
+    never the target products (G, D, D) or any (G, ., D) map. Use it when there
+    are more environments than outputs. Create one with ``per_category`` or
+    ``shared_deviation``; ``NeuralRidgeSolver`` chooses between the two solvers.
+
+    Parameters
+    ----------
+    data : GroupedRidgeData
+        Counts and target sums. ``target_gram`` is ignored and may be None.
+    local : torch.Tensor of shape (D, k)
+        Features whose coefficients differ by category. k is q for
+        per-category fits and q + 1 (intercept, then deviations) otherwise.
+    shared : torch.Tensor of shape (D, q_s) or None
+        Features whose coefficients all categories share; None for
+        per-category fits.
+    fit : torch.Tensor of shape (D,) or None
+        Boolean training mask; None includes all environments.
+    local_reg : float or torch.Tensor of shape (k,)
+        Penalty on category coefficients, before multiplication by N.
+    shared_reg : torch.Tensor of shape (q_s,) or None
+        Penalty on shared coefficients, before multiplication by N.
+
+    Attributes
+    ----------
+    total : torch.Tensor of shape ()
+        N, the total response count in the training environments.
+    shared_features : torch.Tensor of shape (D, q_s) or None
+        The shared features, in the precision of ``data.c``.
+
+    Notes
+    -----
+    With fit weights w[x, e] = c[x, e] * fit[e], local features l and shared
+    features s, the fit solves, for each category x,
+
+        (Kll[x] + N diag(local_reg)) L[x] + Kls[x] S = Bl[x]
+
+    and for the shared coefficients
+
+        sum_x Kls[x].T L[x] + (Kss + N diag(shared_reg)) S = Bs,
+
+    where Kll[x] = sum_e w[x, e] l_e l_e.T, Kls[x] = sum_e w[x, e] l_e s_e.T,
+    Kss = sum_e (sum_x w[x, e]) s_e s_e.T, Bl[x] = sum_e fit[e] l_e cy[x, e].T
+    and Bs = sum_e fit[e] s_e (sum_x cy[x, e]).T. Eliminating L leaves a
+    q_s-by-q_s solve. Scoring uses the same products, weighted by the scoring
+    mask and without any penalty.
+
+    Examples
+    --------
+    Fit a constant feature to targets 2 and 4 in two environments, as in
+    ``GramRidgeSolver``. Ridge with reg=1 shrinks their mean of 3 to 1.5.
+
+    >>> import torch
+    >>> from genetic_perturbation_playground.data.neural import GroupedRidgeData
+    >>> from genetic_perturbation_playground.utils.ridge import DirectRidgeSolver
+    >>> targets = torch.tensor([[[2.], [4.]]], dtype=torch.float64)
+    >>> data = GroupedRidgeData(
+    ...     c=torch.ones(1, 2, dtype=torch.float64),
+    ...     cy=targets,
+    ...     cyy=targets.square().sum(dim=(0, 2)),
+    ... )
+    >>> features = torch.ones(2, 1, dtype=torch.float64)
+    >>> solver = DirectRidgeSolver.per_category(data, features, reg=1.0)
+    >>> solver.coefficients().local.tolist()
+    [[[1.5]]]
+    >>> solver.prediction_sse().item()
+    6.5
+    >>> solver.penalty().item()
+    4.5
+    """
+
+    def __init__(self, data, local, shared, fit, local_reg, shared_reg):
+        dtype = data.c.dtype
+        self.data = data
+        self.local = local.to(dtype)
+        self.shared_features = None if shared is None else shared.to(dtype)
+        if fit is None:
+            fit = torch.ones(len(local), dtype=torch.bool, device=local.device)
+        self.fit = fit
+        self.local_reg = local_reg.to(dtype) if isinstance(local_reg, torch.Tensor) else local_reg
+        self.shared_reg = None if shared_reg is None else shared_reg.to(dtype)
+        weights = data.c * fit
+        self.total = weights.sum()
+        if self.shared_features is not None and self.total <= 0:  # before any solve
+            raise ValueError("Each ridge fit needs positive total response weight")
+        self.kll, self.kls, self.kss = self._grams(weights)
+        if self.shared_features is not None:
+            self.coupling = GramRidgeSolver.solve(self.kll, self.kls, self.total, self.local_reg)
+        self._full = None
+
+    @classmethod
+    def per_category(cls, data: GroupedRidgeData, features, fit=None, *, reg):
+        """Fit a separate response to the features for each category.
+
+        Parameters
+        ----------
+        data : GroupedRidgeData
+            Counts and target sums.
+        features : torch.Tensor of shape (D, q)
+            Learned features for each environment.
+        fit : torch.Tensor of shape (D,) or None, default=None
+            Boolean training mask; None includes all environments.
+        reg : float
+            Ridge penalty per coefficient, before multiplication by N.
+
+        Returns
+        -------
+        DirectRidgeSolver
+            Solver for y_hat[x, e] = features[e] @ A[x], as in
+            ``GramRidgeSolver.per_category``.
+        """
+        return cls(data, features, None, fit, reg, None)
+
+    @classmethod
+    def shared_deviation(
+        cls, data: GroupedRidgeData, embeddings, fit=None, *, reg, deviation_reg, shared_reg
+    ):
+        """Fit shared effects and category deviations together.
+
+        Parameters
+        ----------
+        data : GroupedRidgeData
+            Counts and target sums.
+        embeddings : torch.Tensor of shape (D, q_s + q)
+            Shared features followed by deviation features.
+        fit : torch.Tensor of shape (D,) or None, default=None
+            Boolean training mask; None includes all environments.
+        reg : float
+            Intercept penalty, before multiplication by N.
+        deviation_reg : float
+            Deviation penalty, before multiplication by N.
+        shared_reg : torch.Tensor of shape (q_s,)
+            Penalty per shared feature, before multiplication by N. Its length
+            sets the shared width.
+
+        Returns
+        -------
+        DirectRidgeSolver
+            Solver for the model of ``GramRidgeSolver.shared_deviation``.
+
+        Raises
+        ------
+        ValueError
+            If the training environments have no positive response weight.
+        """
+        width = len(shared_reg)
+        shared, deviation = embeddings.split((width, embeddings.shape[1] - width), dim=1)
+        local = torch.cat((torch.ones_like(deviation[:, :1]), deviation), dim=1)
+        penalties = torch.full((local.shape[1],), deviation_reg, dtype=data.c.dtype)
+        penalties[0] = reg
+        return cls(data, local, shared, fit, penalties.to(data.c.device), shared_reg)
+
+    def _grams(self, weights):
+        """Return unpenalised (Kll, Kls, Kss) for row weights of shape (G, D)."""
+        groups, envs = weights.shape
+        local, shared = self.local, self.shared_features
+        k = local.shape[1]
+        outer = (local[:, :, None] * local[:, None, :]).reshape(envs, -1)
+        kll = (weights @ outer).reshape(groups, k, k)
+        if shared is None:
+            return kll, None, None
+        outer = (local[:, :, None] * shared[:, None, :]).reshape(envs, -1)
+        kls = (weights @ outer).reshape(groups, k, shared.shape[1])
+        kss = shared.T @ (weights.sum(dim=0)[:, None] * shared)
+        return kll, kls, kss
+
+    def _target_products(self, mask, block):
+        """Return (Bl, Bs) for the masked environments and one output block.
+
+        An expanded feature view with ``torch.bmm`` reads cy without copying it.
+        """
+        cy = self.data.cy[..., block]
+        mask = mask.to(cy.dtype)[:, None]
+        local = (self.local * mask).T  # (k, D)
+        bl = torch.bmm(local.expand(len(cy), -1, -1), cy)  # (G, k, B)
+        if self.shared_features is None:
+            return bl, None
+        return bl, (self.shared_features * mask).T @ cy.sum(dim=0)  # (q_s, B)
+
+    def coefficients(self, block: slice | None = None) -> RidgeCoefficients:
+        """Compute fitted coefficients for the requested outputs.
+
+        Parameters
+        ----------
+        block : slice or None, default=None
+            Outputs to include; None selects all and caches the result.
+
+        Returns
+        -------
+        RidgeCoefficients
+            Category coefficients (G, k, B) and shared coefficients (q_s, B)
+            or None. Gradients can pass through the fit.
+        """
+        if block is None and self._full is not None:
+            return self._full
+        bl, bs = self._target_products(self.fit, slice(None) if block is None else block)
+        local = GramRidgeSolver.solve(self.kll, bl, self.total, self.local_reg)
+        result = RidgeCoefficients(local)
+        if self.shared_features is not None:
+            rows = local.shape[0] * local.shape[1]
+            kls = self.kls.reshape(rows, -1)  # sums over categories as one matmul
+            lhs = self.kss - kls.T @ self.coupling.reshape(rows, -1)
+            rhs = bs - kls.T @ local.reshape(rows, -1)
+            shared = GramRidgeSolver.solve(lhs, rhs, self.total, self.shared_reg)
+            result = RidgeCoefficients(local - self.coupling @ shared, shared)
+        if block is None:
+            self._full = result
+        return result
+
+    def penalty(self) -> torch.Tensor:
+        """Return the fitted ridge penalty averaged over outputs.
+
+        Returns
+        -------
+        torch.Tensor of shape ()
+            N * sum_k reg_k * ||coef_k||^2 / J, where k indexes coefficient
+            rows. Matches ``GramRidgeSolver.penalty``.
+        """
+        local, shared = self.coefficients()
+        reg = torch.as_tensor(self.local_reg, dtype=local.dtype, device=local.device)
+        value = (reg.reshape(-1, 1) * local.square()).sum()
+        if shared is not None:
+            value = value + (self.shared_reg[:, None] * shared.square()).sum()
+        return self.total * value / local.shape[-1]
+
+    def prediction_sse(self, scored: torch.Tensor | None = None) -> torch.Tensor:
+        """Return the weighted squared error on the scored environments.
+
+        Parameters
+        ----------
+        scored : torch.Tensor of shape (D,) or None, default=None
+            Boolean mask of environments to score; None scores all.
+
+        Returns
+        -------
+        torch.Tensor of shape ()
+            Count-weighted sum of squared errors, averaged over outputs.
+            Excludes the ridge penalty.
+        """
+        if scored is None:
+            scored = torch.ones(self.data.c.shape[1], dtype=torch.bool, device=self.data.c.device)
+        local, shared = self.coefficients()
+        hll, hls, hss = self._grams(self.data.c * scored)  # never penalised
+        ml, ms = self._target_products(scored, slice(None))
+        cross = (local * ml).sum()
+        quadratic = (local * (hll @ local)).sum()
+        if shared is not None:
+            cross = cross + (shared * ms).sum()
+            quadratic = quadratic + 2 * (local * (hls @ shared)).sum()
+            quadratic = quadratic + (shared * (hss @ shared)).sum()
+        return self.data.cyy[scored].sum() + (quadratic - 2 * cross) / local.shape[-1]
+
+
+class NeuralRidgeSolver:
+    """Entry point that picks the ridge solver for the data's shape.
+
+    Models call these methods instead of a solver class. Each forwards to
+    ``GramRidgeSolver`` when D <= J and to ``DirectRidgeSolver`` when D > J,
+    where D counts environments and J outputs. The Gram solver keeps memory
+    low when outputs are many; the direct solver when environments are many.
+
+    Examples
+    --------
+    >>> from genetic_perturbation_playground.utils.ridge import NeuralRidgeSolver
+    >>> NeuralRidgeSolver.uses_gram(n_envs=96, n_outputs=384)
+    True
+    >>> NeuralRidgeSolver.uses_gram(n_envs=1584, n_outputs=384)
+    False
+    """
+
+    @staticmethod
+    def uses_gram(n_envs: int, n_outputs: int) -> bool:
+        """Return whether to use the Gram solver.
+
+        Parameters
+        ----------
+        n_envs : int
+            Number of environments, D.
+        n_outputs : int
+            Number of outputs, J.
+
+        Returns
+        -------
+        bool
+            True when D <= J, so each category's target products (D, D) are
+            no larger than its targets (D, J).
+        """
+        return n_envs <= n_outputs
+
+    @classmethod
+    def solver_type(cls, data: GroupedRidgeData) -> type:
+        """Return the solver class for these data.
+
+        Parameters
+        ----------
+        data : GroupedRidgeData
+            Counts and target sums; D and J come from ``c`` and ``cy``.
+
+        Returns
+        -------
+        type
+            ``GramRidgeSolver`` when D <= J, otherwise ``DirectRidgeSolver``.
+        """
+        if cls.uses_gram(data.c.shape[1], data.cy.shape[-1]):
+            return GramRidgeSolver
+        return DirectRidgeSolver
+
+    @classmethod
+    def per_category(cls, data: GroupedRidgeData, features, fit=None, *, reg):
+        """Fit per-category coefficients with the chosen solver.
+
+        Arguments and return value are those of ``GramRidgeSolver.per_category``.
+        """
+        return cls.solver_type(data).per_category(data, features, fit, reg=reg)
+
+    @classmethod
+    def shared_deviation(
+        cls, data: GroupedRidgeData, embeddings, fit=None, *, reg, deviation_reg, shared_reg
+    ):
+        """Fit shared effects and deviations with the chosen solver.
+
+        Arguments and return value are those of
+        ``GramRidgeSolver.shared_deviation``.
+        """
+        return cls.solver_type(data).shared_deviation(
+            data, embeddings, fit, reg=reg, deviation_reg=deviation_reg, shared_reg=shared_reg
+        )
+
+    @staticmethod
+    def batched_shared_sse(data: GroupedRidgeData, terms) -> torch.Tensor:
+        """Sum shared-model split errors with ``GramRidgeSolver.batched_shared_sse``.
+
+        Only the Gram path batches splits; the direct path checkpoints each
+        fold instead.
+        """
+        return GramRidgeSolver.batched_shared_sse(data, terms)

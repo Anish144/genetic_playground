@@ -10,15 +10,15 @@ from genetic_perturbation_playground.model.proxy_unconfounded_neural import (
     NeuralPerXEmbeddingBridge,
     NeuralSharedEmbeddingBridge,
 )
-from genetic_perturbation_playground.utils.ridge import NeuralRidgeSolver
+from genetic_perturbation_playground.utils.ridge import GramRidgeSolver
 
 
-def _environments():
+def _environments(n_outputs=5):
     """Unequal counts, duplicate responses, missing categories, and one empty environment."""
     rng = np.random.default_rng(819)
     categories = [[0, 1, 1, 2], [1, 2], [], [1, 2], [1, 2]]
     xs = [np.eye(4)[indices] for indices in categories]  # category 3 is never observed
-    ys = [rng.normal(size=(len(indices), 5)) for indices in categories]
+    ys = [rng.normal(size=(len(indices), n_outputs)) for indices in categories]
     ws = [rng.normal(size=(7 + e, 5)) for e in range(len(categories))]
     counts = [rng.integers(1, 7, size=len(indices)) for indices in categories]
     return xs, ys, ws, counts
@@ -44,7 +44,7 @@ def test_all_neural_variants_use_the_neural_ridge_solver(model_type):
     xs, ys, ws, counts = _environments()
     model = model_type(n_steps=0, n_features_w=3).fit(xs, ys, ws, counts)
     data = model._to_tensors(xs, ys, ws, counts)
-    assert type(model._ridge_solver(data, model._embed(data.w_envs))) is NeuralRidgeSolver
+    assert type(model._ridge_solver(data, model._embed(data.w_envs))) is GramRidgeSolver
 
 
 @pytest.mark.parametrize(
@@ -96,8 +96,11 @@ def _width(model, d_w=5):
 
 @pytest.mark.parametrize("linear_reg", [None, 0.002, float("inf")])
 @pytest.mark.parametrize("weighted", [False, True])
-def test_solver_coefficients_loss_and_embedding_gradients_match_full_design(linear_reg, weighted):
-    xs, ys, ws, counts = _environments()
+@pytest.mark.parametrize("n_outputs", [3, 8])  # D = 5: direct path, then Gram path
+def test_solver_coefficients_loss_and_embedding_gradients_match_full_design(
+    linear_reg, weighted, n_outputs
+):
+    xs, ys, ws, counts = _environments(n_outputs)
     counts = counts if weighted else None
     model = _model(linear_reg)
     data = model._to_tensors(xs, ys, ws, counts)
@@ -120,10 +123,11 @@ def test_solver_coefficients_loss_and_embedding_gradients_match_full_design(line
 
 @pytest.mark.parametrize("linear_reg", [None, 0.002, float("inf")])
 @pytest.mark.parametrize("fold_count", [0, 2, 5])
+@pytest.mark.parametrize("n_outputs", [3, 8])  # D = 5: direct path, then Gram path
 def test_training_loss_and_both_network_gradients_match_full_design(
-    monkeypatch, linear_reg, fold_count
+    monkeypatch, linear_reg, fold_count, n_outputs
 ):
-    xs, ys, ws, counts = _environments()
+    xs, ys, ws, counts = _environments(n_outputs)
     model = _model(linear_reg, cross_fit_folds=fold_count, n_features_w=6)
     data = model._to_tensors(xs, ys, ws, counts)
     pairs = pair_data(xs, ys, ws, counts, device=model.device)

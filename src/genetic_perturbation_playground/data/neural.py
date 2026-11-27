@@ -25,11 +25,12 @@ class GroupedRidgeData(NamedTuple):
     cyy : torch.Tensor of shape (D,)
         Sum of count * squared target, divided by J, for each environment.
         Square each row's targets before adding rows from the same pair.
-    target_gram : torch.Tensor of shape (G, D, D)
-        Q[x] = cy[x] @ cy[x].T / J for each category x.
     w_envs : list of torch.Tensor or None
         Control samples; entry e has shape (m_e, d_w). Neural bridges need
         these samples to learn features. A standalone ridge fit may omit them.
+    target_gram : torch.Tensor of shape (G, D, D) or None
+        Q[x] = cy[x] @ cy[x].T / J for each category x. Built only when
+        D <= J, where the Gram solver uses it; None for the direct solver.
 
     Examples
     --------
@@ -53,5 +54,5 @@ class GroupedRidgeData(NamedTuple):
     c: torch.Tensor
     cy: torch.Tensor
     cyy: torch.Tensor
-    target_gram: torch.Tensor
     w_envs: list[torch.Tensor] | None = None
+    target_gram: torch.Tensor | None = None

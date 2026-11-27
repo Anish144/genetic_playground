@@ -358,23 +358,24 @@ def test_per_x_coefficients_and_loss_match_dense_ridge(gene_block_size):
 @pytest.mark.parametrize("cross_fit_folds", [0, 2, 4])
 @pytest.mark.parametrize("weighted", [False, True])
 @pytest.mark.parametrize("n_cats, n_features_w", [(3, 2), (3, 6), (4, 4)])
-def test_per_x_target_gram_loss_and_gradients_match_dense_ridge(
-    monkeypatch, cross_fit_folds, weighted, n_cats, n_features_w
+@pytest.mark.parametrize("n_outputs", [3, 7])  # D = 4: direct path, then Gram path
+def test_per_x_loss_and_gradients_match_dense_ridge(
+    monkeypatch, cross_fit_folds, weighted, n_cats, n_features_w, n_outputs
 ):
     """Compare against explicit pair predictions, including a rank-deficient feature Gram.
 
-    G=n_cats categories, D=4 environments, J=7 genes, q=n_features_w features. Category 0
+    G=n_cats categories, D=4 environments, J=n_outputs genes, q=n_features_w features. Category 0
     occurs only in environment 0, so some folds have no training data for that category.
     Environment 2 has proxies but no pairs. Category 1 has two DIFFERENT targets in
     environment 0, testing cyy's within-group error. G=q=D=4 checks matrix-RHS disambiguation.
     """
     rng = np.random.default_rng(12)
-    xs, ys, ws, counts = _categorical_envs(rng, n_cats=n_cats, d_y=7)
+    xs, ys, ws, counts = _categorical_envs(rng, n_cats=n_cats, d_y=n_outputs)
     for e in [1, 2]:
         xs[e], ys[e], counts[e] = xs[e][1:], ys[e][1:], counts[e][1:]
     xs[2], ys[2], counts[2] = xs[2][:0], ys[2][:0], counts[2][:0]
     xs[0] = np.concatenate([xs[0], xs[0][[1]]])
-    ys[0] = np.concatenate([ys[0], rng.normal(size=(1, 7))])
+    ys[0] = np.concatenate([ys[0], rng.normal(size=(1, n_outputs))])
     counts[0] = np.append(counts[0], 5)
     if not weighted:
         counts = None
@@ -389,13 +390,16 @@ def test_per_x_target_gram_loss_and_gradients_match_dense_ridge(
     fold = torch.arange(4) % max(cross_fit_folds, 1)  # (D,)
     monkeypatch.setattr(bridge, "_env_folds", lambda _: fold)
 
-    assert data.cy.shape == (n_cats, 4, 7)  # Z (G, D, J), needed only for prediction
-    assert all(
-        t.device == mu.device for t in (data.c, data.cy, data.cyy, data.target_gram, *data.w_envs)
-    )
-    assert data.target_gram.shape == (n_cats, 4, 4)  # Q (G, D, D), sufficient for training
-    # Removing the gene targets must not affect training, including checkpoint recomputation.
-    compressed = bridge._training_loss(data._replace(cy=torch.empty(0)))
+    assert data.cy.shape == (n_cats, 4, n_outputs)  # (G, D, J) on both paths
+    assert all(t.device == mu.device for t in (data.c, data.cy, data.cyy, *data.w_envs))
+    if data.target_gram is None:  # direct path: training reads cy
+        compressed = bridge._training_loss(data)
+    else:
+        assert data.target_gram.device == mu.device
+        assert data.target_gram.shape == (n_cats, 4, 4)  # Q (G, D, D), sufficient for training
+        # Removing the gene targets must not affect training, including checkpoint
+        # recomputation. Keep J so the facade still picks the Gram path.
+        compressed = bridge._training_loss(data._replace(cy=data.cy.new_empty((0, 0, n_outputs))))
 
     pairs = pair_data(xs, ys, ws, counts, device=bridge.device)
     feats = _features(pairs.x, mu[pairs.env])  # (N, G*q), one feature row per observed pair
@@ -433,9 +437,8 @@ def test_per_x_cuda_training_and_block_reconstruction_stay_on_device():
         n_steps=2, n_features_w=6, cross_fit_folds=2, gene_block_size=3, device="cuda"
     ).fit(xs, ys, ws, counts)
     data = bridge._to_tensors(xs, ys, ws, counts)
-    assert all(
-        t.device.type == "cuda" for t in (data.c, data.cy, data.cyy, data.target_gram, *data.w_envs)
-    )
+    gram = [] if data.target_gram is None else [data.target_gram]
+    assert all(t.device.type == "cuda" for t in (data.c, data.cy, data.cyy, *gram, *data.w_envs))
     assert bridge.A_.device.type == "cuda"
     with torch.no_grad():
         sse, dense_A = _dense_fit(bridge, xs, ys, ws, counts)

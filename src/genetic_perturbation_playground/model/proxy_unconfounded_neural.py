@@ -54,7 +54,7 @@ from tqdm import trange
 from genetic_perturbation_playground.config import HybridConfig, PerXConfig, Shared2NNConfig
 from genetic_perturbation_playground.data.neural import GroupedRidgeData
 from genetic_perturbation_playground.utils.neural import as_tensor, checkpointed_sse, control_mlp
-from genetic_perturbation_playground.utils.ridge import NeuralRidgeSolver
+from genetic_perturbation_playground.utils.ridge import GramRidgeSolver, NeuralRidgeSolver
 
 
 @dataclass(eq=False)
@@ -313,7 +313,9 @@ class NeuralPerXEmbeddingBridge:
             c[:, e].index_add_(0, cat, count)
             cy[:, e].index_add_(0, cat, count[:, None] * y)
             cyy[e] = (count * y.square().mean(dim=1)).sum()
-        target_gram = (cy @ cy.transpose(1, 2)) / n_genes  # (G, D, D)
+        target_gram = None  # (G, D, D); only the Gram solver (D <= J) reads it
+        if NeuralRidgeSolver.uses_gram(n_envs, n_genes):
+            target_gram = (cy @ cy.transpose(1, 2)) / n_genes
         return GroupedRidgeData(
             c=c,
             cy=cy,
@@ -550,11 +552,16 @@ class NeuralSharedEmbeddingBridge(NeuralPerXEmbeddingBridge):
         )
 
     def _cross_fit_sse(self, data: GroupedRidgeData, embeddings, folds) -> torch.Tensor:
-        """Sum held-out fold errors with one combined target projection.
+        """Sum held-out fold errors.
 
-        The combined projection reads cy once. Hybrid shared features include
-        r projected control coordinates, so the shared matrices have width q + r.
+        The Gram path (D <= J) combines the folds' target projections so it
+        reads cy once. The direct path (D > J) fits each fold separately and
+        recomputes it during backpropagation, holding one fold's arrays at a
+        time. Hybrid shared features include r projected control coordinates,
+        so the shared matrices have width q + r.
         """
+        if NeuralRidgeSolver.solver_type(data) is not GramRidgeSolver:
+            return super()._cross_fit_sse(data, embeddings, folds)  # checkpointed per fold
         terms = [
             self._ridge_solver(data, embeddings, folds != k).shared_loss_terms(folds == k)
             for k in range(int(folds.max()) + 1)
